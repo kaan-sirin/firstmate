@@ -528,12 +528,46 @@ fast_repair_progress_tick() {
     printf '%s' "$result" > "$marker"
     touch "$STATE/.last-fast-repair-progress"
     if [ -n "${FM_FAST_REPAIR_TIMER_PARENT:-}" ]; then
-      printf '%s' "$result" > "$STATE/.fast-repair-progress-wake"
+      fast_repair_progress_timer_publish "$result"
       return 0
     fi
     wake "check: $result"
   done
   touch "$STATE/.last-fast-repair-progress"
+}
+
+fast_repair_progress_timer_deliver() {
+  local result=$1 parent=${FM_FAST_REPAIR_TIMER_PARENT:-}
+  [ -n "$parent" ] || return 1
+  [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || return 1
+  wake "check: $result"
+}
+
+fast_repair_progress_timer_publish() {
+  local result=$1 lock=${FM_FAST_REPAIR_TIMER_HANDOFF_LOCK:-}
+  local closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} wake_file="$STATE/.fast-repair-progress-wake"
+  [ -n "$lock" ] && [ -n "$closing" ] || {
+    printf '%s' "$result" > "$wake_file"
+    return 0
+  }
+  fm_lock_acquire_wait "$lock"
+  if [ -f "$closing" ]; then
+    fm_lock_release "$lock"
+    fast_repair_progress_timer_deliver "$result"
+    return
+  fi
+  printf '%s' "$result" > "$wake_file"
+  fm_lock_release "$lock"
+  [ -f "$closing" ] || return 0
+  if fm_lock_try_acquire "$lock"; then
+    if [ -f "$wake_file" ]; then
+      rm -f "$wake_file"
+      fm_lock_release "$lock"
+      fast_repair_progress_timer_deliver "$result"
+      return
+    fi
+    fm_lock_release "$lock"
+  fi
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -700,22 +734,28 @@ heartbeat_scan_finds_actionable() {
 }
 
 fast_repair_progress_timer_start() {
-  local marker remaining parent
+  local marker remaining parent closing lock
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
-  rm -f "$STATE"/.fast-repair-progress-timer.*
   marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
+  closing="$marker.closing"
+  lock="$marker.handoff.lock"
   FAST_REPAIR_TIMER_MARKER=$marker
+  FAST_REPAIR_TIMER_HANDOFF_LOCK=
   parent=$WATCHER_PID
   (
-    trap - EXIT HUP INT TERM
+    trap 'rm -f "$closing"' EXIT
+    trap 'exit 0' HUP INT TERM
     while [ -f "$marker" ]; do
       remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
       [ "$remaining" -ge 1 ] || remaining=1
       sleep $((remaining + 1))
       [ -f "$marker" ] || exit 0
       [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
-      FM_FAST_REPAIR_TIMER_PARENT=1 fast_repair_progress_tick
+      FM_FAST_REPAIR_TIMER_PARENT="$parent" \
+        FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
+        FM_FAST_REPAIR_TIMER_HANDOFF_LOCK="$lock" \
+        fast_repair_progress_tick
       [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
     done
   ) &
@@ -723,16 +763,26 @@ fast_repair_progress_timer_start() {
 }
 
 fast_repair_progress_timer_finish() {
-  [ -n "${FAST_REPAIR_TIMER_MARKER:-}" ] || return 0
-  rm -f "$FAST_REPAIR_TIMER_MARKER"
+  local marker=${FAST_REPAIR_TIMER_MARKER:-}
+  [ -n "$marker" ] || return 0
+  : > "$marker.closing" || return 0
+  rm -f "$marker"
+  FAST_REPAIR_TIMER_HANDOFF_LOCK="$marker.handoff.lock"
   FAST_REPAIR_TIMER_MARKER=
 }
 
 fast_repair_progress_timer_wake() {
-  local result
-  [ -f "$STATE/.fast-repair-progress-wake" ] || return 0
-  result=$(cat "$STATE/.fast-repair-progress-wake" 2>/dev/null || true)
-  rm -f "$STATE/.fast-repair-progress-wake"
+  local result lock=${FAST_REPAIR_TIMER_HANDOFF_LOCK:-} wake_file="$STATE/.fast-repair-progress-wake"
+  if [ -n "$lock" ]; then
+    fm_lock_try_acquire "$lock" || return 0
+  fi
+  [ -f "$wake_file" ] || {
+    [ -z "$lock" ] || fm_lock_release "$lock"
+    return 0
+  }
+  result=$(cat "$wake_file" 2>/dev/null || true)
+  rm -f "$wake_file" || result=
+  [ -z "$lock" ] || fm_lock_release "$lock"
   [ -n "$result" ] || return 0
   wake "check: $result"
 }
