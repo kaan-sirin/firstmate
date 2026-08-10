@@ -56,6 +56,17 @@ regular_file() {
   [ -f "$1" ] && [ ! -L "$1" ]
 }
 
+# Evidence logs and records are private to this home. The umask is scoped to the
+# creation itself so it never reaches the caller-supplied test commands, whose
+# own output files must keep the permissions their build or suite intends.
+private_truncate() { # <path>
+  ( umask 077; : > "$1" ) && chmod 600 "$1"
+}
+
+private_write() { # <path>, content on stdin
+  ( umask 077; cat > "$1" ) && chmod 600 "$1"
+}
+
 field_get() { # <file> <field>
   sed -n "s/^$2=//p" "$1" | head -n 1
 }
@@ -301,14 +312,13 @@ case "$command" in
     mkdir -p "$STATE"
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
-    umask 077
-    if bash -lc "$regression" >"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && bash -lc "$focused" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    private_truncate "$log" || fail "the evidence log could not be created"
+    if bash -c "$regression" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
+    if [ "$regression_result" = passed ] && bash -c "$focused" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'focused=%s\n' "$focused_result"
-    } > "$record"
-    chmod 600 "$record"
+    } | private_write "$record" || fail "the evidence record could not be written"
     mv -f "$record" "$(tests_file "$id")"
     tests_passed "$id" || fail "regression or focused-module evidence failed; PR publication remains blocked"
     printf 'fast-repair focused evidence passed: %s\n' "$id"
@@ -362,10 +372,10 @@ case "$command" in
     [ -n "$broader_command" ] || fail "broader command is empty"
     log="$STATE/$id.fast-repair-broader.log"
     record="$STATE/.$id.fast-repair-broader.$$"
-    umask 077
-    if bash -lc "$broader_command" >"$log" 2>&1; then result=passed; else result=failed; fi
-    printf 'broader=%s\n' "$result" > "$record"
-    chmod 600 "$record"
+    private_truncate "$log" || fail "the broader-test log could not be created"
+    if bash -c "$broader_command" >>"$log" 2>&1; then result=passed; else result=failed; fi
+    printf 'broader=%s\n' "$result" | private_write "$record" \
+      || fail "the broader-test record could not be written"
     mv -f "$record" "$STATE/$id.fast-repair-broader"
     [ "$result" = passed ] || fail "broader tests failed after PR publication; inspect $log and report the open PR as not green"
     printf 'fast-repair broader tests passed: %s\n' "$id"

@@ -467,6 +467,14 @@ scan_signals() {
 
 FAST_REPAIR_ACTIVE=0
 
+# The one place that decides whether durable task metadata opts a task into Fast
+# Repair. One tick collects the eligible ids with it once and reuses that list
+# for both the activity flag and the work.
+fast_repair_eligible_meta() {  # <meta-path>
+  grep -qx 'mode=fast-repair' "$1" 2>/dev/null || return 1
+  grep -qx 'fast_repair=eligible' "$1" 2>/dev/null
+}
+
 # Fast Repair has a short, task-scoped progress cadence for broader-test and PR
 # check results. It is inert, byte-for-byte, when no durable task metadata says
 # mode=fast-repair and fast_repair=eligible. It does not change the normal signal,
@@ -482,22 +490,20 @@ FAST_REPAIR_ACTIVE=0
 # forge call can neither stall the beat, the signal scan, and the stale and
 # wedge detection of other crewmates, nor hold off a stop signal.
 fast_repair_progress_tick() {
-  local meta id result marker prior active=0
+  local meta id result marker prior
+  local ids=()
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
-    grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
-    grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
-    active=1
-    break
+    fast_repair_eligible_meta "$meta" || continue
+    ids+=("$(basename "$meta" .meta)")
   done
-  FAST_REPAIR_ACTIVE=$active
-  [ "$active" -eq 1 ] || return 0
+  if [ "${#ids[@]}" -eq 0 ]; then
+    FAST_REPAIR_ACTIVE=0
+    return 0
+  fi
+  FAST_REPAIR_ACTIVE=1
   [ "$(age_of "$STATE/.last-fast-repair-progress")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || return 0
-  for meta in "$STATE"/*.meta; do
-    [ -e "$meta" ] || continue
-    grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
-    grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
-    id=$(basename "$meta" .meta)
+  for id in "${ids[@]}"; do
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
     result=$FM_CHECK_RESULT
