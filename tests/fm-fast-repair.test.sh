@@ -70,9 +70,15 @@ case "${1:-}" in
     ;;
 esac
 SH
-  cat > "$fakebin/gh" <<'SH'
+  cat > "$fakebin/gh" <<EOF
 #!/usr/bin/env bash
-exit 1
+FAKE_HOME='$home'
+EOF
+  cat >> "$fakebin/gh" <<'SH'
+case "${1:-} ${2:-}" in
+  "pr view") cat "$FAKE_HOME/pr-head" ;;
+  *) exit 1 ;;
+esac
 SH
   chmod +x "$fakebin/gh-axi" "$fakebin/gh"
 }
@@ -90,7 +96,10 @@ write_fast_meta() {
   {
     printf 'window=firstmate:fm-%s\n' "$id"
     printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nworktree=%s\n' "$home"
-    [ -z "$pr" ] || printf 'pr=%s\n' "$pr"
+    if [ -n "$pr" ]; then
+      printf 'pr=%s\n' "$pr"
+      printf 'pr_head=%s\n' "$(git -C "$home" rev-parse HEAD)"
+    fi
   } > "$home/state/$id.meta"
 }
 
@@ -224,6 +233,7 @@ test_evidence_and_ready_gates() {
   run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "updated task HEAD evidence was rejected"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
+  printf '%040d\n' 0 > "$home/pr-head"
   # The real green rollup omits the pending segment when nothing is pending.
   set_rollup "$home" '4 passed, 0 failed, 4 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md" --head unrelated)
@@ -231,6 +241,11 @@ test_evidence_and_ready_gates() {
   [ "$status" -ne 0 ] || fail "Fast Repair published an untested head branch"
   assert_contains "$out" '--head must equal the tested task branch' "untested head refusal was not actionable"
   assert_no_grep 'pr=' "$home/state/$id.meta" "untested head publication wrote a PR record"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair accepted a PR with an untested remote head"
+  assert_contains "$out" 'registered PR head does not match' "remote-head refusal was not actionable"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
   assert_contains "$out" 'fast-repair PR opened: https://github.com/acme/repo/pull/42' "passing evidence did not open the direct PR"
   assert_grep 'pr=https://github.com/acme/repo/pull/42' "$home/state/$id.meta" "direct PR was not registered"
@@ -240,9 +255,22 @@ test_evidence_and_ready_gates() {
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null || fail "broader tests could not start after direct PR publication"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
+  printf '%040d\n' 0 > "$home/pr-head"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair accepted a PR whose remote head changed after publication"
+  assert_contains "$out" 'registered PR head does not match' "changed remote-head refusal was not actionable"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
   assert_contains "$out" 'pr-checks-green' "green PR checks were not available to the Fast Repair progress cadence"
   assert_grep '--repo acme/repo' "$home/gh-axi.args" "PR checks were not read from the registered PR's own repository"
+  git -C "$home" commit --quiet --allow-empty -m 'advance broader fixture'
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
+    || fail "updated focused evidence was rejected after a new commit"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair accepted broader evidence from an earlier commit"
+  assert_contains "$out" 'broader tests are not passed' "stale broader evidence was not refused"
   pass "Fast Repair blocks failed focused evidence and requires broader plus PR checks before ready"
 }
 
@@ -255,6 +283,7 @@ test_pr_check_rollup_states() {
   write_focused_test "$home"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
   run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
     || fail "focused evidence fixture was rejected"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
