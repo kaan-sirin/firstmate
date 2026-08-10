@@ -726,20 +726,39 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_fast_repair_requires_and_records_its_builtin_profile() {
-  local rec id conflict_id raw_id out status launch
+  local rec id conflict_id raw_id unknown_id nonancestor_id out status launch reproduction nonancestor
   id=fast-repair-profile-z20
   conflict_id=fast-repair-conflict-z21
   raw_id=fast-repair-raw-z22
-  rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id" "$raw_id")
+  unknown_id=fast-repair-unknown-z23
+  nonancestor_id=fast-repair-nonancestor-z24
+  rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id" "$raw_id" "$unknown_id" "$nonancestor_id")
   read_case_record "$rec"
+  git -C "$WT_DIR" commit --quiet --allow-empty -m 'repair fixture head'
+  reproduction=$(git -C "$WT_DIR" rev-parse HEAD~1)
+  git -C "$PROJ_DIR" commit --quiet --allow-empty -m 'unrelated fixture revision'
+  nonancestor=$(git -C "$PROJ_DIR" rev-parse HEAD)
   for task in "$id" "$conflict_id" "$raw_id"; do
     printf 'Delivery contract: mode=fast-repair\n' > "$HOME_DIR/data/$task/brief.md"
     FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       "$FAST_REPAIR" intake "$task" --request 'fast-repair: fixture' \
-      --reproduction reproduced --reproduction-revision 0000000000000000000000000000000000000000 --root-cause confirmed --isolation isolated \
+      --reproduction reproduced --reproduction-revision "$reproduction" --root-cause confirmed --isolation isolated \
       --schema none --authentication none --authorization none --secrets none \
       --financial none --legal none --side-effects none >/dev/null
   done
+  for task in "$unknown_id" "$nonancestor_id"; do
+    printf 'Delivery contract: mode=fast-repair\n' > "$HOME_DIR/data/$task/brief.md"
+  done
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    "$FAST_REPAIR" intake "$unknown_id" --request 'fast-repair: fixture' \
+    --reproduction reproduced --reproduction-revision 0000000000000000000000000000000000000000 --root-cause confirmed --isolation isolated \
+    --schema none --authentication none --authorization none --secrets none \
+    --financial none --legal none --side-effects none >/dev/null
+  FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+    "$FAST_REPAIR" intake "$nonancestor_id" --request 'fast-repair: fixture' \
+    --reproduction reproduced --reproduction-revision "$nonancestor" --root-cause confirmed --isolation isolated \
+    --schema none --authentication none --authorization none --secrets none \
+    --financial none --legal none --side-effects none >/dev/null
 
   out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
     --mode fast-repair --yolo off --harness codex --model gpt-5.6-luna --effort medium)
@@ -766,6 +785,14 @@ test_fast_repair_requires_and_records_its_builtin_profile() {
   [ "$status" -ne 0 ] || fail "Fast Repair accepted a raw launch command with a different actual profile"
   assert_contains "$out" "requires the built-in profile" "raw Fast Repair profile refusal was not actionable"
   assert_absent "$HOME_DIR/state/$raw_id.meta" "raw Fast Repair profile wrote metadata"
+  for task in "$unknown_id" "$nonancestor_id"; do
+    out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$task" "$PROJ_DIR" \
+      --mode fast-repair --yolo off --harness codex --model gpt-5.6-luna --effort medium)
+    status=$?
+    [ "$status" -ne 0 ] || fail "Fast Repair dispatched an unproven reproduction revision: $task"
+    assert_contains "$out" 'reproduction revision is not proven' "unproven reproduction refusal was not actionable: $task"
+    assert_absent "$HOME_DIR/state/$task.meta" "unproven Fast Repair reproduction wrote metadata: $task"
+  done
   pass "Fast Repair enforces Codex Luna medium without changing ordinary dispatch profiles"
 }
 

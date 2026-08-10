@@ -6,7 +6,7 @@
 #     --reproduction reproduced --reproduction-revision <commit> --root-cause confirmed --isolation isolated \
 #     --schema none --authentication none --authorization none --secrets none \
 #     --financial none --legal none --side-effects none
-#   fm-fast-repair.sh eligible <task-id>
+#   fm-fast-repair.sh eligible <task-id> [--worktree <path>]
 #   fm-fast-repair.sh evidence <task-id> --regression-test <runner-family> --focused-test <runner-family>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
 #   fm-fast-repair.sh broader <task-id> --command <command>
@@ -76,6 +76,16 @@ task_worktree_for() {
 
 task_revision_for() {
   task_worktree_for "$1" || return 1
+  task_revision_at_worktree "$TASK_WORKTREE"
+}
+
+task_revision_at_worktree() {
+  local worktree=$1 root
+  [ -d "$worktree" ] || return 1
+  root=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || return 1
+  root=$(cd "$root" && pwd -P) || return 1
+  [ "$root" = "$(cd "$worktree" && pwd -P)" ] || return 1
+  TASK_WORKTREE=$root
   TASK_BRANCH=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   TASK_HEAD=$(git -C "$TASK_WORKTREE" rev-parse --verify HEAD 2>/dev/null) || return 1
 }
@@ -149,11 +159,41 @@ reproduction_revision_for() {
   git -C "$TASK_WORKTREE" cat-file -e "$revision^{commit}" 2>/dev/null || return 1
   [ "$revision" != "$TASK_HEAD" ] || return 1
   git -C "$TASK_WORKTREE" merge-base --is-ancestor "$revision" "$TASK_HEAD" || return 1
-  git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$revision" "$TASK_HEAD" -- bin/fm-test-run.sh || return 1
   REPRODUCTION_REVISION=$revision
 }
 
-regression_test_valid() { runner_family_valid "$1"; }
+runner_selected_tests() { # <family>
+  "$TEST_RUNNER" --list --family "$1" 2>/dev/null
+}
+
+runner_selected_test_valid() { # <path>
+  local path=$1 parent resolved
+  case "$path" in tests/*.test.sh) ;; *) return 1 ;; esac
+  parent=$(dirname "$TASK_WORKTREE/$path")
+  resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  resolved="$resolved/$(basename "$path")"
+  [ "$resolved" = "$TASK_WORKTREE/$path" ] || return 1
+  regular_file "$resolved" || return 1
+  [ "$(git -C "$TASK_WORKTREE" cat-file -t "$TASK_HEAD:$path" 2>/dev/null || true)" = blob ] || return 1
+  git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$TASK_HEAD" -- ":(literal)$path" || return 1
+}
+
+regression_test_valid() { # <task-id> <family>
+  local id=$1 family=$2 selected path has_new=0
+  runner_family_valid "$family" || return 1
+  reproduction_revision_for "$id" || return 1
+  selected=$(runner_selected_tests "$family") || return 1
+  [ -n "$selected" ] || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || return 1
+    runner_selected_test_valid "$path" || return 1
+    git -C "$TASK_WORKTREE" cat-file -e "$REPRODUCTION_REVISION:$path" 2>/dev/null || has_new=1
+  done <<EOF
+$selected
+EOF
+  [ "$has_new" = 1 ]
+}
+
 focused_test_valid() { runner_family_valid "$1"; }
 
 run_typed_test() { # <worktree> <family> <pass|fail> <log>
@@ -180,20 +220,6 @@ run_typed_test() { # <worktree> <family> <pass|fail> <log>
   fi
   rm -f "$output"
   return 1
-}
-
-regression_proof_valid() { # <task-id> <family> <log>
-  local id=$1 family=$2 log=$3 sandbox
-  reproduction_revision_for "$id" || return 1
-  sandbox=$(mktemp -d "$STATE/.fast-repair-reproduction.XXXXXX") || return 1
-  rmdir "$sandbox" || return 1
-  if ! git clone --quiet --no-hardlinks "$TASK_WORKTREE" "$sandbox" \
-    || ! git -C "$sandbox" checkout --quiet --detach "$REPRODUCTION_REVISION" \
-    || ! run_typed_test "$sandbox" "$family" fail "$log"; then
-    rm -rf "$sandbox"
-    return 1
-  fi
-  rm -rf "$sandbox"
 }
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
@@ -249,9 +275,9 @@ tests_passed() {
   worktree=$(field_get "$f" worktree)
   branch=$(field_get "$f" branch)
   head=$(field_get "$f" head)
-  regression_test_valid "$regression_test" || return 1
-  focused_test_valid "$focused_test" || return 1
   reproduction_revision_for "$id" || return 1
+  regression_test_valid "$id" "$regression_test" || return 1
+  focused_test_valid "$focused_test" || return 1
   [ "$reproduction_revision" = "$REPRODUCTION_REVISION" ] || return 1
   [ "$worktree" = "$TASK_WORKTREE" ] || return 1
   [ "$branch" = "$TASK_BRANCH" ] || return 1
@@ -458,11 +484,24 @@ case "$command" in
     printf 'fast-repair eligible: %s\n' "$id"
     ;;
   eligible)
-    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    if ! task_id_valid "$1" || ! eligibility_valid "$1"; then
-      fail "eligibility evidence is absent, incomplete, or no longer valid for $1"
+    id=${1:-}
+    shift || true
+    task_id_valid "$id" || fail "task id is missing or invalid"
+    worktree=
+    if [ "$#" -gt 0 ]; then
+      [ "$#" -eq 2 ] && [ "$1" = --worktree ] || { usage >&2; exit 2; }
+      worktree=$2
     fi
-    printf 'fast-repair eligible: %s\n' "$1"
+    if ! eligibility_valid "$id"; then
+      fail "eligibility evidence is absent, incomplete, or no longer valid for $id"
+    fi
+    if [ -n "$worktree" ] && ! task_revision_at_worktree "$worktree"; then
+      fail "task $id has no safe git worktree for reproduction proof"
+    fi
+    if [ -n "$worktree" ] && ! reproduction_revision_for "$id"; then
+      fail "reproduction revision is unknown, current, or not an ancestor of the task head"
+    fi
+    printf 'fast-repair eligible: %s\n' "$id"
     ;;
   evidence)
     id=${1:-}
@@ -485,8 +524,10 @@ case "$command" in
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
-    regression_test_valid "$regression_test" \
-      || fail "regression-test must name a supported bin/fm-test-run.sh family"
+    reproduction_revision_for "$id" \
+      || fail "reproduction revision is unknown, current, or not an ancestor of the task head"
+    regression_test_valid "$id" "$regression_test" \
+      || fail "regression-test must name a supported runner family with a new tracked selector"
     focused_test_valid "$focused_test" \
       || fail "focused-test must name a supported bin/fm-test-run.sh family"
     [ "$regression_test" != "$focused_test" ] \
@@ -495,8 +536,7 @@ case "$command" in
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if run_typed_test "$TASK_WORKTREE" "$regression_test" pass "$log" \
-      && regression_proof_valid "$id" "$regression_test" "$log"; then regression_result=passed; else regression_result=failed; fi
+    if run_typed_test "$TASK_WORKTREE" "$regression_test" pass "$log"; then regression_result=passed; else regression_result=failed; fi
     if [ "$regression_result" = passed ] && run_typed_test "$TASK_WORKTREE" "$focused_test" pass "$log"; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"

@@ -48,12 +48,24 @@ commit_test_file() {
 
 write_regression_test() {
   local home=$1 code=${2:-0}
+  mkdir -p "$home/tests"
+  if ! git -C "$home" cat-file -e HEAD:tests/fixture-regression.test.sh 2>/dev/null; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/fixture-regression.test.sh"
+    chmod +x "$home/tests/fixture-regression.test.sh"
+    commit_test_file "$home" tests/fixture-regression.test.sh
+  fi
   if [ "$code" = 0 ]; then printf 'fixed\n' > "$home/fixture-regression-state"; else printf 'broken\n' > "$home/fixture-regression-state"; fi
   git -C "$home" diff --quiet -- fixture-regression-state || commit_test_file "$home" fixture-regression-state
 }
 
 write_focused_test() {
   local home=$1 code=${2:-0}
+  mkdir -p "$home/tests"
+  if ! git -C "$home" cat-file -e HEAD:tests/fixture-focused.test.sh 2>/dev/null; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/fixture-focused.test.sh"
+    chmod +x "$home/tests/fixture-focused.test.sh"
+    commit_test_file "$home" tests/fixture-focused.test.sh
+  fi
   if [ "$code" = 0 ]; then printf 'passed\n' > "$home/fixture-focused-state"; else printf 'failed\n' > "$home/fixture-focused-state"; fi
   git -C "$home" diff --quiet -- fixture-focused-state || commit_test_file "$home" fixture-focused-state
 }
@@ -63,6 +75,7 @@ write_test_runner() {
   mkdir -p "$home/bin"
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
     'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused; exit 0; fi' \
+    'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
     '[ "${1:-}" = --family ] && [ "$#" = 2 ] || exit 2' \
     'printf "FM_TEST_BEGIN fixture %s family=%s\n" "$2" "$2"' \
     'if case "$2" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
@@ -244,7 +257,7 @@ test_evidence_and_ready_gates() {
   out=$(run_fast "$home" evidence "$id" --regression-test pass --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a generic exit-zero script satisfied regression evidence"
-  assert_contains "$out" 'supported bin/fm-test-run.sh family' "the pass-script refusal did not require a runner-owned selector"
+  assert_contains "$out" 'supported runner family with a new tracked selector' "the pass-script refusal did not require a runner-owned selector"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/tests/fm-untracked-regression.test.sh"
   chmod +x "$home/tests/fm-untracked-regression.test.sh"
   out=$(run_fast "$home" evidence "$id" --regression-test tests/fm-untracked-regression.test.sh --focused-test "$FOCUSED_TEST")
@@ -348,6 +361,22 @@ test_evidence_and_ready_gates() {
   [ "$status" -ne 0 ] || fail "Fast Repair accepted broader evidence from an earlier commit"
   assert_contains "$out" 'broader tests are not passed' "stale broader evidence was not refused"
   pass "Fast Repair blocks failed focused evidence and requires broader plus PR checks before ready"
+}
+
+test_regression_selector_must_be_new_since_reproduction() {
+  local home id=old-selector out status
+  home=$(make_home old-selector)
+  intake "$home" "$id" >/dev/null
+  write_focused_test "$home"
+  write_regression_test "$home"
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  git -C "$home" commit --quiet --allow-empty -m 'repair head after selector'
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a regression selector already present at reproduction was accepted"
+  assert_contains "$out" 'new tracked selector' "an old regression selector did not state the Fast Repair contract"
+  pass "Fast Repair requires a runner-owned regression selector added after reproduction"
 }
 
 test_pr_check_rollup_states() {
@@ -557,5 +586,6 @@ test_brief_commands_reach_the_scaffolding_home
 test_evidence_commands_ignore_a_login_profile
 test_private_records_do_not_impose_their_umask_on_tests
 test_evidence_and_ready_gates
+test_regression_selector_must_be_new_since_reproduction
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"

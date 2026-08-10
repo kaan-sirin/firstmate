@@ -721,7 +721,7 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'exit 1' HUP INT TERM
+  trap 'fm_active_check_stop || true; exit 1' HUP INT TERM
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
@@ -779,7 +779,7 @@ fast_repair_progress_timer_start() {
   parent=$WATCHER_PID
   (
     trap 'rm -f "$closing"' EXIT
-    trap 'exit 0' HUP INT TERM
+    trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
     while [ -f "$marker" ]; do
       remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
       [ "$remaining" -ge 1 ] || remaining=1

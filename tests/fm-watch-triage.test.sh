@@ -1959,11 +1959,45 @@ test_fast_repair_timer_keeps_mixed_fleet_normal_polling() {
   pass "a Fast Repair timer leaves mixed-fleet normal polling unchanged"
 }
 
+test_fast_repair_timer_retirement_stops_active_check_group() {
+  local dir state check out
+  dir=$(make_case fast-repair-timer-retire); state="$dir/state"; check="$dir/check.sh"; out="$dir/result"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_TEST_CHECK_PID"
+trap '' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$check"
+  FM_STATE_OVERRIDE="$state" FM_TEST_CHECK_PID="$dir/check.pid" \
+    bash -c '
+      set -eu
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      FAST_REPAIR_ACTIVE=1
+      POLL=10
+      FAST_REPAIR_PROGRESS_INTERVAL=1
+      fast_repair_progress_tick() { run_check_capture "$2"; }
+      fast_repair_progress_timer_start
+      i=0
+      while [ ! -s "$3" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
+      [ -s "$3" ]
+      fast_repair_progress_timer_finish
+      pid=$(cat "$3")
+      ! kill -0 "$pid" 2>/dev/null
+    ' _ "$WATCH" "$check" "$dir/check.pid" > "$out" 2>&1 \
+    || fail "Fast Repair timer retirement left its active check group alive: $(cat "$out")"
+  pass "Fast Repair timer retirement stops its active Forge check group"
+}
+
 test_signal_reason_is_actionable_classifier
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
 test_fast_repair_cadence_runs_inside_a_long_ordinary_poll
 test_fast_repair_timer_keeps_mixed_fleet_normal_polling
+test_fast_repair_timer_retirement_stops_active_check_group
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
