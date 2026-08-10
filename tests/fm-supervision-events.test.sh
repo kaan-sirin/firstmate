@@ -24,6 +24,7 @@ export FM_ROOT_OVERRIDE="$ROOT"
 # ShellCheck context local while preserving its unchanged runtime source path.
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-watch.sh"
+FAST_REPAIR_PROGRESS_TICK_PRODUCTION=$(declare -f fast_repair_progress_tick)
 
 # Overrides: capture wake reasons and neutralize real sleeps (POLL is 15s).
 WAKE_LOG="$TMP/wakes"
@@ -35,6 +36,7 @@ reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.fast-repair-progress-wake \
+    "$STATE_DIR"/.fast-repair-progress-* "$STATE_DIR"/.last-fast-repair-progress* \
     "$STATE_DIR"/.fast-repair-progress-handoff-* \
     "$STATE_DIR"/.fast-repair-progress-timer.* \
     "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled "$TMP"/fast-repair-transition-complete \
@@ -179,6 +181,7 @@ wait "$FAST_REPAIR_TIMER_PID" 2>/dev/null || true
 [ "$(wc -l < "$TMP/fast-repair-timer-ticks" | tr -d '[:space:]')" -ge 2 ] \
   || fail "a long Fast Repair wait did not repeat its progress timer"
 pass "fast_repair_progress_timer_start: Fast Repair repeats progress ticks during a long wait"
+eval "$FAST_REPAIR_PROGRESS_TICK_PRODUCTION"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
@@ -230,6 +233,9 @@ fast_repair_progress_timer_start() {
       FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
       FM_FAST_REPAIR_TIMER_GENERATION="$generation" \
       fast_repair_progress_timer_publish tk7 'fast-repair tk7 pr-checks-failed'
+    FM_FAST_REPAIR_TIMER_PARENT="$parent" \
+      FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
+      fast_repair_progress_timer_notify
   ) &
   FAST_REPAIR_TIMER_PID=$!
 }
@@ -258,20 +264,75 @@ FAST_REPAIR_TIMER_GENERATION=2
 : > "$STATE_DIR/current.closing"
 : > "$STATE_DIR/stale.closing"
 FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
-  FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/current.closing" \
-  FM_FAST_REPAIR_TIMER_GENERATION=2 \
+FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/current.closing" \
+FM_FAST_REPAIR_TIMER_GENERATION=2 \
   fast_repair_progress_timer_publish tk8 'fast-repair tk8 pr-checks-green'
-command sleep 0.05
+fast_repair_progress_timer_wake
 FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
-  FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/stale.closing" \
-  FM_FAST_REPAIR_TIMER_GENERATION=1 \
+FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/stale.closing" \
+FM_FAST_REPAIR_TIMER_GENERATION=1 \
   fast_repair_progress_timer_publish tk8 'fast-repair tk8 pr-checks-failed'
-command sleep 0.05
+fast_repair_progress_timer_wake
 grep -q 'check: fast-repair tk8 pr-checks-green' "$WAKE_LOG" \
   || fail "the newest Fast Repair result was not delivered"
 if grep -q 'check: fast-repair tk8 pr-checks-failed' "$WAKE_LOG"; then
   fail "an older Fast Repair timer result published after a newer result"
 fi
 pass "fast_repair_progress_timer_wake: stale timer results cannot publish"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk9a.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+fm_write_meta "$STATE_DIR/tk9b.meta" "window=default:wG:pR" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+WATCHER_PID=${BASHPID:-$$}
+FAST_REPAIR_TIMER_GENERATION=3
+run_check_capture() {
+  case "${!#}" in
+    tk9a) FM_CHECK_RESULT='fast-repair tk9a pr-checks-green' ;;
+    tk9b) FM_CHECK_RESULT='fast-repair tk9b broader-tests-failed' ;;
+    *) fail "unexpected Fast Repair progress task: ${!#}" ;;
+  esac
+}
+FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
+  FM_FAST_REPAIR_TIMER_GENERATION=3 \
+  fast_repair_progress_tick
+fast_repair_progress_timer_wake
+grep -q 'fast-repair:tk9a' "$STATE_DIR/.wake-queue" \
+  || fail "the first Fast Repair task was not queued"
+grep -q 'fast-repair:tk9b' "$STATE_DIR/.wake-queue" \
+  || fail "a later Fast Repair task was starved by the first task"
+pass "fast_repair_progress_tick: one timer generation queues every eligible task"
+
+reset_state
+WATCHER_PID=${BASHPID:-$$}
+FAST_REPAIR_TIMER_GENERATION=5
+FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
+  FM_FAST_REPAIR_TIMER_GENERATION=4 \
+  fast_repair_progress_timer_publish tk10 'fast-repair tk10 pr-checks-failed'
+fast_repair_progress_timer_wake
+grep -q 'fast-repair:tk10' "$STATE_DIR/.wake-queue" \
+  || fail "a late prior-generation handoff was not delivered"
+pass "fast_repair_progress_timer_wake: late prior-generation handoffs remain deliverable"
+
+reset_state
+WATCHER_PID=${BASHPID:-$$}
+FAST_REPAIR_TIMER_GENERATION=6
+FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
+  FM_FAST_REPAIR_TIMER_GENERATION=6 \
+  fast_repair_progress_timer_publish tk11 'fast-repair tk11 pr-checks-failed'
+APPEND_ATTEMPTS=0
+fm_wake_append() {
+  APPEND_ATTEMPTS=$((APPEND_ATTEMPTS + 1))
+  [ "$APPEND_ATTEMPTS" -gt 1 ] || return 1
+  printf 'retry\t%s\t%s\n' "$2" "$3" >> "$STATE_DIR/.wake-queue"
+}
+fast_repair_progress_timer_wake
+compgen -G "$STATE_DIR/.fast-repair-progress-handoff-$WATCHER_PID-6-tk11" >/dev/null \
+  || fail "a failed durable append discarded its Fast Repair handoff"
+fast_repair_progress_timer_wake
+[ ! -e "$STATE_DIR/.fast-repair-progress-handoff-$WATCHER_PID-6-tk11" ] \
+  || fail "a successfully queued Fast Repair handoff was not retired"
+grep -q 'fast-repair:tk11' "$STATE_DIR/.wake-queue" \
+  || fail "a retained Fast Repair handoff did not retry its append"
+pass "fast_repair_progress_timer_wake: append failure retains the handoff for retry"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
