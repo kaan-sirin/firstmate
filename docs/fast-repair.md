@@ -52,9 +52,11 @@ A raw launch command also refuses because it cannot prove that canonical profile
 The task always has `yolo=off`, so captain approval remains the only merge authority.
 Fast Repair never enables auto-merge.
 
-The repair must add an executable regression test that reproduces the defect and must pass focused module tests.
+The repair must add a regression test that reproduces the defect and must pass focused module tests.
 `bin/fm-fast-repair.sh evidence` executes and records both gates.
-Its `--regression-test` value is a relative executable test-file path, which the helper runs directly.
+The only supported interface is the tracked `bin/fm-test-run.sh` runner.
+Its selectors must be distinct, unchanged paths in the tested commit: `tests/<name>-regression.test.sh` and `tests/<name>-focused.test.sh`.
+Projects without this runner or these selectors refuse Fast Repair evidence.
 Missing or failed evidence blocks direct PR publication.
 
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.

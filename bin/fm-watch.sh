@@ -503,6 +503,29 @@ fast_repair_progress_discover() {
   done
 }
 
+fast_repair_progress_generation_next() {
+  local counter="$STATE/.fast-repair-progress-next-generation"
+  local lock="$STATE/.fast-repair-progress-generation.lock"
+  local current next tmp
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(cat "$counter" 2>/dev/null || true)
+  case "$current" in ''|*[!0-9]*) current=0 ;; esac
+  next=$((current + 1))
+  tmp=$(mktemp "$counter.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  if ! printf '%s\n' "$next" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$counter"; then
+    rm -f "$tmp"
+    fm_lock_release "$lock"
+    return 1
+  fi
+  fm_lock_release "$lock"
+  printf '%s\n' "$next"
+}
+
+fast_repair_eligible_task() {
+  local meta="$STATE/$1.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] && fast_repair_eligible_meta "$meta"
+}
+
 fast_repair_progress_record() {
   local id=$1 result=$2 generation=${3:-} marker generation_marker prior prior_generation
   marker="$STATE/.fast-repair-progress-$id"
@@ -565,12 +588,11 @@ fast_repair_progress_tick() {
 
 fast_repair_progress_timer_publish() {
   local id=$1 result=$2 generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
-  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-}
   local file tmp
-  case "$generation:$parent" in *[!0-9:]*|:*|*:) return 1 ;; esac
+  case "$generation" in *[!0-9]*|'') return 1 ;; esac
   case "$id:$result" in *$'\n'*|*$'\r'*) return 1 ;; esac
   fm_pr_task_id_valid "$id" || return 1
-  file="$STATE/.fast-repair-progress-handoff-$parent-$generation-$id"
+  file="$STATE/.fast-repair-progress-handoff-$id-$generation"
   tmp=$(mktemp "$file.XXXXXX") || return 1
   if ! {
     printf '%s\n' "$generation"
@@ -756,8 +778,8 @@ fast_repair_progress_timer_start() {
   local marker remaining parent closing generation
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
-  FAST_REPAIR_TIMER_GENERATION=$((FAST_REPAIR_TIMER_GENERATION + 1))
-  generation=$FAST_REPAIR_TIMER_GENERATION
+  generation=$(fast_repair_progress_generation_next) || return 0
+  FAST_REPAIR_TIMER_GENERATION=$generation
   marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
   closing="$marker.closing"
   FAST_REPAIR_TIMER_MARKER=$marker
@@ -792,9 +814,8 @@ fast_repair_progress_timer_finish() {
 }
 
 fast_repair_progress_timer_wake() {
-  local file generation id result extra watcher=${WATCHER_PID:-} status reasons=
-  [ -n "$watcher" ] || return 0
-  for file in "$STATE"/.fast-repair-progress-handoff-"$watcher"-*; do
+  local file generation id result extra status reasons=
+  for file in "$STATE"/.fast-repair-progress-handoff-*; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     exec 9< "$file" || continue
     IFS= read -r generation <&9 || { exec 9<&-; continue; }
@@ -808,6 +829,10 @@ fast_repair_progress_timer_wake() {
     case "$generation" in *[!0-9]*|'') continue ;; esac
     case "$result" in ''|*$'\n'*|*$'\r'*) continue ;; esac
     fm_pr_task_id_valid "$id" || continue
+    if ! fast_repair_eligible_task "$id"; then
+      rm -f "$file" || continue
+      continue
+    fi
     status=0
     fast_repair_progress_record "$id" "$result" "$generation" || status=$?
     case "$status" in
@@ -1046,6 +1071,7 @@ while :; do
   # This is the only shortened cadence. It reads only durable Fast Repair task
   # records and leaves ordinary task scanning and schedules untouched.
   fast_repair_progress_discover
+  fast_repair_progress_timer_wake
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
