@@ -11,6 +11,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
+FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 make_spawn_pi_probe() {
@@ -724,7 +725,43 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
   pass "active crew-dispatch profile does not block secondmate launches"
 }
 
+test_fast_repair_requires_and_records_its_builtin_profile() {
+  local rec id conflict_id out status launch
+  id=fast-repair-profile-z20
+  conflict_id=fast-repair-conflict-z21
+  rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id")
+  read_case_record "$rec"
+  for task in "$id" "$conflict_id"; do
+    printf 'Delivery contract: mode=fast-repair\n' > "$HOME_DIR/data/$task/brief.md"
+    FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
+      "$FAST_REPAIR" intake "$task" --request 'fast-repair: fixture' \
+      --reproduction reproduced --root-cause confirmed --isolation isolated \
+      --schema none --authentication none --authorization none --secrets none \
+      --financial none --legal none --side-effects none >/dev/null
+  done
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --mode fast-repair --yolo off --harness codex --model gpt-5.6-luna --effort medium)
+  status=$?
+  expect_code 0 "$status" "Fast Repair spawn with its built-in profile should succeed"
+  assert_meta_profile "$HOME_DIR/state/$id.meta" codex gpt-5.6-luna medium
+  assert_grep 'mode=fast-repair' "$HOME_DIR/state/$id.meta" "Fast Repair meta missing canonical mode"
+  assert_grep 'fast_repair=eligible' "$HOME_DIR/state/$id.meta" "Fast Repair meta missing eligibility result"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "codex --model 'gpt-5.6-luna'" "Fast Repair launch did not use Luna"
+  assert_contains "$launch" "model_reasoning_effort=\"medium\"" "Fast Repair launch did not use medium effort"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$conflict_id" "$PROJ_DIR" \
+    --mode fast-repair --yolo off --harness codex --model gpt-5.6-terra --effort high)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair silently accepted a conflicting profile"
+  assert_contains "$out" "requires the built-in profile" "Fast Repair profile refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$conflict_id.meta" "conflicting Fast Repair profile wrote metadata"
+  pass "Fast Repair enforces Codex Luna medium without changing ordinary dispatch profiles"
+}
+
 test_no_profile_keeps_claude_profile_defaults
+test_fast_repair_requires_and_records_its_builtin_profile
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths

@@ -62,6 +62,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 mkdir -p "$STATE"
 
 # The native event fast-path and only its true dependencies have one narrow
@@ -117,6 +118,7 @@ HEARTBEAT=${FM_HEARTBEAT:-600}        # base seconds between heartbeat scans
 HEARTBEAT_MAX=${FM_HEARTBEAT_MAX:-7200}  # heartbeat backoff cap
 CHECK_INTERVAL=${FM_CHECK_INTERVAL:-300}  # seconds between *.check.sh sweeps
 CHECK_TIMEOUT=${FM_CHECK_TIMEOUT:-30}     # seconds allowed per *.check.sh
+FAST_REPAIR_PROGRESS_INTERVAL=${FM_FAST_REPAIR_PROGRESS_INTERVAL:-20} # Fast Repair only
 SIGNAL_GRACE=${FM_SIGNAL_GRACE:-30}   # seconds to linger after a signal so trailing
                                       # signals (a status write, then the same turn's
                                       # turn-end hook) coalesce into one wake
@@ -461,6 +463,42 @@ scan_signals() {
     fi
   done
   return 0
+}
+
+# Fast Repair has a short, task-scoped progress cadence for broader-test and PR
+# check results. It is inert, byte-for-byte, when no durable task metadata says
+# mode=fast-repair and fast_repair=eligible. It does not change the normal signal,
+# stale, custom-check, heartbeat, or sleep cadence, and it never starts another
+# watcher. Each actionable result is deduplicated per task so an unchanged failed
+# PR check cannot wake firstmate every twenty seconds.
+fast_repair_progress_tick() {
+  local meta id result marker prior active=0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
+    grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
+    active=1
+    break
+  done
+  [ "$active" -eq 1 ] || return 0
+  [ "$(age_of "$STATE/.last-fast-repair-progress")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || return 0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
+    grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
+    id=$(basename "$meta" .meta)
+    result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" 2>/dev/null || true)
+    [ -n "$result" ] || continue
+    marker="$STATE/.fast-repair-progress-$id"
+    prior=$(cat "$marker" 2>/dev/null || true)
+    [ "$prior" = "$result" ] && continue
+    printf '%s' "$result" > "$marker"
+    touch "$STATE/.last-fast-repair-progress"
+    fm_wake_append check "fast-repair:$id" "check: $result" || exit 1
+    wake "check: $result"
+  done
+  touch "$STATE/.last-fast-repair-progress"
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -840,6 +878,10 @@ while :; do
   # repost after grace, and escalate once if the recovery turn is also missed.
   # No conversation scraping; unresolved records are never silently expired.
   fm_pending_reply_tick "$STATE" || true
+
+  # This is the only shortened cadence. It reads only durable Fast Repair task
+  # records and leaves ordinary task scanning and schedules untouched.
+  fast_repair_progress_tick
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this
