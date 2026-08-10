@@ -504,17 +504,28 @@ fast_repair_progress_discover() {
 }
 
 fast_repair_progress_record() {
-  local id=$1 result=$2 marker prior
+  local id=$1 result=$2 generation=${3:-} marker generation_marker prior prior_generation
   marker="$STATE/.fast-repair-progress-$id"
+  generation_marker="$STATE/.fast-repair-progress-generation-$id"
+  if [ -n "$generation" ]; then
+    case "$generation" in *[!0-9]*|'') return 3 ;; esac
+    prior_generation=$(cat "$generation_marker" 2>/dev/null || true)
+    case "$prior_generation" in *[!0-9]*|'') prior_generation=0 ;; esac
+    [ "$prior_generation" -le "$generation" ] || return 3
+  fi
   prior=$(cat "$marker" 2>/dev/null || true)
-  [ "$prior" = "$result" ] && return 1
+  if [ "$prior" = "$result" ]; then
+    [ -z "$generation" ] || printf '%s' "$generation" > "$generation_marker"
+    return 1
+  fi
   fm_wake_append check "fast-repair:$id" "check: $result" || return 2
   printf '%s' "$result" > "$marker"
+  [ -z "$generation" ] || printf '%s' "$generation" > "$generation_marker"
   touch "$STATE/.last-fast-repair-progress"
 }
 
 fast_repair_progress_tick() {
-  local meta id result progress_stamp
+  local meta id result progress_stamp timer_published=0
   local ids=()
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -537,22 +548,29 @@ fast_repair_progress_tick() {
     result=$FM_CHECK_RESULT
     [ -n "$result" ] || continue
     if [ -n "${FM_FAST_REPAIR_TIMER_PARENT:-}" ]; then
-      fast_repair_progress_timer_publish "$id" "$result"
-      return 0
+      if fast_repair_progress_timer_publish "$id" "$result"; then
+        timer_published=1
+      fi
+      continue
     fi
     fast_repair_progress_record "$id" "$result" || continue
     wake "check: $result"
   done
   touch "$progress_stamp"
+  if [ "$timer_published" = 1 ]; then
+    FAST_REPAIR_TIMER_RESULT_PUBLISHED=1
+    fast_repair_progress_timer_notify
+  fi
 }
 
 fast_repair_progress_timer_publish() {
   local id=$1 result=$2 generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
-  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-} closing=${FM_FAST_REPAIR_TIMER_CLOSING:-}
+  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-}
   local file tmp
   case "$generation:$parent" in *[!0-9:]*|:*|*:) return 1 ;; esac
   case "$id:$result" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  file="$STATE/.fast-repair-progress-handoff-$parent-$generation"
+  fm_pr_task_id_valid "$id" || return 1
+  file="$STATE/.fast-repair-progress-handoff-$parent-$generation-$id"
   tmp=$(mktemp "$file.XXXXXX") || return 1
   if ! {
     printf '%s\n' "$generation"
@@ -562,7 +580,11 @@ fast_repair_progress_timer_publish() {
     rm -f "$tmp"
     return 1
   fi
-  FAST_REPAIR_TIMER_RESULT_PUBLISHED=1
+}
+
+fast_repair_progress_timer_notify() {
+  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-} closing=${FM_FAST_REPAIR_TIMER_CLOSING:-}
+  case "$parent" in *[!0-9]*|'') return 1 ;; esac
   [ -f "$closing" ] || return 0
   kill -USR1 "$parent" 2>/dev/null || true
 }
@@ -770,26 +792,31 @@ fast_repair_progress_timer_finish() {
 }
 
 fast_repair_progress_timer_wake() {
-  local file generation id result extra watcher=${WATCHER_PID:-}
+  local file generation id result extra watcher=${WATCHER_PID:-} status reasons=
   [ -n "$watcher" ] || return 0
-  generation=$FAST_REPAIR_TIMER_GENERATION
-  file="$STATE/.fast-repair-progress-handoff-$watcher-$generation"
-  [ -f "$file" ] && [ ! -L "$file" ] || return 0
-  exec 9< "$file" || return 0
-  IFS= read -r generation <&9 || { exec 9<&-; return 0; }
-  IFS= read -r id <&9 || { exec 9<&-; return 0; }
-  IFS= read -r result <&9 || { exec 9<&-; return 0; }
-  if IFS= read -r extra <&9; then
+  for file in "$STATE"/.fast-repair-progress-handoff-"$watcher"-*; do
+    [ -f "$file" ] && [ ! -L "$file" ] || continue
+    exec 9< "$file" || continue
+    IFS= read -r generation <&9 || { exec 9<&-; continue; }
+    IFS= read -r id <&9 || { exec 9<&-; continue; }
+    IFS= read -r result <&9 || { exec 9<&-; continue; }
+    if IFS= read -r extra <&9; then
+      exec 9<&-
+      continue
+    fi
     exec 9<&-
-    return 0
-  fi
-  exec 9<&-
-  [ "$generation" = "$FAST_REPAIR_TIMER_GENERATION" ] || return 0
-  fm_pr_task_id_valid "$id" || return 0
-  [ -n "$result" ] || return 0
-  rm -f "$file" || return 0
-  fast_repair_progress_record "$id" "$result" || return 0
-  wake "check: $result"
+    case "$generation" in *[!0-9]*|'') continue ;; esac
+    case "$result" in ''|*$'\n'*|*$'\r'*) continue ;; esac
+    fm_pr_task_id_valid "$id" || continue
+    status=0
+    fast_repair_progress_record "$id" "$result" "$generation" || status=$?
+    case "$status" in
+      0) rm -f "$file" || continue; reasons="$reasons $result" ;;
+      1|3) rm -f "$file" || continue ;;
+      *) continue ;;
+    esac
+  done
+  [ -z "$reasons" ] || wake "check:${reasons}"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
