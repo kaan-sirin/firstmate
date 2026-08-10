@@ -208,8 +208,62 @@ test_pr_check_rollup_states() {
   pass "Fast Repair reads the PR rollup counts numerically for ready and the progress cadence"
 }
 
+# The eligibility record is this tool's own private, versioned evidence file, so
+# the test writes one directly to prove the gate re-applies the intake rule to
+# whatever the record actually holds.
+test_stored_eligibility_uses_the_intake_rule() {
+  local home id=stored-rule f tmp out status
+  home=$(make_home stored-rule)
+  intake "$home" "$id" >/dev/null
+  run_fast "$home" eligible "$id" >/dev/null || fail "a complete stored record did not validate"
+  write_fast_meta "$home" "$id"
+
+  f="$home/data/$id/fast-repair-eligibility"
+  tmp="$home/eligibility.tmp"
+  sed 's/^reproduction=.*/reproduction=false/' "$f" > "$tmp" && mv -f "$tmp" "$f"
+  out=$(run_fast "$home" eligible "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stored fact intake refuses still passed the eligibility gate"
+  assert_contains "$out" "eligibility evidence" "the eligibility gate did not name its refusal"
+  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-command true)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stored fact intake refuses still reached the evidence gate"
+  pass "every Fast Repair gate re-applies intake's own rule to the stored evidence record"
+}
+
+# The generated brief is firstmate's emitted worker interface, so the mandated
+# command is extracted from it and executed in the environment a crewmate pane
+# actually has: no FM_HOME and no state or data override.
+test_brief_commands_reach_the_scaffolding_home() {
+  local home id=brief-home brief line cmd prefix out status
+  home=$(make_home brief-home)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" "$id" fixtureproj --mode fast-repair >/dev/null \
+    || fail "the Fast Repair brief could not be scaffolded"
+
+  brief="$home/data/$id/brief.md"
+  line=$(grep -F " evidence $id " "$brief" | head -n 1)
+  [ -n "$line" ] || fail "the Fast Repair brief mandates no evidence command"
+  cmd=${line#*\`}
+  cmd=${cmd%\`*}
+  prefix=${cmd%% evidence *}
+  [ "$prefix" != "$cmd" ] || fail "the mandated evidence command could not be read from the brief"
+
+  out=$(env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    bash -c "$prefix evidence $id --regression-command true --focused-command true" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the brief's own evidence command could not reach the task record: $out"
+  assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
+    "the brief's evidence command recorded its result outside the scaffolding home"
+  pass "the Fast Repair brief's commands run against the home that scaffolded them"
+}
+
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
+test_stored_eligibility_uses_the_intake_rule
+test_brief_commands_reach_the_scaffolding_home
 test_evidence_and_ready_gates
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"

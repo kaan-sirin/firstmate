@@ -364,18 +364,24 @@ case "$MODE" in
   fast-repair)
     SETUP2=""
     RULE1='1. Never push to the default branch, never merge a PR, and never use a different profile than Codex gpt-5.6-luna with medium effort.'
+    # The crewmate's pane comes from a long-lived tmux/herdr daemon and inherits
+    # none of firstmate's environment, so the helper would otherwise re-derive
+    # its own home and read a different (or absent) task record. The resolved
+    # state and data directories are therefore frozen into every command here,
+    # exactly as the crewmate's status path is above.
+    FAST_REPAIR_HELPER="FM_STATE_OVERRIDE=$(shell_quote "$STATE") FM_DATA_OVERRIDE=$(shell_quote "$DATA") $(shell_quote "$FM_ROOT/bin/fm-fast-repair.sh")"
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=fast-repair
 This task is a strict Fast Repair exception and has already passed the typed eligibility record owned by \`$FM_ROOT/bin/fm-fast-repair.sh\`.
-Every command below is that absolute helper path because your worktree is the project's, not firstmate's; run each one from your worktree.
+Every command below carries that absolute helper path and firstmate's own state and data directories, because your worktree is the project's, not firstmate's; run each one verbatim from your worktree.
 Do not create a scout or run plan, design, CEO, engineering, or other extra review workflows.
 Add a new regression test that reproduces the reported defect and make the narrow repair.
-Run \`$FM_ROOT/bin/fm-fast-repair.sh evidence $ID --regression-command '<command>' --focused-command '<command>'\`.
+Run \`$FAST_REPAIR_HELPER evidence $ID --regression-command '<command>' --focused-command '<command>'\`.
 It runs and records both gates, and it refuses PR publication when either result is missing or failed.
-After it passes, use \`$FM_ROOT/bin/fm-fast-repair.sh publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
-Then run \`$FM_ROOT/bin/fm-fast-repair.sh broader $ID --command '<broader test command>'\` while the new PR's checks run concurrently.
-Do not call the PR ready or green until \`$FM_ROOT/bin/fm-fast-repair.sh ready $ID\` passes.
+After it passes, use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
+Then run \`$FAST_REPAIR_HELPER broader $ID --command '<broader test command>'\` while the new PR's checks run concurrently.
+Do not call the PR ready or green until \`$FAST_REPAIR_HELPER ready $ID\` passes.
 If broader tests or PR checks fail after the PR opens, append \`failed: PR {url} is open but not green because {failed evidence}\` and stop.
 Never enable auto-merge, and never merge the PR.
 When ready passes, append \`done: PR {url} checks green\` and stop for captain approval.

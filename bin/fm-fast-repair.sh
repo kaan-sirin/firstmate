@@ -67,6 +67,19 @@ request_valid() {
   esac
 }
 
+# The one rule for a proven positive fact and for an excluded risk. intake
+# writes a record only when these hold, and every later gate re-checks the
+# stored record against these same predicates, so a record can never satisfy a
+# consumer that intake itself would have refused.
+positive_fact_valid() {
+  case "$1" in
+    ''|unknown|ambiguous|false|no) return 1 ;;
+    *$'\n'*|*$'\r'*) return 1 ;;
+  esac
+}
+
+risk_excluded() { [ "$1" = none ]; }
+
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
 tests_file() { printf '%s/%s.fast-repair-tests\n' "$STATE" "$1"; }
 
@@ -86,10 +99,10 @@ eligibility_valid() {
   request=$(field_get "$f" request)
   request_valid "$request" || return 1
   for positive in reproduction root_cause isolation; do
-    case "$(field_get "$f" "$positive")" in ''|unknown|ambiguous) return 1 ;; esac
+    positive_fact_valid "$(field_get "$f" "$positive")" || return 1
   done
   for risk in schema authentication authorization secrets financial legal side_effects; do
-    [ "$(field_get "$f" "$risk")" = none ] || return 1
+    risk_excluded "$(field_get "$f" "$risk")" || return 1
   done
 }
 
@@ -221,12 +234,12 @@ case "$command" in
     request_valid "$request" || fail "request does not use the exact 'fast-repair: ' prefix"
     for field in reproduction root_cause isolation; do
       eval "value=\${$field}"
-      case "$value" in ''|unknown|ambiguous|false|no) fail "$field is absent, unknown, ambiguous, or not proven" ;; esac
-      case "$value" in *$'\n'*|*$'\r'*) fail "$field must be one typed evidence value" ;; esac
+      positive_fact_valid "$value" \
+        || fail "$field is absent, unknown, ambiguous, not proven, or not one typed evidence value"
     done
     for field in schema authentication authorization secrets financial legal side_effects; do
       eval "value=\${$field}"
-      [ "$value" = none ] || fail "$field is not explicitly proven none"
+      risk_excluded "$value" || fail "$field is not explicitly proven none"
     done
     dir="$DATA/$id"
     mkdir -p "$dir"
