@@ -550,27 +550,34 @@ fast_repair_progress_task_marker() { # <task-id> <generation>
   printf '%s/.fast-repair-progress-child-%s-%s' "$STATE" "$1" "$2"
 }
 
-fast_repair_progress_task_stop() { # <marker>
-  local marker=$1 ready="$1.ready" pid i=0
-  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
-  pid=$(cat "$marker" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) rm -f "$marker" "$ready"; return 0 ;; esac
-  if kill -0 "$pid" 2>/dev/null; then
-    kill -TERM "$pid" 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
-      sleep 0.01
-      i=$((i + 1))
-    done
-    kill -KILL "$pid" 2>/dev/null || true
-  fi
-  rm -f "$marker" "$ready"
-}
-
 fast_repair_progress_timer_tasks_finish() { # <generation>
-  local generation=$1 marker
+  local generation=$1 marker ready pid i=0 live
+  local markers=() pids=()
   for marker in "$STATE"/.fast-repair-progress-child-*"-$generation"; do
-    [ -e "$marker" ] || continue
-    fast_repair_progress_task_stop "$marker"
+    [ -f "$marker" ] && [ ! -L "$marker" ] || continue
+    ready="$marker.ready"
+    pid=$(cat "$marker" 2>/dev/null || true)
+    case "$pid" in
+      ''|*[!0-9]*) rm -f "$marker" "$ready"; continue ;;
+    esac
+    markers+=("$marker")
+    pids+=("$pid")
+    kill -TERM "$pid" 2>/dev/null || true
+  done
+  while [ "$i" -lt 20 ]; do
+    live=0
+    for pid in "${pids[@]}"; do
+      kill -0 "$pid" 2>/dev/null && { live=1; break; }
+    done
+    [ "$live" -eq 0 ] && break
+    sleep 0.01
+    i=$((i + 1))
+  done
+  for pid in "${pids[@]}"; do
+    kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
+  done
+  for marker in "${markers[@]}"; do
+    rm -f "$marker" "$marker.ready"
   done
 }
 
