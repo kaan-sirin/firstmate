@@ -58,9 +58,13 @@ The worker then starts the broader test command while the new PR's checks run co
 Broader-test failures are recorded and surfaced as an open PR that is not green.
 The Fast Repair progress check also surfaces failed PR checks.
 A PR is not called ready or green until the broader test and all required PR checks pass.
+`ready` prints the exact check counts it approved on.
+A rollup where no check passed is never green, because the forge reports a cancelled check as a skipped one.
 
 The Fast Repair progress check runs about every 20 seconds only while durable task metadata records an eligible Fast Repair task.
+While such a task exists, the supervision cycle waits only until that task's next check is due, so the ordinary poll interval cannot stretch this cadence.
 It does not change ordinary task polling, stale handling, watcher behavior, or global defaults.
+A relaunch of a Fast Repair task reuses the recorded profile, so the standard recovery command needs no profile flags.
 
 ## Examples
 

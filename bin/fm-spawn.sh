@@ -1006,6 +1006,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  # Fast Repair's profile is part of its delivery contract, not a default the
+  # caller may re-resolve, so a relaunch reuses the recorded model and effort
+  # for exactly the same reason it reuses the recorded harness above. Without
+  # this the standard stuck-crewmate recovery is refused by the profile gate
+  # below. Other modes keep resolving model and effort as they always have.
+  if [ "$MODE" = fast-repair ]; then
+    RELAUNCH_PRIOR_MODEL=$(fm_meta_get "$RELAUNCH_META" model)
+    RELAUNCH_PRIOR_EFFORT=$(fm_meta_get "$RELAUNCH_META" effort)
+    if [ "$MODEL_SET" -eq 0 ] && [ -n "$RELAUNCH_PRIOR_MODEL" ] && [ "$RELAUNCH_PRIOR_MODEL" != default ]; then
+      MODEL=$RELAUNCH_PRIOR_MODEL
+    fi
+    if [ "$EFFORT_SET" -eq 0 ] && [ -n "$RELAUNCH_PRIOR_EFFORT" ] && [ "$RELAUNCH_PRIOR_EFFORT" != default ]; then
+      EFFORT=$RELAUNCH_PRIOR_EFFORT
+    fi
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2

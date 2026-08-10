@@ -465,6 +465,8 @@ scan_signals() {
   return 0
 }
 
+FAST_REPAIR_ACTIVE=0
+
 # Fast Repair has a short, task-scoped progress cadence for broader-test and PR
 # check results. It is inert, byte-for-byte, when no durable task metadata says
 # mode=fast-repair and fast_repair=eligible. It does not change the normal signal,
@@ -488,6 +490,7 @@ fast_repair_progress_tick() {
     active=1
     break
   done
+  FAST_REPAIR_ACTIVE=$active
   [ "$active" -eq 1 ] || return 0
   [ "$(age_of "$STATE/.last-fast-repair-progress")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || return 0
   for meta in "$STATE"/*.meta; do
@@ -673,6 +676,29 @@ heartbeat_scan_finds_actionable() {
   return 1
 }
 
+# The terminal wait of a cycle, in seconds. Every home waits exactly POLL, as
+# it always has. The one exception is a home that currently holds an eligible
+# Fast Repair task: the cycle then waits only until that task's next progress
+# tick becomes due, because a POLL-sized wait cannot land on a shorter interval
+# and would stretch the Fast-Repair-only cadence to the next multiple of POLL.
+# This only ever shortens the wait, only while Fast Repair is active, and a
+# non-integer POLL (tests use fractional values) is passed through untouched.
+cycle_wait() {
+  local remaining
+  if [ "$FAST_REPAIR_ACTIVE" != 1 ]; then
+    printf '%s\n' "$POLL"
+    return 0
+  fi
+  case "$POLL" in ''|*[!0-9]*) printf '%s\n' "$POLL"; return 0 ;; esac
+  remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
+  [ "$remaining" -ge 1 ] || remaining=1
+  if [ "$remaining" -lt "$POLL" ]; then
+    printf '%s\n' "$remaining"
+  else
+    printf '%s\n' "$POLL"
+  fi
+}
+
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
 # with push-capable windows (herdr), it replaces the blind `sleep POLL` with a
 # bounded wait on the backend's native transition stream, so a crew going
@@ -686,7 +712,9 @@ heartbeat_scan_finds_actionable() {
 # a second watcher, so every guard/beacon/arm/turn-end mechanism is unchanged.
 event_wait_or_sleep() {
   local w b session first_backend="" first_session="" rec rc
+  local wait_budget
   local windows=()
+  wait_budget=$(cycle_wait)
   while IFS= read -r w; do
     b=$(window_backend "$w")
     fm_backend_has_push "$b" || continue
@@ -707,7 +735,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    sleep "$wait_budget"
     return
   fi
 
@@ -723,11 +751,11 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    sleep "$POLL"
+    sleep "$wait_budget"
     return
   fi
 
-  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
+  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$wait_budget" "$STATE" "${windows[@]}")
   rc=$?
   case "$rc" in
     0)
@@ -740,7 +768,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      sleep "$POLL"
+      sleep "$wait_budget"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already

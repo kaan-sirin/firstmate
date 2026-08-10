@@ -176,11 +176,23 @@ test_pr_check_rollup_states() {
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
     || fail "broader fixture was rejected"
 
-  # A skipped check is neither failed nor pending, so the rollup is still green.
+  # A skipped check alongside real passes is ordinary CI, so the rollup is green,
+  # but the counts stay visible in the ready line for the approving captain.
   set_rollup "$home" '3 passed, 1 skipped, 0 failed, 4 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id") \
     || fail "a rollup with only passed and skipped checks was refused: $out"
   assert_contains "$out" 'fast-repair ready:' "skipped-but-green rollup did not report ready"
+  assert_contains "$out" '1 skipped' "the ready line hid the rollup counts it was approved on"
+
+  # gh-axi folds CANCELLED into the same skipped count, so a rollup where nothing
+  # passed has proven nothing and is never green.
+  set_rollup "$home" '0 passed, 0 failed, 1 skipped, 1 total'
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a rollup whose only check was skipped or cancelled was reported ready"
+  assert_contains "$out" 'PR checks are not green' "an all-skipped rollup did not name the refusal"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
+  [ -z "$out" ] || fail "an all-skipped rollup produced an actionable progress result: $out"
 
   # "10 failed, 0 pending" contains "0 failed, 0 pending" as a substring.
   set_rollup "$home" '3 passed, 10 failed, 0 pending, 13 total'
