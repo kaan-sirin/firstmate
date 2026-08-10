@@ -151,6 +151,12 @@ checks_summary() { # <number> <owner/repo>
 # misses green and reads "10 failed, 0 pending" as green. The counts are
 # therefore extracted and compared numerically, and any segment, label, or
 # total this does not recognize stays unknown rather than becoming green.
+#
+# gh-axi's own classifier folds SKIPPED, CANCELLED, EXPECTED and NEUTRAL-state
+# runs into one "skipped" count, so a cancelled workflow is indistinguishable
+# from a deliberately skipped job. A partial skip alongside real passes is
+# ordinary CI and stays green, but a rollup where nothing passed at all has
+# proven nothing and is never green.
 checks_state() { # <summary> -> green|failed|pending|unknown
   local rest=${1-} part count label
   local passed='' failed='' total='' skipped=0 pending=0
@@ -180,6 +186,8 @@ checks_state() { # <summary> -> green|failed|pending|unknown
     printf 'failed\n'
   elif [ "$pending" -gt 0 ]; then
     printf 'pending\n'
+  elif [ "$passed" -eq 0 ]; then
+    printf 'unknown\n'
   else
     printf 'green\n'
   fi
@@ -388,7 +396,7 @@ case "$command" in
     summary=$(checks_summary "$FM_PR_NUMBER" "$FM_PR_OWNER/$FM_PR_REPO") || fail "PR checks could not be read"
     [ -n "$summary" ] || fail "PR checks could not be read"
     [ "$(checks_state "$summary")" = green ] || fail "PR checks are not green: $summary"
-    printf 'fast-repair ready: %s\n' "$FM_PR_URL"
+    printf 'fast-repair ready: %s (%s)\n' "$FM_PR_URL" "$summary"
     ;;
   *) usage >&2; exit 2 ;;
 esac

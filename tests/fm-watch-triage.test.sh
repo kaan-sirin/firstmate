@@ -1901,9 +1901,31 @@ test_fast_repair_marker_waits_for_the_durable_wake() {
   pass "a Fast Repair progress marker commits only after its durable wake is queued"
 }
 
+# The ordinary poll is deliberately far longer than the Fast Repair interval, so
+# the cycle's terminal wait is the only thing that could stretch the cadence: the
+# marker is pre-touched, which makes the first tick ineligible and forces the
+# watcher to wait before it can report.
+test_fast_repair_cadence_outlives_a_long_ordinary_poll() {
+  local dir state out pid
+  dir=$(make_case fast-repair-cadence); state="$dir/state"; out="$dir/watch.out"
+  printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
+  touch "$state/.last-fast-repair-progress"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_POLL=60 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=2 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 120 \
+    || fail "the ordinary poll wait held the Fast Repair cadence past its own interval"
+  grep -F 'check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "the Fast Repair progress result was not surfaced: $(cat "$out")"
+  pass "an eligible Fast Repair task keeps its own interval under a much longer ordinary poll"
+}
+
 test_signal_reason_is_actionable_classifier
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
+test_fast_repair_cadence_outlives_a_long_ordinary_poll
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

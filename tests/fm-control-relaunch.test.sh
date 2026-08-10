@@ -771,6 +771,39 @@ test_ship_relaunch_ignores_the_crew_harness_config() {
   pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
 }
 
+# Fast Repair's profile is part of its delivery contract, so the recovery command
+# for a wedged Fast Repair crewmate must work with no profile flags, exactly as it
+# does for the recorded harness above.
+test_spawn_relaunch_reuses_a_fast_repair_profile() {
+  local dir out status meta
+  dir=$(new_case fastrepairprofile rl40)
+  add_ship_task "$dir" rl40 codex
+  meta="$dir/home/state/rl40.meta"
+  sed -e 's/^mode=.*/mode=fast-repair/' \
+      -e 's/^model=.*/model=gpt-5.6-luna/' \
+      -e 's/^effort=.*/effort=medium/' "$meta" > "$meta.tmp"
+  printf 'fast_repair=eligible\n' >> "$meta.tmp"
+  mv -f "$meta.tmp" "$meta"
+  printf 'Delivery contract: mode=fast-repair\n' > "$dir/home/data/rl40/brief.md"
+  FM_HOME="$dir/home" "$ROOT/bin/fm-fast-repair.sh" intake rl40 \
+    --request 'fast-repair: fixture' --reproduction reproduced --root-cause confirmed \
+    --isolation isolated --schema none --authentication none --authorization none \
+    --secrets none --financial none --legal none --side-effects none >/dev/null \
+    || fail "the Fast Repair eligibility fixture could not be recorded"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl40 --relaunch)
+  status=$?
+  [ "$status" -eq 0 ] || fail "a Fast Repair relaunch needed profile flags it never had to pass: $out"
+  [ "$(meta_field "$dir" rl40 model)" = gpt-5.6-luna ] \
+    || fail "a Fast Repair relaunch lost its recorded model, got '$(meta_field "$dir" rl40 model)'"
+  [ "$(meta_field "$dir" rl40 effort)" = medium ] \
+    || fail "a Fast Repair relaunch lost its recorded effort, got '$(meta_field "$dir" rl40 effort)'"
+  [ "$(meta_field "$dir" rl40 mode)" = fast-repair ] \
+    || fail "a Fast Repair relaunch lost its delivery mode"
+  pass "fm-spawn --relaunch: a Fast Repair task reuses its recorded profile with no flags"
+}
+
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
@@ -1321,6 +1354,7 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
+test_spawn_relaunch_reuses_a_fast_repair_profile
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
