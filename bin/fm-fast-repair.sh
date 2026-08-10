@@ -39,6 +39,7 @@ TASK_WORKTREE=
 TASK_BRANCH=
 TASK_HEAD=
 TEST_RUNNER=
+TEST_RUNNER_ARTIFACT=
 REPRODUCTION_REVISION=
 REGRESSION_SELECTOR=
 REGRESSION_ARTIFACT=
@@ -130,7 +131,7 @@ positive_fact_valid() { # <field> <value>
 risk_excluded() { [ "$1" = none ]; }
 
 test_runner_valid() {
-  local parent resolved rel=bin/fm-test-run.sh
+  local parent resolved rel=bin/fm-test-run.sh artifact
   [ -n "$TASK_WORKTREE" ] || return 1
   parent=$(dirname "$TASK_WORKTREE/$rel")
   resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
@@ -139,7 +140,10 @@ test_runner_valid() {
   regular_file "$resolved" && [ -x "$resolved" ] || return 1
   [ "$(git -C "$TASK_WORKTREE" cat-file -t "$TASK_HEAD:$rel" 2>/dev/null || true)" = blob ] || return 1
   git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$TASK_HEAD" -- ":(literal)$rel" || return 1
+  artifact=$(git -C "$TASK_WORKTREE" ls-tree "$TASK_HEAD" -- "$rel" 2>/dev/null | awk '{print $1 ":" $2 ":" $3}') || return 1
+  case "$artifact" in 100755:blob:*) ;; *) return 1 ;; esac
   TEST_RUNNER=$resolved
+  TEST_RUNNER_ARTIFACT="${artifact%%:blob:*}:${artifact#*:blob:}"
 }
 
 runner_family_valid() {
@@ -258,7 +262,7 @@ run_typed_selector() { # <worktree> <selector> <pass|fail> <log>
 }
 
 regression_witness_valid() { # <family> <selector> <artifact> <log>
-  local family=$1 selector=$2 artifact=$3 log=$4 sandbox mode file_mode oid old_selected
+  local family=$1 selector=$2 artifact=$3 log=$4 sandbox sandbox_root parent resolved component target mode file_mode oid runner_oid selected
   case "$artifact" in 100755:*) ;; *) return 1 ;; esac
   mode=${artifact%%:*}
   file_mode=${mode#100}
@@ -266,19 +270,37 @@ regression_witness_valid() { # <family> <selector> <artifact> <log>
   sandbox=$(mktemp -d "$STATE/.fast-repair-reproduction.XXXXXX") || return 1
   rmdir "$sandbox" || return 1
   if ! git clone --quiet --no-hardlinks "$TASK_WORKTREE" "$sandbox" \
-    || ! git -C "$sandbox" checkout --quiet --detach "$REPRODUCTION_REVISION" \
-    || ! mkdir -p "$(dirname "$sandbox/$selector")" \
+    || ! git -C "$sandbox" checkout --quiet --detach "$REPRODUCTION_REVISION"; then
+    rm -rf "$sandbox"
+    return 1
+  fi
+  sandbox_root=$(cd "$sandbox" && pwd -P) || { rm -rf "$sandbox"; return 1; }
+  for parent in "$(dirname "$selector")" bin; do
+    target=$sandbox
+    IFS=/ read -r -a components <<< "$parent"
+    for component in "${components[@]}"; do
+      [ -n "$component" ] || continue
+      target="$target/$component"
+      [ -e "$target" ] || mkdir "$target" || { rm -rf "$sandbox"; return 1; }
+      resolved=$(cd "$target" && pwd -P) || { rm -rf "$sandbox"; return 1; }
+      case "$resolved" in "$sandbox_root"|"$sandbox_root"/*) ;; *) rm -rf "$sandbox"; return 1 ;; esac
+    done
+  done
+  runner_oid=${TEST_RUNNER_ARTIFACT#*:}
+  if ! git -C "$TASK_WORKTREE" show "$TASK_HEAD:bin/fm-test-run.sh" > "$sandbox/bin/fm-test-run.sh" \
+    || ! chmod 755 "$sandbox/bin/fm-test-run.sh" \
+    || ! [ "$(git -C "$sandbox" hash-object bin/fm-test-run.sh)" = "$runner_oid" ] \
     || ! git -C "$TASK_WORKTREE" show "$TASK_HEAD:$selector" > "$sandbox/$selector" \
     || ! chmod "$file_mode" "$sandbox/$selector" \
     || ! [ "$(git -C "$sandbox" hash-object "$selector")" = "$oid" ]; then
     rm -rf "$sandbox"
     return 1
   fi
-  old_selected=$(cd "$sandbox" && ./bin/fm-test-run.sh --list --family "$family" 2>/dev/null) || {
+  selected=$(cd "$sandbox" && ./bin/fm-test-run.sh --list --family "$family" 2>/dev/null) || {
     rm -rf "$sandbox"
     return 1
   }
-  if ! printf '%s\n' "$old_selected" | grep -Fx "$selector" >/dev/null \
+  if ! printf '%s\n' "$selected" | grep -Fx "$selector" >/dev/null \
     || ! run_typed_selector "$sandbox" "$selector" fail "$log"; then
     rm -rf "$sandbox"
     return 1
@@ -329,13 +351,14 @@ eligibility_valid() {
 }
 
 tests_passed() {
-  local id=$1 f regression_test regression_selector regression_artifact regression_reproduction regression_head focused_test reproduction_revision worktree branch head
+  local id=$1 f regression_test regression_selector regression_artifact regression_runner regression_reproduction regression_head focused_test reproduction_revision worktree branch head
   f=$(tests_file "$id")
   regular_file "$f" || return 1
   task_revision_for "$id" || return 1
   regression_test=$(field_get "$f" regression_test)
   regression_selector=$(field_get "$f" regression_selector)
   regression_artifact=$(field_get "$f" regression_artifact)
+  regression_runner=$(field_get "$f" regression_runner)
   regression_reproduction=$(field_get "$f" regression_reproduction)
   regression_head=$(field_get "$f" regression_head)
   focused_test=$(field_get "$f" focused_test)
@@ -349,17 +372,19 @@ tests_passed() {
   [ "$reproduction_revision" = "$REPRODUCTION_REVISION" ] || return 1
   [ "$regression_selector" = "$REGRESSION_SELECTOR" ] || return 1
   [ "$regression_artifact" = "$REGRESSION_ARTIFACT" ] || return 1
+  [ "$regression_runner" = "$TEST_RUNNER_ARTIFACT" ] || return 1
   [ "$regression_reproduction" = failed ] || return 1
   [ "$regression_head" = passed ] || return 1
   [ "$worktree" = "$TASK_WORKTREE" ] || return 1
   [ "$branch" = "$TASK_BRANCH" ] || return 1
   [ "$head" = "$TASK_HEAD" ] || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 12 ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 13 ] || return 1
   [ "$(grep -c '^regression=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -c '^focused=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "regression_selector=$regression_selector" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "regression_artifact=$regression_artifact" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "regression_runner=$regression_runner" "$f")" = 1 ] || return 1
   [ "$(grep -c '^regression_reproduction=failed$' "$f")" = 1 ] || return 1
   [ "$(grep -c '^regression_head=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "focused_test=$focused_test" "$f")" = 1 ] || return 1
@@ -622,6 +647,7 @@ case "$command" in
       printf 'regression_test=%s\n' "$regression_test"
       printf 'regression_selector=%s\n' "$REGRESSION_SELECTOR"
       printf 'regression_artifact=%s\n' "$REGRESSION_ARTIFACT"
+      printf 'regression_runner=%s\n' "$TEST_RUNNER_ARTIFACT"
       printf 'regression_reproduction=%s\n' "$regression_reproduction"
       printf 'regression_head=%s\n' "$regression_head"
       printf 'focused=%s\n' "$focused_result"

@@ -551,10 +551,10 @@ fast_repair_progress_task_marker() { # <task-id> <generation>
 }
 
 fast_repair_progress_task_stop() { # <marker>
-  local marker=$1 pid i=0
+  local marker=$1 ready="$1.ready" pid i=0
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
   pid=$(cat "$marker" 2>/dev/null || true)
-  case "$pid" in ''|*[!0-9]*) rm -f "$marker"; return 0 ;; esac
+  case "$pid" in ''|*[!0-9]*) rm -f "$marker" "$ready"; return 0 ;; esac
   if kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
@@ -563,7 +563,7 @@ fast_repair_progress_task_stop() { # <marker>
     done
     kill -KILL "$pid" 2>/dev/null || true
   fi
-  rm -f "$marker"
+  rm -f "$marker" "$ready"
 }
 
 fast_repair_progress_timer_tasks_finish() { # <generation>
@@ -575,23 +575,31 @@ fast_repair_progress_timer_tasks_finish() { # <generation>
 }
 
 fast_repair_progress_task_start() { # <task-id> <generation>
-  local id=$1 generation=$2 marker result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-}
+  local id=$1 generation=$2 marker ready result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} pid tmp
   marker=$(fast_repair_progress_task_marker "$id" "$generation") || return 1
+  ready="$marker.ready"
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     return 0
   fi
   touch "$STATE/.last-fast-repair-progress-$id"
   (
-    [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
-    printf '%s\n' "${BASHPID:-$$}" > "$marker" || exit 1
-    trap 'rm -f "$marker"' EXIT
+    trap 'rm -f "$marker" "$ready"' EXIT
     trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
+    while [ ! -f "$ready" ]; do sleep 0.01; done
     [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
     result=$FM_CHECK_RESULT
     [ -z "$result" ] || fast_repair_progress_timer_publish "$id" "$result"
   ) &
+  pid=$!
+  tmp=$(mktemp "$marker.XXXXXX") || { kill -TERM "$pid" 2>/dev/null || true; return 1; }
+  if ! printf '%s\n' "$pid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$marker"; then
+    rm -f "$tmp"
+    kill -TERM "$pid" 2>/dev/null || true
+    return 1
+  fi
+  touch "$ready"
 }
 
 fast_repair_progress_tick() {

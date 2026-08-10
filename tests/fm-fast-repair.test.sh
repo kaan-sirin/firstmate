@@ -401,7 +401,7 @@ test_regression_witness_requires_a_failing_reproduction() {
   pass "Fast Repair requires the overlaid regression selector to fail before the repair"
 }
 
-test_regression_witness_requires_overlay_runner_support() {
+test_regression_witness_uses_the_tested_runner() {
   local home id=unsupported-overlay out status
   home=$(make_home unsupported-overlay)
   sed -i 's/if \[ "${1:-}" = --list \].*/if [ "${1:-}" = --list ]; then exit 2; fi/' "$home/bin/fm-test-run.sh"
@@ -413,9 +413,10 @@ test_regression_witness_requires_overlay_runner_support() {
   write_fast_meta "$home" "$id"
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
-  [ "$status" -ne 0 ] || fail "an unsupported reproduction runner accepted overlay evidence"
-  assert_contains "$out" 'PR publication remains blocked' "an unsupported reproduction runner did not block publication"
-  pass "Fast Repair refuses a reproduction runner without selector overlay support"
+  [ "$status" -eq 0 ] || fail "the tested runner could not execute the reproduction overlay: $out"
+  assert_grep 'regression_runner=100755:' "$home/state/$id.fast-repair-tests" \
+    "the evidence record did not bind the tested runner artifact"
+  pass "Fast Repair uses one tested runner for both regression witness halves"
 }
 
 test_pr_check_rollup_states() {
@@ -627,6 +628,6 @@ test_private_records_do_not_impose_their_umask_on_tests
 test_evidence_and_ready_gates
 test_regression_selector_must_be_new_since_reproduction
 test_regression_witness_requires_a_failing_reproduction
-test_regression_witness_requires_overlay_runner_support
+test_regression_witness_uses_the_tested_runner
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"
