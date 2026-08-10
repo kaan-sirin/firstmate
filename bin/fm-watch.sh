@@ -491,6 +491,17 @@ fast_repair_eligible_meta() {  # <meta-path>
 # check: bounded by CHECK_TIMEOUT in its own process group, so a hung or slow
 # forge call can neither stall the beat, the signal scan, and the stale and
 # wedge detection of other crewmates, nor hold off a stop signal.
+fast_repair_progress_discover() {
+  local meta
+  FAST_REPAIR_ACTIVE=0
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    fast_repair_eligible_meta "$meta" || continue
+    FAST_REPAIR_ACTIVE=1
+    return 0
+  done
+}
+
 fast_repair_progress_tick() {
   local meta id result marker prior
   local ids=()
@@ -951,7 +962,7 @@ while :; do
 
   # This is the only shortened cadence. It reads only durable Fast Repair task
   # records and leaves ordinary task scanning and schedules untouched.
-  fast_repair_progress_tick
+  fast_repair_progress_discover
 
   # Process-to-event liveness repair. This never discovers a result by polling:
   # each registered source has its own child blocking on that source, and this

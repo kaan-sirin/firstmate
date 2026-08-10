@@ -34,6 +34,9 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
+TASK_WORKTREE=
+TASK_BRANCH=
+TASK_HEAD=
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -53,6 +56,24 @@ task_id_valid() {
 
 regular_file() {
   [ -f "$1" ] && [ ! -L "$1" ]
+}
+
+task_worktree_for() {
+  local meta worktree root
+  meta="$STATE/$1.meta"
+  regular_file "$meta" || return 1
+  worktree=$(field_get "$meta" worktree)
+  [ -n "$worktree" ] && [ -d "$worktree" ] || return 1
+  root=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || return 1
+  root=$(cd "$root" && pwd -P) || return 1
+  [ "$root" = "$(cd "$worktree" && pwd -P)" ] || return 1
+  TASK_WORKTREE=$root
+}
+
+task_revision_for() {
+  task_worktree_for "$1" || return 1
+  TASK_BRANCH=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  TASK_HEAD=$(git -C "$TASK_WORKTREE" rev-parse --verify HEAD 2>/dev/null) || return 1
 }
 
 # Evidence logs and records are private to this home. The umask is scoped to the
@@ -92,10 +113,16 @@ positive_fact_valid() { # <field> <value>
 risk_excluded() { [ "$1" = none ]; }
 
 test_path_valid() {
-  case "$1" in
+  local path=$1 parent resolved
+  case "$path" in
     ''|/*|.|..|../*|*/../*|*'/..'|*$'\n'*|*$'\r'*) return 1 ;;
   esac
-  regular_file "$1" && [ -x "$1" ]
+  [ -n "$TASK_WORKTREE" ] || return 1
+  parent=$(dirname "$TASK_WORKTREE/$path")
+  resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  resolved="$resolved/$(basename "$path")"
+  case "$resolved" in "$TASK_WORKTREE"/*) ;; *) return 1 ;; esac
+  regular_file "$resolved" && [ -x "$resolved" ]
 }
 
 regression_test_valid() { test_path_valid "$1"; }
@@ -132,18 +159,28 @@ eligibility_valid() {
 }
 
 tests_passed() {
-  local id=$1 f regression_test focused_test
+  local id=$1 f regression_test focused_test worktree branch head
   f=$(tests_file "$id")
   regular_file "$f" || return 1
+  task_revision_for "$id" || return 1
   regression_test=$(field_get "$f" regression_test)
   focused_test=$(field_get "$f" focused_test)
+  worktree=$(field_get "$f" worktree)
+  branch=$(field_get "$f" branch)
+  head=$(field_get "$f" head)
   regression_test_valid "$regression_test" || return 1
   focused_test_valid "$focused_test" || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 4 ] || return 1
+  [ "$worktree" = "$TASK_WORKTREE" ] || return 1
+  [ "$branch" = "$TASK_BRANCH" ] || return 1
+  [ "$head" = "$TASK_HEAD" ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 7 ] || return 1
   [ "$(grep -c '^regression=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -c '^focused=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ] || return 1
-  [ "$(grep -Fxc "focused_test=$focused_test" "$f")" = 1 ]
+  [ "$(grep -Fxc "focused_test=$focused_test" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "worktree=$worktree" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "branch=$branch" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "head=$head" "$f")" = 1 ]
 }
 
 broader_passed() {
@@ -330,6 +367,7 @@ case "$command" in
     done
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
+    task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     regression_test_valid "$regression_test" \
       || fail "regression-test must name an executable regular test file below the current worktree"
     focused_test_valid "$focused_test" \
@@ -338,13 +376,16 @@ case "$command" in
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if "./$regression_test" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && "./$focused_test" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    if ( cd "$TASK_WORKTREE" && "./$regression_test" ) >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
+    if [ "$regression_result" = passed ] && ( cd "$TASK_WORKTREE" && "./$focused_test" ) >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"
       printf 'focused=%s\n' "$focused_result"
       printf 'focused_test=%s\n' "$focused_test"
+      printf 'worktree=%s\n' "$TASK_WORKTREE"
+      printf 'branch=%s\n' "$TASK_BRANCH"
+      printf 'head=%s\n' "$TASK_HEAD"
     } | private_write "$record" || fail "the evidence record could not be written"
     mv -f "$record" "$(tests_file "$id")"
     tests_passed "$id" || fail "regression or focused-module evidence failed; PR publication remains blocked"
@@ -375,12 +416,14 @@ case "$command" in
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     tests_passed "$id" || fail "focused evidence is absent or failed; direct PR publication is blocked"
+    [ -z "$head" ] || [ "$head" = "$TASK_BRANCH" ] \
+      || fail "--head must equal the tested task branch $TASK_BRANCH"
     if [ -z "$title" ] || ! regular_file "$body_file"; then
       fail "a title and safe body file are required"
     fi
     args=(pr create --title "$title" --body-file "$body_file")
     [ -z "$base" ] || args+=(--base "$base")
-    [ -z "$head" ] || args+=(--head "$head")
+    args+=(--head "$TASK_BRANCH")
     out=$(gh-axi "${args[@]}") || exit $?
     printf '%s\n' "$out"
     url=$(printf '%s\n' "$out" | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -n 1 || true)
@@ -411,6 +454,7 @@ case "$command" in
   progress)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     id=$1
+    task_id_valid "$id" || fail "task id is missing or invalid"
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     if regular_file "$STATE/$id.fast-repair-broader" && [ "$(field_get "$STATE/$id.fast-repair-broader" broader)" = failed ]; then
@@ -428,6 +472,7 @@ case "$command" in
   ready)
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     id=$1
+    task_id_valid "$id" || fail "task id is missing or invalid"
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     tests_passed "$id" || fail "focused evidence is absent or failed"
