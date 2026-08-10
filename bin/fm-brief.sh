@@ -377,7 +377,7 @@ This task is a strict Fast Repair exception and has already passed the typed eli
 Every command below carries that absolute helper path and firstmate's own state and data directories, because your worktree is the project's, not firstmate's; run each one verbatim from your worktree.
 Do not create a scout or run plan, design, CEO, engineering, or other extra review workflows.
 Add a new regression test that reproduces the reported defect and make the narrow repair.
-Run \`$FAST_REPAIR_HELPER evidence $ID --regression-test '<relative executable regression test path>' --focused-command '<command>'\`.
+Run \`$FAST_REPAIR_HELPER evidence $ID --regression-test '<relative executable regression test path>' --focused-test '<relative executable focused-module test path>'\`.
 It runs and records both gates, and it refuses PR publication when either result is missing or failed.
 After it passes, use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
 Then run \`$FAST_REPAIR_HELPER broader $ID --command '<broader test command>'\` while the new PR's checks run concurrently.
