@@ -7,7 +7,7 @@
 #     --schema none --authentication none --authorization none --secrets none \
 #     --financial none --legal none --side-effects none
 #   fm-fast-repair.sh eligible <task-id>
-#   fm-fast-repair.sh evidence <task-id> --regression-test <relative-executable-test> --focused-test <relative-executable-test>
+#   fm-fast-repair.sh evidence <task-id> --regression-test <relative-test-selector> --focused-test <relative-test-selector>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
 #   fm-fast-repair.sh broader <task-id> --command <command>
 #   fm-fast-repair.sh progress <task-id>
@@ -22,7 +22,8 @@
 #
 # A Fast Repair spawn must use mode=fast-repair, yolo=off, and the built-in
 # Codex gpt-5.6-luna medium profile. `evidence` executes named regression and
-# focused-module tests directly and records their result. `publish-pr` refuses
+# focused-module test selectors through the supported test runner and records
+# their result. `publish-pr` refuses
 # until both passed, then opens and registers a direct PR. `broader` is run
 # after publication while PR checks run concurrently. `ready` refuses until the
 # broader command and all PR checks are green. `progress` prints only a changed
@@ -37,7 +38,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 TASK_WORKTREE=
 TASK_BRANCH=
 TASK_HEAD=
-TEST_PATH=
+TEST_RUNNER=
 BODY_FILE=
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -114,8 +115,21 @@ positive_fact_valid() { # <field> <value>
 
 risk_excluded() { [ "$1" = none ]; }
 
-test_path_valid() {
-  local path=$1 parent resolved rel
+test_runner_valid() {
+  local parent resolved rel=bin/fm-test-run.sh
+  [ -n "$TASK_WORKTREE" ] || return 1
+  parent=$(dirname "$TASK_WORKTREE/$rel")
+  resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  resolved="$resolved/$(basename "$rel")"
+  [ "$resolved" = "$TASK_WORKTREE/$rel" ] || return 1
+  regular_file "$resolved" && [ -x "$resolved" ] || return 1
+  [ "$(git -C "$TASK_WORKTREE" cat-file -t "$TASK_HEAD:$rel" 2>/dev/null || true)" = blob ] || return 1
+  git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$TASK_HEAD" -- ":(literal)$rel" || return 1
+  TEST_RUNNER=$resolved
+}
+
+test_selector_valid() {
+  local kind=$1 path=$2 parent resolved rel
   case "$path" in
     ''|/*|.|..|../*|*/../*|*'/..'|*$'\n'*|*$'\r'*) return 1 ;;
   esac
@@ -124,15 +138,41 @@ test_path_valid() {
   resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
   resolved="$resolved/$(basename "$path")"
   case "$resolved" in "$TASK_WORKTREE"/*) ;; *) return 1 ;; esac
-  regular_file "$resolved" && [ -x "$resolved" ] || return 1
+  regular_file "$resolved" || return 1
   rel=${resolved#"$TASK_WORKTREE/"}
+  case "$kind:$rel" in
+    regression:tests/*-regression.test.sh|focused:tests/*-focused.test.sh) ;;
+    *) return 1 ;;
+  esac
   [ "$(git -C "$TASK_WORKTREE" cat-file -t "$TASK_HEAD:$rel" 2>/dev/null || true)" = blob ] || return 1
   git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$TASK_HEAD" -- ":(literal)$rel" || return 1
-  TEST_PATH=$resolved
 }
 
-regression_test_valid() { test_path_valid "$1"; }
-focused_test_valid() { test_path_valid "$1"; }
+regression_test_valid() { test_selector_valid regression "$1" && test_runner_valid; }
+focused_test_valid() { test_selector_valid focused "$1" && test_runner_valid; }
+
+run_typed_test() { # <selector> <log>
+  local selector=$1 log=$2 output status
+  output=$(mktemp "$STATE/.fast-repair-test-output.XXXXXX") || return 1
+  chmod 600 "$output" || { rm -f "$output"; return 1; }
+  if ( cd "$TASK_WORKTREE" && "$TEST_RUNNER" "$selector" ) >"$output" 2>&1; then
+    status=0
+  else
+    status=1
+  fi
+  cat "$output" >> "$log" || status=1
+  if [ "$status" -eq 0 ] \
+    && awk -v selector="$selector" '
+      $1 == "FM_TEST_BEGIN" && $3 == selector { began = 1 }
+      $1 == "FM_TEST_END" && $3 == selector && $4 == "exit=0" { passed = 1 }
+      END { exit !(began && passed) }
+    ' "$output"; then
+    rm -f "$output"
+    return 0
+  fi
+  rm -f "$output"
+  return 1
+}
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
 tests_file() { printf '%s/%s.fast-repair-tests\n' "$STATE" "$1"; }
@@ -413,17 +453,17 @@ case "$command" in
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     regression_test_valid "$regression_test" \
-      || fail "regression-test must name an unchanged executable test file in the task commit"
-    regression_path=$TEST_PATH
+      || fail "regression-test must name an unchanged tests/*-regression.test.sh selector supported by bin/fm-test-run.sh"
     focused_test_valid "$focused_test" \
-      || fail "focused-test must name an unchanged executable test file in the task commit"
-    focused_path=$TEST_PATH
+      || fail "focused-test must name an unchanged tests/*-focused.test.sh selector supported by bin/fm-test-run.sh"
+    [ "$regression_test" != "$focused_test" ] \
+      || fail "regression-test and focused-test must name different test selectors"
     mkdir -p "$STATE"
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if ( cd "$TASK_WORKTREE" && "$regression_path" ) >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && ( cd "$TASK_WORKTREE" && "$focused_path" ) >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    if run_typed_test "$regression_test" "$log"; then regression_result=passed; else regression_result=failed; fi
+    if [ "$regression_result" = passed ] && run_typed_test "$focused_test" "$log"; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"

@@ -8,6 +8,8 @@ set -u
 
 FAST="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fast-repair)
+REGRESSION_TEST=tests/fm-fast-repair-regression.test.sh
+FOCUSED_TEST=tests/fm-fast-repair-focused.test.sh
 
 file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
@@ -18,6 +20,7 @@ make_home() {
   home="$TMP_ROOT/$name"
   mkdir -p "$home/data" "$home/state" "$home/config"
   fm_git_init_commit "$home"
+  write_test_runner "$home"
   printf '%s\n' "$home"
 }
 
@@ -41,16 +44,29 @@ commit_test_file() {
 
 write_regression_test() {
   local home=$1 code=${2:-0}
-  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/regression.test.sh"
-  chmod +x "$home/regression.test.sh"
-  commit_test_file "$home" regression.test.sh
+  mkdir -p "$home/tests"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/$REGRESSION_TEST"
+  chmod +x "$home/$REGRESSION_TEST"
+  commit_test_file "$home" "$REGRESSION_TEST"
 }
 
 write_focused_test() {
   local home=$1 code=${2:-0}
-  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/focused.test.sh"
-  chmod +x "$home/focused.test.sh"
-  commit_test_file "$home" focused.test.sh
+  mkdir -p "$home/tests"
+  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/$FOCUSED_TEST"
+  chmod +x "$home/$FOCUSED_TEST"
+  commit_test_file "$home" "$FOCUSED_TEST"
+}
+
+write_test_runner() {
+  local home=$1
+  mkdir -p "$home/bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
+    'case "${1:-}" in tests/*.test.sh) ;; *) exit 2 ;; esac' \
+    'printf "FM_TEST_BEGIN fixture %s family=fixture\n" "$1"' \
+    'if bash "$1"; then printf "FM_TEST_END fixture %s exit=0 duration_ms=0 gate_skip=false\n" "$1"; else printf "FM_TEST_END fixture %s exit=1 duration_ms=0 gate_skip=false\n" "$1"; exit 1; fi' > "$home/bin/fm-test-run.sh"
+  chmod +x "$home/bin/fm-test-run.sh"
+  commit_test_file "$home" bin/fm-test-run.sh
 }
 
 intake() {
@@ -211,72 +227,79 @@ test_evidence_and_ready_gates() {
   write_regression_test "$home" 1
   write_focused_test "$home"
 
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "failed regression evidence allowed publication"
   assert_contains "$out" "PR publication remains blocked" "failed evidence did not explain the publication block"
 
-  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful regression command was accepted"
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/untracked.test.sh"
-  chmod +x "$home/untracked.test.sh"
-  out=$(run_fast "$home" evidence "$id" --regression-test untracked.test.sh --focused-test focused.test.sh)
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/pass.sh"
+  chmod +x "$home/tests/pass.sh"
+  commit_test_file "$home" tests/pass.sh
+  out=$(run_fast "$home" evidence "$id" --regression-test tests/pass.sh --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a generic exit-zero script satisfied regression evidence"
+  assert_contains "$out" 'tests/*-regression.test.sh' "the pass-script refusal did not require a typed test selector"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/tests/fm-untracked-regression.test.sh"
+  chmod +x "$home/tests/fm-untracked-regression.test.sh"
+  out=$(run_fast "$home" evidence "$id" --regression-test tests/fm-untracked-regression.test.sh --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "an untracked regression test was accepted"
   [ ! -e "$home/untracked-test-ran" ] || fail "an untracked regression test was executed"
-  git -C "$home" add -- untracked.test.sh
-  out=$(run_fast "$home" evidence "$id" --regression-test untracked.test.sh --focused-test focused.test.sh)
+  git -C "$home" add -- tests/fm-untracked-regression.test.sh
+  out=$(run_fast "$home" evidence "$id" --regression-test tests/fm-untracked-regression.test.sh --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a staged-only regression test was accepted"
   [ ! -e "$home/untracked-test-ran" ] || fail "a staged-only regression test was executed"
-  git -C "$home" rm --cached --quiet -- untracked.test.sh
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/modified-test-ran" > "$home/regression.test.sh"
-  chmod +x "$home/regression.test.sh"
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  git -C "$home" rm --cached --quiet -- tests/fm-untracked-regression.test.sh
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/modified-test-ran" > "$home/$REGRESSION_TEST"
+  chmod +x "$home/$REGRESSION_TEST"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a modified tracked regression test was accepted"
   [ ! -e "$home/modified-test-ran" ] || fail "a modified tracked regression test was executed"
   write_regression_test "$home"
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-command true)
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful focused command was accepted"
   outside="$TMP_ROOT/escaped-focused-test"
   mkdir -p "$outside" "$home/tests"
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/escaped-test-ran" > "$outside/escaped.test.sh"
-  chmod +x "$outside/escaped.test.sh"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/escaped-test-ran" > "$outside/fm-escaped-regression.test.sh"
+  chmod +x "$outside/fm-escaped-regression.test.sh"
   ln -s "$outside" "$home/tests/link"
-  out=$(run_fast "$home" evidence "$id" --regression-test tests/link/escaped.test.sh --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-test tests/link/fm-escaped-regression.test.sh --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a parent symlink escaped the Fast Repair worktree"
   [ ! -e "$home/escaped-test-ran" ] || fail "an escaped test path was executed"
   write_focused_test "$home" 1
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a failing focused test allowed publication"
   assert_contains "$out" "PR publication remains blocked" "failed focused evidence did not explain the publication block"
   write_focused_test "$home"
   printf 'task worktree\n' > "$home/cwd-proof"
   commit_test_file "$home" cwd-proof
-  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/regression.test.sh"
-  chmod +x "$home/regression.test.sh"
-  commit_test_file "$home" regression.test.sh
-  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/focused.test.sh"
-  chmod +x "$home/focused.test.sh"
-  commit_test_file "$home" focused.test.sh
+  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/$REGRESSION_TEST"
+  chmod +x "$home/$REGRESSION_TEST"
+  commit_test_file "$home" "$REGRESSION_TEST"
+  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/$FOCUSED_TEST"
+  chmod +x "$home/$FOCUSED_TEST"
+  commit_test_file "$home" "$FOCUSED_TEST"
   evidence_other=$(make_home evidence-cwd)
   printf 'other checkout\n' > "$evidence_other/cwd-proof"
-  out=$(run_fast_from "$evidence_other" "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  out=$(run_fast_from "$evidence_other" "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -eq 0 ] || fail "evidence tests did not run from the task worktree: $out"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "passing focused evidence was rejected"
+  run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null || fail "passing focused evidence was rejected"
   git -C "$home" commit --quiet --allow-empty -m 'advance repair fixture'
   printf 'Fast Repair fixture body.\n' > "$home/body.md"
   out=$(run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
   status=$?
   [ "$status" -ne 0 ] || fail "Fast Repair published a commit that its evidence did not test"
   assert_contains "$out" 'focused evidence is absent or failed' "untested commit refusal was not actionable"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "updated task HEAD evidence was rejected"
+  run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null || fail "updated task HEAD evidence was rejected"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   printf '%040d\n' 0 > "$home/pr-head"
@@ -315,7 +338,7 @@ test_evidence_and_ready_gates() {
   assert_contains "$out" 'pr-checks-green' "green PR checks were not available to the Fast Repair progress cadence"
   assert_grep '--repo acme/repo' "$home/gh-axi.args" "PR checks were not read from the registered PR's own repository"
   git -C "$home" commit --quiet --allow-empty -m 'advance broader fixture'
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
+  run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null \
     || fail "updated focused evidence was rejected after a new commit"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
@@ -334,7 +357,7 @@ test_pr_check_rollup_states() {
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
+  run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null \
     || fail "focused evidence fixture was rejected"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
     || fail "broader fixture was rejected"
@@ -400,7 +423,7 @@ test_stored_eligibility_uses_the_intake_rule() {
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still passed the eligibility gate"
   assert_contains "$out" "eligibility evidence" "the eligibility gate did not name its refusal"
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still reached the evidence gate"
   pass "every Fast Repair gate re-applies intake's own rule to the stored evidence record"
@@ -413,7 +436,7 @@ test_later_gates_revalidate_typed_eligibility() {
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
   write_focused_test "$home"
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -eq 0 ] || fail "the later-gate fixture could not record focused evidence: $out"
   f="$home/data/$id/fast-repair-eligibility"
@@ -456,7 +479,7 @@ test_brief_commands_reach_the_scaffolding_home() {
   [ "$prefix" != "$cmd" ] || fail "the mandated evidence command could not be read from the brief"
 
   out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    bash -c "$prefix evidence $id --regression-test regression.test.sh --focused-test focused.test.sh" 2>&1)
+    bash -c "$prefix evidence $id --regression-test $REGRESSION_TEST --focused-test $FOCUSED_TEST" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "the brief's own evidence command could not reach the task record: $out"
   assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
@@ -482,14 +505,14 @@ exit 0
 SH
   chmod +x "$toolbin/fm-fixture-tool"
   write_regression_test "$home"
-  printf '#!/usr/bin/env bash\nfm-fixture-tool\n' > "$home/focused.test.sh"
-  chmod +x "$home/focused.test.sh"
-  commit_test_file "$home" focused.test.sh
+  printf '#!/usr/bin/env bash\nfm-fixture-tool\n' > "$home/$FOCUSED_TEST"
+  chmod +x "$home/$FOCUSED_TEST"
+  commit_test_file "$home" "$FOCUSED_TEST"
 
   out=$(cd "$home" && HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    "$FAST" evidence "$id" --regression-test regression.test.sh \
-    --focused-test focused.test.sh 2>&1)
+    "$FAST" evidence "$id" --regression-test "$REGRESSION_TEST" \
+    --focused-test "$FOCUSED_TEST" 2>&1)
   status=$?
   [ "$status" -eq 0 ] \
     || fail "a login profile's PATH reset decided the evidence result: $out
@@ -508,14 +531,15 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
   artifact="$home/suite-artifact"
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/regression.test.sh"
-  chmod +x "$home/regression.test.sh"
-  commit_test_file "$home" regression.test.sh
+  mkdir -p "$home/tests"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/$REGRESSION_TEST"
+  chmod +x "$home/$REGRESSION_TEST"
+  commit_test_file "$home" "$REGRESSION_TEST"
   write_focused_test "$home"
 
   ( umask 022
     run_fast "$home" evidence "$id" \
-      --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null ) \
+      --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null ) \
     || fail "the evidence gate refused its own passing fixture commands"
 
   [ -e "$artifact" ] || fail "the regression command did not run"
