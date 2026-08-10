@@ -9,6 +9,10 @@ set -u
 FAST="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fast-repair)
 
+file_mode() {
+  stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
+}
+
 make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
@@ -272,10 +276,68 @@ test_brief_commands_reach_the_scaffolding_home() {
   pass "the Fast Repair brief's commands run against the home that scaffolded them"
 }
 
+# The evidence commands must see the environment the crewmate hands the helper,
+# not a login profile's. The fixture HOME holds a profile that clobbers PATH,
+# which is exactly the reported harm: a correct repair recorded as failed.
+test_evidence_commands_ignore_a_login_profile() {
+  local home id=login-profile out status loginhome toolbin
+  home=$(make_home login-profile)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  loginhome="$home/loginhome"
+  toolbin="$home/toolbin"
+  mkdir -p "$loginhome" "$toolbin"
+  printf 'PATH=/nonexistent\nexport PATH\n' > "$loginhome/.bash_profile"
+  cat > "$toolbin/fm-fixture-tool" <<'SH'
+#!/bin/sh
+exit 0
+SH
+  chmod +x "$toolbin/fm-fixture-tool"
+
+  out=$(HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$FAST" evidence "$id" --regression-command fm-fixture-tool \
+    --focused-command fm-fixture-tool 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] \
+    || fail "a login profile's PATH reset decided the evidence result: $out
+--- evidence log ---
+$(cat "$home/state/$id.fast-repair-tests.log" 2>/dev/null)"
+  assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
+    "the evidence record did not come from the inherited environment"
+  pass "Fast Repair evidence commands run with the worker's own environment, not a login profile's"
+}
+
+# The private records stay owner-only, while files the test suites create keep the
+# permissions the caller's umask asks for.
+test_private_records_do_not_impose_their_umask_on_tests() {
+  local home id=umask-scope artifact
+  home=$(make_home umask-scope)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  artifact="$home/suite-artifact"
+
+  ( umask 022
+    run_fast "$home" evidence "$id" \
+      --regression-command "touch '$artifact'" --focused-command true >/dev/null ) \
+    || fail "the evidence gate refused its own passing fixture commands"
+
+  [ -e "$artifact" ] || fail "the regression command did not run"
+  [ "$(file_mode "$artifact")" = 644 ] \
+    || fail "a test suite's own output inherited the record umask: $(file_mode "$artifact")"
+  [ "$(file_mode "$home/state/$id.fast-repair-tests")" = 600 ] \
+    || fail "the evidence record is not owner-only: $(file_mode "$home/state/$id.fast-repair-tests")"
+  [ "$(file_mode "$home/state/$id.fast-repair-tests.log")" = 600 ] \
+    || fail "the evidence log is not owner-only: $(file_mode "$home/state/$id.fast-repair-tests.log")"
+  pass "Fast Repair keeps its evidence records private without changing what the test commands create"
+}
+
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
 test_stored_eligibility_uses_the_intake_rule
 test_brief_commands_reach_the_scaffolding_home
+test_evidence_commands_ignore_a_login_profile
+test_private_records_do_not_impose_their_umask_on_tests
 test_evidence_and_ready_gates
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"
