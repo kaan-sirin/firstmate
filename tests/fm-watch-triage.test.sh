@@ -1845,7 +1845,34 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
   pass "AFK changed paused panes hand off plain stale identities for daemon-owned pause triage"
 }
 
+test_fast_repair_progress_cadence_is_task_scoped() {
+  local fast_dir fast_state fast_bin fast_out fast_pid normal_dir normal_state normal_bin normal_out normal_pid
+  fast_dir=$(make_case fast-repair-progress); fast_state="$fast_dir/state"; fast_bin="$fast_dir/fakebin"; fast_out="$fast_dir/watch.out"
+  printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$fast_state/fast.meta"
+  printf 'broader=failed\n' > "$fast_state/fast.fast-repair-broader"
+  PATH="$fast_bin:$PATH" FM_STATE_OVERRIDE="$fast_state" FM_DATA_OVERRIDE="$fast_dir/data" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$fast_out" &
+  fast_pid=$!
+  wait_for_exit "$fast_pid" 40 || fail "Fast Repair progress result did not wake the watcher"
+  grep -F 'check: fast-repair fast broader-tests-failed' "$fast_out" >/dev/null \
+    || fail "Fast Repair progress result was not surfaced: $(cat "$fast_out")"
+
+  normal_dir=$(make_case normal-no-fast-repair); normal_state="$normal_dir/state"; normal_bin="$normal_dir/fakebin"; normal_out="$normal_dir/watch.out"
+  printf 'window=firstmate:fm-normal\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$normal_state/normal.meta"
+  PATH="$normal_bin:$PATH" FM_STATE_OVERRIDE="$normal_state" FM_DATA_OVERRIDE="$normal_dir/data" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$normal_out" &
+  normal_pid=$!
+  sleep 2
+  [ ! -e "$normal_state/.last-fast-repair-progress" ] \
+    || fail "ordinary task watcher wrote Fast Repair cadence state"
+  reap "$normal_pid"
+  pass "Fast Repair uses a 20-second-class task-only progress cadence without changing ordinary watcher state"
+}
+
 test_signal_reason_is_actionable_classifier
+test_fast_repair_progress_cadence_is_task_scoped
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives
