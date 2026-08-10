@@ -54,9 +54,9 @@ Fast Repair never enables auto-merge.
 
 The repair must add a regression test that reproduces the defect and must pass focused module tests.
 `bin/fm-fast-repair.sh evidence` executes and records both gates.
-The only supported interface is the tracked `bin/fm-test-run.sh` runner.
-Its selectors must be distinct, unchanged paths in the tested commit: `tests/<name>-regression.test.sh` and `tests/<name>-focused.test.sh`.
-Projects without this runner or these selectors refuse Fast Repair evidence.
+The only supported interface is the tracked `bin/fm-test-run.sh` runner and two distinct families from its `--list-families` output.
+The recorded pre-fix reproduction commit must be an ancestor of the tested head, and the regression family must fail there before it can pass at the tested head.
+Projects without this runner, its family interface, or this proof refuse Fast Repair evidence.
 Missing or failed evidence blocks direct PR publication.
 
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.

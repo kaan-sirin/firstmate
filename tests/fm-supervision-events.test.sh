@@ -250,6 +250,8 @@ event_wait_or_sleep
 command sleep 0.6
 [ -e "$TMP/fast-repair-transition-complete" ] || fail "the shutdown handoff interrupted the backend transition wait"
 [ ! -e "$TMP/fast-repair-handoff-blocked" ] || fail "the shutdown handoff blocked on the Fast Repair check"
+[ ! -s "$WAKE_LOG" ] || fail "a shutdown handoff woke the watcher outside its safe boundary"
+fast_repair_progress_timer_wake
 grep -q "^$PARENT_PID.*check: fast-repair tk7 pr-checks-failed" "$WAKE_LOG" \
   || fail "a result written after timer shutdown was not delivered"
 pass "event_wait_or_sleep: Fast Repair delivers a result that races timer shutdown"
@@ -305,6 +307,19 @@ fast_repair_progress_timer_wake
 [ ! -e "$STATE_DIR/.fast-repair-progress-handoff-tk13-8" ] \
   || fail "a torn-down Fast Repair handoff was not discarded after lifecycle revalidation"
 pass "fast_repair_progress_timer_wake: torn-down tasks discard pending handoffs"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk14.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+FAST_REPAIR_PROGRESS_INTERVAL=20
+PROGRESS_CHECKS=0
+run_check_capture() {
+  PROGRESS_CHECKS=$((PROGRESS_CHECKS + 1))
+  FM_CHECK_RESULT=
+}
+FM_FAST_REPAIR_TIMER_GENERATION=9 fast_repair_progress_tick
+FM_FAST_REPAIR_TIMER_GENERATION=10 fast_repair_progress_tick
+[ "$PROGRESS_CHECKS" = 1 ] || fail "short waits reset the Fast Repair progress cadence"
+pass "fast_repair_progress_tick: short waits retain the task progress cadence"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk9a.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"

@@ -561,10 +561,8 @@ fast_repair_progress_tick() {
   fi
   FAST_REPAIR_ACTIVE=1
   progress_stamp="$STATE/.last-fast-repair-progress"
-  if [ -n "${FM_FAST_REPAIR_TIMER_GENERATION:-}" ]; then
-    progress_stamp="$progress_stamp-$FM_FAST_REPAIR_TIMER_GENERATION"
-  fi
   [ "$(age_of "$progress_stamp")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || return 0
+  touch "$progress_stamp"
   for id in "${ids[@]}"; do
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
@@ -579,10 +577,8 @@ fast_repair_progress_tick() {
     fast_repair_progress_record "$id" "$result" || continue
     wake "check: $result"
   done
-  touch "$progress_stamp"
   if [ "$timer_published" = 1 ]; then
     FAST_REPAIR_TIMER_RESULT_PUBLISHED=1
-    fast_repair_progress_timer_notify
   fi
 }
 
@@ -605,10 +601,7 @@ fast_repair_progress_timer_publish() {
 }
 
 fast_repair_progress_timer_notify() {
-  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-} closing=${FM_FAST_REPAIR_TIMER_CLOSING:-}
-  case "$parent" in *[!0-9]*|'') return 1 ;; esac
-  [ -f "$closing" ] || return 0
-  kill -USR1 "$parent" 2>/dev/null || true
+  return 0
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -997,7 +990,7 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-trap 'fast_repair_progress_timer_wake' USR1
+trap '' USR1
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.

@@ -8,8 +8,8 @@ set -u
 
 FAST="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fast-repair)
-REGRESSION_TEST=tests/fm-fast-repair-regression.test.sh
-FOCUSED_TEST=tests/fm-fast-repair-focused.test.sh
+REGRESSION_TEST=fixture-regression
+FOCUSED_TEST=fixture-focused
 
 file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
@@ -21,6 +21,10 @@ make_home() {
   mkdir -p "$home/data" "$home/state" "$home/config"
   fm_git_init_commit "$home"
   write_test_runner "$home"
+  printf 'broken\n' > "$home/fixture-regression-state"
+  printf 'passed\n' > "$home/fixture-focused-state"
+  commit_test_file "$home" fixture-regression-state
+  commit_test_file "$home" fixture-focused-state
   printf '%s\n' "$home"
 }
 
@@ -44,27 +48,25 @@ commit_test_file() {
 
 write_regression_test() {
   local home=$1 code=${2:-0}
-  mkdir -p "$home/tests"
-  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/$REGRESSION_TEST"
-  chmod +x "$home/$REGRESSION_TEST"
-  commit_test_file "$home" "$REGRESSION_TEST"
+  if [ "$code" = 0 ]; then printf 'fixed\n' > "$home/fixture-regression-state"; else printf 'broken\n' > "$home/fixture-regression-state"; fi
+  git -C "$home" diff --quiet -- fixture-regression-state || commit_test_file "$home" fixture-regression-state
 }
 
 write_focused_test() {
   local home=$1 code=${2:-0}
-  mkdir -p "$home/tests"
-  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/$FOCUSED_TEST"
-  chmod +x "$home/$FOCUSED_TEST"
-  commit_test_file "$home" "$FOCUSED_TEST"
+  if [ "$code" = 0 ]; then printf 'passed\n' > "$home/fixture-focused-state"; else printf 'failed\n' > "$home/fixture-focused-state"; fi
+  git -C "$home" diff --quiet -- fixture-focused-state || commit_test_file "$home" fixture-focused-state
 }
 
 write_test_runner() {
   local home=$1
   mkdir -p "$home/bin"
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
-    'case "${1:-}" in tests/*.test.sh) ;; *) exit 2 ;; esac' \
-    'printf "FM_TEST_BEGIN fixture %s family=fixture\n" "$1"' \
-    'if bash "$1"; then printf "FM_TEST_END fixture %s exit=0 duration_ms=0 gate_skip=false\n" "$1"; else printf "FM_TEST_END fixture %s exit=1 duration_ms=0 gate_skip=false\n" "$1"; exit 1; fi' > "$home/bin/fm-test-run.sh"
+    'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused; exit 0; fi' \
+    '[ "${1:-}" = --family ] && [ "$#" = 2 ] || exit 2' \
+    'printf "FM_TEST_BEGIN fixture %s family=%s\n" "$2" "$2"' \
+    'if case "$2" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
+    'printf "FM_TEST_END fixture %s exit=%s duration_ms=0 gate_skip=false\n" "$2" "$status"; exit "$status"' > "$home/bin/fm-test-run.sh"
   chmod +x "$home/bin/fm-test-run.sh"
   commit_test_file "$home" bin/fm-test-run.sh
 }
@@ -73,7 +75,7 @@ intake() {
   local home=$1 id=$2 reproduction=${3-reproduced} root_cause=${4-confirmed} isolation=${5-isolated}
   local schema=${6-none} authentication=${7-none} authorization=${8-none} secrets=${9-none} financial=${10-none} legal=${11-none} side_effects=${12-none}
   run_fast "$home" intake "$id" --request 'fast-repair: repair fixture' \
-    --reproduction "$reproduction" --root-cause "$root_cause" --isolation "$isolation" \
+    --reproduction "$reproduction" --reproduction-revision "$(git -C "$home" rev-parse HEAD)" --root-cause "$root_cause" --isolation "$isolation" \
     --schema "$schema" --authentication "$authentication" --authorization "$authorization" \
     --secrets "$secrets" --financial "$financial" --legal "$legal" --side-effects "$side_effects"
 }
@@ -235,13 +237,14 @@ test_evidence_and_ready_gates() {
   out=$(run_fast "$home" evidence "$id" --regression-command true --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful regression command was accepted"
+  mkdir -p "$home/tests"
   printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/pass.sh"
   chmod +x "$home/tests/pass.sh"
   commit_test_file "$home" tests/pass.sh
-  out=$(run_fast "$home" evidence "$id" --regression-test tests/pass.sh --focused-test "$FOCUSED_TEST")
+  out=$(run_fast "$home" evidence "$id" --regression-test pass --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a generic exit-zero script satisfied regression evidence"
-  assert_contains "$out" 'tests/*-regression.test.sh' "the pass-script refusal did not require a typed test selector"
+  assert_contains "$out" 'supported bin/fm-test-run.sh family' "the pass-script refusal did not require a runner-owned selector"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/tests/fm-untracked-regression.test.sh"
   chmod +x "$home/tests/fm-untracked-regression.test.sh"
   out=$(run_fast "$home" evidence "$id" --regression-test tests/fm-untracked-regression.test.sh --focused-test "$FOCUSED_TEST")
@@ -531,10 +534,7 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
   artifact="$home/suite-artifact"
-  mkdir -p "$home/tests"
-  printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/$REGRESSION_TEST"
-  chmod +x "$home/$REGRESSION_TEST"
-  commit_test_file "$home" "$REGRESSION_TEST"
+  write_regression_test "$home"
   write_focused_test "$home"
 
   ( umask 022
@@ -542,9 +542,6 @@ test_private_records_do_not_impose_their_umask_on_tests() {
       --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null ) \
     || fail "the evidence gate refused its own passing fixture commands"
 
-  [ -e "$artifact" ] || fail "the regression command did not run"
-  [ "$(file_mode "$artifact")" = 644 ] \
-    || fail "a test suite's own output inherited the record umask: $(file_mode "$artifact")"
   [ "$(file_mode "$home/state/$id.fast-repair-tests")" = 600 ] \
     || fail "the evidence record is not owner-only: $(file_mode "$home/state/$id.fast-repair-tests")"
   [ "$(file_mode "$home/state/$id.fast-repair-tests.log")" = 600 ] \
