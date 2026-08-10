@@ -3,11 +3,11 @@
 # Usage:
 #   fm-fast-repair.sh is-request <request>
 #   fm-fast-repair.sh intake <task-id> --request 'fast-repair: <task>' \
-#     --reproduction <evidence> --root-cause <evidence> --isolation <evidence> \
+#     --reproduction reproduced --root-cause confirmed --isolation isolated \
 #     --schema none --authentication none --authorization none --secrets none \
 #     --financial none --legal none --side-effects none
 #   fm-fast-repair.sh eligible <task-id>
-#   fm-fast-repair.sh evidence <task-id> --regression-command <command> --focused-command <command>
+#   fm-fast-repair.sh evidence <task-id> --regression-test <relative-executable-test> --focused-command <command>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
 #   fm-fast-repair.sh broader <task-id> --command <command>
 #   fm-fast-repair.sh progress <task-id>
@@ -15,14 +15,14 @@
 #
 # `fast-repair:` is the only accepted request prefix, and it must be followed by
 # one space and a non-empty request. `intake` records a typed, private evidence
-# record only when all three positive facts are non-empty and all seven risk
-# exclusions equal `none`. Any missing, unknown, ambiguous, or different value
+# record only when all three positive facts use their exact proof values and all
+# seven risk exclusions equal `none`. Any missing or different value
 # refuses Fast Repair before a task can use this delivery mode; firstmate then
 # uses normal intake for that request.
 #
 # A Fast Repair spawn must use mode=fast-repair, yolo=off, and the built-in
-# Codex gpt-5.6-luna medium profile. `evidence` executes a regression command
-# and a focused-module command and records their result. `publish-pr` refuses
+# Codex gpt-5.6-luna medium profile. `evidence` executes one named regression
+# test directly and a focused-module command and records their result. `publish-pr` refuses
 # until both passed, then opens and registers a direct PR. `broader` is run
 # after publication while PR checks run concurrently. `ready` refuses until the
 # broader command and all PR checks are green. `progress` prints only a changed
@@ -73,23 +73,31 @@ field_get() { # <file> <field>
 
 request_valid() {
   case "$1" in
-    fast-repair:\ ?*) return 0 ;;
+    fast-repair:\ ?*) ;;
     *) return 1 ;;
   esac
+  case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
 }
 
 # The one rule for a proven positive fact and for an excluded risk. intake
 # writes a record only when these hold, and every later gate re-checks the
 # stored record against these same predicates, so a record can never satisfy a
 # consumer that intake itself would have refused.
-positive_fact_valid() {
-  case "$1" in
-    ''|unknown|ambiguous|false|no) return 1 ;;
-    *$'\n'*|*$'\r'*) return 1 ;;
+positive_fact_valid() { # <field> <value>
+  case "$1:$2" in
+    reproduction:reproduced|root_cause:confirmed|isolation:isolated) return 0 ;;
+    *) return 1 ;;
   esac
 }
 
 risk_excluded() { [ "$1" = none ]; }
+
+regression_test_valid() { # <relative path>
+  case "$1" in
+    ''|/*|.|..|../*|*/../*|*'/..'|*$'\n'*|*$'\r'*) return 1 ;;
+  esac
+  regular_file "$1" && [ -x "$1" ]
+}
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
 tests_file() { printf '%s/%s.fast-repair-tests\n' "$STATE" "$1"; }
@@ -107,21 +115,30 @@ eligibility_valid() {
   local id=$1 f request positive risk
   f=$(eligibility_file "$id")
   regular_file "$f" || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 11 ] || return 1
   request=$(field_get "$f" request)
   request_valid "$request" || return 1
+  [ "$(grep -c '^request=' "$f")" = 1 ] || return 1
   for positive in reproduction root_cause isolation; do
-    positive_fact_valid "$(field_get "$f" "$positive")" || return 1
+    positive_fact_valid "$positive" "$(field_get "$f" "$positive")" || return 1
+    [ "$(grep -c "^$positive=" "$f")" = 1 ] || return 1
   done
   for risk in schema authentication authorization secrets financial legal side_effects; do
     risk_excluded "$(field_get "$f" "$risk")" || return 1
+    [ "$(grep -c "^$risk=" "$f")" = 1 ] || return 1
   done
 }
 
 tests_passed() {
-  local id=$1 f
+  local id=$1 f regression_test
   f=$(tests_file "$id")
   regular_file "$f" || return 1
-  [ "$(field_get "$f" regression)" = passed ] && [ "$(field_get "$f" focused)" = passed ]
+  regression_test=$(field_get "$f" regression_test)
+  regression_test_valid "$regression_test" || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 3 ] || return 1
+  [ "$(grep -c '^regression=passed$' "$f")" = 1 ] || return 1
+  [ "$(grep -c '^focused=passed$' "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ]
 }
 
 broader_passed() {
@@ -253,8 +270,8 @@ case "$command" in
     request_valid "$request" || fail "request does not use the exact 'fast-repair: ' prefix"
     for field in reproduction root_cause isolation; do
       eval "value=\${$field}"
-      positive_fact_valid "$value" \
-        || fail "$field is absent, unknown, ambiguous, not proven, or not one typed evidence value"
+      positive_fact_valid "$field" "$value" \
+        || fail "$field must equal its exact typed proof value"
     done
     for field in schema authentication authorization secrets financial legal side_effects; do
       eval "value=\${$field}"
@@ -292,31 +309,34 @@ case "$command" in
     id=${1:-}
     shift || true
     task_id_valid "$id" || fail "task id is missing or invalid"
-    regression=
+    regression_test=
     focused=
     while [ "$#" -gt 0 ]; do
       key=$1
       shift
-      [ "$#" -gt 0 ] || fail "$key needs a command"
+      [ "$#" -gt 0 ] || fail "$key needs a value"
       value=$1
       shift
       case "$key" in
-        --regression-command) regression=$value ;;
+        --regression-test) regression_test=$value ;;
         --focused-command) focused=$value ;;
         *) fail "unknown test evidence flag $key" ;;
       esac
     done
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
-    [ -n "$regression" ] && [ -n "$focused" ] || fail "regression and focused commands are both required"
+    regression_test_valid "$regression_test" \
+      || fail "regression-test must name an executable regular test file below the current worktree"
+    [ -n "$focused" ] || fail "a focused-module command is required"
     mkdir -p "$STATE"
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if bash -c "$regression" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
+    if "./$regression_test" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
     if [ "$regression_result" = passed ] && bash -c "$focused" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
+      printf 'regression_test=%s\n' "$regression_test"
       printf 'focused=%s\n' "$focused_result"
     } | private_write "$record" || fail "the evidence record could not be written"
     mv -f "$record" "$(tests_file "$id")"
@@ -368,6 +388,7 @@ case "$command" in
     [ "${1:-}" = --command ] && [ "$#" -eq 2 ] || fail "broader requires exactly --command <command>"
     broader_command=$2
     require_fast_repair_meta "$id"
+    eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     pr_identity_for "$id" || fail "broader tests start only after the direct PR is registered"
     [ -n "$broader_command" ] || fail "broader command is empty"
     log="$STATE/$id.fast-repair-broader.log"
@@ -384,6 +405,7 @@ case "$command" in
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     id=$1
     require_fast_repair_meta "$id"
+    eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     if regular_file "$STATE/$id.fast-repair-broader" && [ "$(field_get "$STATE/$id.fast-repair-broader" broader)" = failed ]; then
       printf 'fast-repair %s broader-tests-failed\n' "$id"
       exit 0
@@ -400,6 +422,7 @@ case "$command" in
     [ "$#" -eq 1 ] || { usage >&2; exit 2; }
     id=$1
     require_fast_repair_meta "$id"
+    eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     tests_passed "$id" || fail "focused evidence is absent or failed"
     broader_passed "$id" || fail "broader tests are not passed"
     pr_identity_for "$id" || fail "no registered Fast Repair PR"

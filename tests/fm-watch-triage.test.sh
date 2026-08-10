@@ -123,6 +123,15 @@ record_pi_busy() {  # <state-dir> <id>
 
 reap() { kill "$1" 2>/dev/null || true; wait "$1" 2>/dev/null || true; }
 
+record_fast_repair_eligibility() {
+  local dir=$1 id=$2
+  FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
+    "$ROOT/bin/fm-fast-repair.sh" intake "$id" --request 'fast-repair: watcher fixture' \
+    --reproduction reproduced --root-cause confirmed --isolation isolated \
+    --schema none --authentication none --authorization none --secrets none \
+    --financial none --legal none --side-effects none >/dev/null
+}
+
 # --- pure classifier predicates (fm-classify-lib.sh) ------------------------
 
 test_signal_reason_is_actionable_classifier() {
@@ -1849,6 +1858,7 @@ test_fast_repair_progress_cadence_is_task_scoped() {
   local fast_dir fast_state fast_bin fast_out fast_pid normal_dir normal_state normal_bin normal_out normal_pid
   fast_dir=$(make_case fast-repair-progress); fast_state="$fast_dir/state"; fast_bin="$fast_dir/fakebin"; fast_out="$fast_dir/watch.out"
   printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$fast_state/fast.meta"
+  record_fast_repair_eligibility "$fast_dir" fast
   printf 'broader=failed\n' > "$fast_state/fast.fast-repair-broader"
   PATH="$fast_bin:$PATH" FM_STATE_OVERRIDE="$fast_state" FM_DATA_OVERRIDE="$fast_dir/data" \
     FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
@@ -1877,6 +1887,7 @@ test_fast_repair_marker_waits_for_the_durable_wake() {
   local dir state out pid exit_status
   dir=$(make_case fast-repair-marker-order); state="$dir/state"; out="$dir/watch.out"
   printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
   printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
   mkdir -p "$state/.wake-queue.seq"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
@@ -1902,13 +1913,13 @@ test_fast_repair_marker_waits_for_the_durable_wake() {
 }
 
 # The ordinary poll is deliberately far longer than the Fast Repair interval, so
-# the cycle's terminal wait is the only thing that could stretch the cadence: the
-# marker is pre-touched, which makes the first tick ineligible and forces the
-# watcher to wait before it can report.
-test_fast_repair_cadence_outlives_a_long_ordinary_poll() {
+# a task-only timer must produce the Fast Repair wake before that unchanged poll
+# ends.
+test_fast_repair_cadence_runs_inside_a_long_ordinary_poll() {
   local dir state out pid
   dir=$(make_case fast-repair-cadence); state="$dir/state"; out="$dir/watch.out"
   printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
   printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
   touch "$state/.last-fast-repair-progress"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
@@ -1916,16 +1927,43 @@ test_fast_repair_cadence_outlives_a_long_ordinary_poll() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   wait_for_exit "$pid" 120 \
-    || fail "the ordinary poll wait held the Fast Repair cadence past its own interval"
+    || fail "the ordinary poll wait held the Fast Repair cadence past its own interval: $(cat "$out")"
   grep -F 'check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
     || fail "the Fast Repair progress result was not surfaced: $(cat "$out")"
-  pass "an eligible Fast Repair task keeps its own interval under a much longer ordinary poll"
+  pass "an eligible Fast Repair task keeps its own interval inside a much longer ordinary poll"
+}
+
+test_fast_repair_timer_keeps_mixed_fleet_normal_polling() {
+  local dir state out pid i
+  dir=$(make_case fast-repair-mixed-poll); state="$dir/state"; out="$dir/watch.out"
+  printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  printf 'window=firstmate:fm-normal\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$state/normal.meta"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_POLL=8 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  i=0
+  while [ ! -e "$state/.last-fast-repair-progress" ] && [ "$i" -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$state/.last-fast-repair-progress" ] \
+    || fail "the mixed-fleet watcher never started its Fast Repair cadence"
+  sleep 1
+  printf 'blocked: normal task needs captain\n' > "$state/normal.status"
+  wait_live "$pid" 25 || fail "a Fast Repair timer shortened the normal task poll: $(cat "$out")"
+  wait_for_exit "$pid" 100 || fail "the unchanged normal poll did not later surface its blocked status"
+  grep -F "signal: $state/normal.status" "$out" >/dev/null \
+    || fail "the normal blocked status was not surfaced after its ordinary poll: $(cat "$out")"
+  pass "a Fast Repair timer leaves mixed-fleet normal polling unchanged"
 }
 
 test_signal_reason_is_actionable_classifier
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
-test_fast_repair_cadence_outlives_a_long_ordinary_poll
+test_fast_repair_cadence_runs_inside_a_long_ordinary_poll
+test_fast_repair_timer_keeps_mixed_fleet_normal_polling
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

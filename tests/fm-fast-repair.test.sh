@@ -23,11 +23,17 @@ make_home() {
 run_fast() {
   local home=$1
   shift
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$FAST" "$@" 2>&1
+  ( cd "$home" && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$FAST" "$@" ) 2>&1
+}
+
+write_regression_test() {
+  local home=$1 code=${2:-0}
+  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/regression.test.sh"
+  chmod +x "$home/regression.test.sh"
 }
 
 intake() {
-  local home=$1 id=$2 reproduction=${3-known-reproduction} root_cause=${4-confirmed-root-cause} isolation=${5-isolated-change}
+  local home=$1 id=$2 reproduction=${3-reproduced} root_cause=${4-confirmed} isolation=${5-isolated}
   local schema=${6-none} authentication=${7-none} authorization=${8-none} secrets=${9-none} financial=${10-none} legal=${11-none} side_effects=${12-none}
   run_fast "$home" intake "$id" --request 'fast-repair: repair fixture' \
     --reproduction "$reproduction" --root-cause "$root_cause" --isolation "$isolation" \
@@ -93,18 +99,28 @@ test_exact_prefix_only() {
 }
 
 test_eligibility_requires_every_typed_fact() {
-  local home out status field id=eligible-all
+  local home out status field id=eligible-all invalid
   home=$(make_home eligibility)
   out=$(intake "$home" "$id")
   assert_contains "$out" "fast-repair eligible: $id" "complete typed eligibility did not pass"
   run_fast "$home" eligible "$id" >/dev/null || fail "stored complete eligibility did not validate"
 
+  out=$(intake "$home" invalid-reproduction a confirmed isolated)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an untyped reproduction proof was accepted"
+  out=$(intake "$home" invalid-root-cause reproduced a isolated)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an untyped root-cause proof was accepted"
+  out=$(intake "$home" invalid-isolation reproduced confirmed a)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an untyped isolation proof was accepted"
+
   for field in reproduction root_cause isolation; do
     id="missing-$field"
     case "$field" in
-      reproduction) out=$(intake "$home" "$id" '' confirmed-root-cause isolated-change) ;;
-      root_cause) out=$(intake "$home" "$id" known-reproduction '' isolated-change) ;;
-      isolation) out=$(intake "$home" "$id" known-reproduction confirmed-root-cause '') ;;
+      reproduction) out=$(intake "$home" "$id" '' confirmed isolated) ;;
+      root_cause) out=$(intake "$home" "$id" reproduced '' isolated) ;;
+      isolation) out=$(intake "$home" "$id" reproduced confirmed '') ;;
     esac
     status=$?
     [ "$status" -ne 0 ] || fail "missing $field was accepted"
@@ -112,9 +128,9 @@ test_eligibility_requires_every_typed_fact() {
 
     id="unknown-$field"
     case "$field" in
-      reproduction) out=$(intake "$home" "$id" unknown confirmed-root-cause isolated-change) ;;
-      root_cause) out=$(intake "$home" "$id" known-reproduction unknown isolated-change) ;;
-      isolation) out=$(intake "$home" "$id" known-reproduction confirmed-root-cause ambiguous) ;;
+      reproduction) out=$(intake "$home" "$id" unknown confirmed isolated) ;;
+      root_cause) out=$(intake "$home" "$id" reproduced unknown isolated) ;;
+      isolation) out=$(intake "$home" "$id" reproduced confirmed ambiguous) ;;
     esac
     status=$?
     [ "$status" -ne 0 ] || fail "unknown or ambiguous $field was accepted"
@@ -124,13 +140,13 @@ test_eligibility_requires_every_typed_fact() {
   for field in schema authentication authorization secrets financial legal side_effects; do
     id="risk-$field"
     case "$field" in
-      schema) out=$(intake "$home" "$id" a b c changed) ;;
-      authentication) out=$(intake "$home" "$id" a b c none changed) ;;
-      authorization) out=$(intake "$home" "$id" a b c none none changed) ;;
-      secrets) out=$(intake "$home" "$id" a b c none none none changed) ;;
-      financial) out=$(intake "$home" "$id" a b c none none none none changed) ;;
-      legal) out=$(intake "$home" "$id" a b c none none none none none changed) ;;
-      side_effects) out=$(intake "$home" "$id" a b c none none none none none none changed) ;;
+      schema) out=$(intake "$home" "$id" reproduced confirmed isolated changed) ;;
+      authentication) out=$(intake "$home" "$id" reproduced confirmed isolated none changed) ;;
+      authorization) out=$(intake "$home" "$id" reproduced confirmed isolated none none changed) ;;
+      secrets) out=$(intake "$home" "$id" reproduced confirmed isolated none none none changed) ;;
+      financial) out=$(intake "$home" "$id" reproduced confirmed isolated none none none none changed) ;;
+      legal) out=$(intake "$home" "$id" reproduced confirmed isolated none none none none none changed) ;;
+      side_effects) out=$(intake "$home" "$id" reproduced confirmed isolated none none none none none none changed) ;;
     esac
     status=$?
     [ "$status" -ne 0 ] || fail "forbidden $field change was accepted"
@@ -144,13 +160,18 @@ test_evidence_and_ready_gates() {
   home=$(make_home gates)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
+  write_regression_test "$home" 1
 
-  out=$(run_fast "$home" evidence "$id" --regression-command false --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
   status=$?
   [ "$status" -ne 0 ] || fail "failed regression evidence allowed publication"
   assert_contains "$out" "PR publication remains blocked" "failed evidence did not explain the publication block"
 
-  run_fast "$home" evidence "$id" --regression-command true --focused-command true >/dev/null || fail "passing focused evidence was rejected"
+  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-command true)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an arbitrary successful regression command was accepted"
+  write_regression_test "$home"
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null || fail "passing focused evidence was rejected"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   # The real green rollup omits the pending segment when nothing is pending.
@@ -173,9 +194,10 @@ test_pr_check_rollup_states() {
   home=$(make_home rollup)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
+  write_regression_test "$home"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
-  run_fast "$home" evidence "$id" --regression-command true --focused-command true >/dev/null \
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null \
     || fail "focused evidence fixture was rejected"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
     || fail "broader fixture was rejected"
@@ -241,10 +263,35 @@ test_stored_eligibility_uses_the_intake_rule() {
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still passed the eligibility gate"
   assert_contains "$out" "eligibility evidence" "the eligibility gate did not name its refusal"
-  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still reached the evidence gate"
   pass "every Fast Repair gate re-applies intake's own rule to the stored evidence record"
+}
+
+test_later_gates_revalidate_typed_eligibility() {
+  local home id=later-gates f out status gate
+  home=$(make_home later-gates)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
+  write_regression_test "$home"
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null \
+    || fail "the later-gate fixture could not record focused evidence"
+  f="$home/data/$id/fast-repair-eligibility"
+  sed 's/^isolation=.*/isolation=isolated-change/' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
+  printf 'Fast Repair fixture body.\n' > "$home/body.md"
+  for gate in publish-pr broader progress ready; do
+    case "$gate" in
+      publish-pr) out=$(run_fast "$home" publish-pr "$id" --title fixture --body-file "$home/body.md") ;;
+      broader) out=$(run_fast "$home" broader "$id" --command true) ;;
+      progress) out=$(run_fast "$home" progress "$id") ;;
+      ready) out=$(run_fast "$home" ready "$id") ;;
+    esac
+    status=$?
+    [ "$status" -ne 0 ] || fail "a later Fast Repair gate accepted tampered typed eligibility: $gate"
+    assert_contains "$out" 'eligibility evidence' "a later Fast Repair gate did not name invalid eligibility: $gate"
+  done
+  pass "all later Fast Repair gates revalidate typed eligibility"
 }
 
 # The generated brief is firstmate's emitted worker interface, so the mandated
@@ -255,6 +302,7 @@ test_brief_commands_reach_the_scaffolding_home() {
   home=$(make_home brief-home)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
+  write_regression_test "$home"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     "$ROOT/bin/fm-brief.sh" "$id" fixtureproj --mode fast-repair >/dev/null \
     || fail "the Fast Repair brief could not be scaffolded"
@@ -267,8 +315,8 @@ test_brief_commands_reach_the_scaffolding_home() {
   prefix=${cmd%% evidence *}
   [ "$prefix" != "$cmd" ] || fail "the mandated evidence command could not be read from the brief"
 
-  out=$(env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    bash -c "$prefix evidence $id --regression-command true --focused-command true" 2>&1)
+  out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    bash -c "$prefix evidence $id --regression-test regression.test.sh --focused-command true" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "the brief's own evidence command could not reach the task record: $out"
   assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
@@ -293,10 +341,11 @@ test_evidence_commands_ignore_a_login_profile() {
 exit 0
 SH
   chmod +x "$toolbin/fm-fixture-tool"
+  write_regression_test "$home"
 
-  out=$(HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
+  out=$(cd "$home" && HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
-    "$FAST" evidence "$id" --regression-command fm-fixture-tool \
+    "$FAST" evidence "$id" --regression-test regression.test.sh \
     --focused-command fm-fixture-tool 2>&1)
   status=$?
   [ "$status" -eq 0 ] \
@@ -316,10 +365,12 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
   artifact="$home/suite-artifact"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/regression.test.sh"
+  chmod +x "$home/regression.test.sh"
 
   ( umask 022
     run_fast "$home" evidence "$id" \
-      --regression-command "touch '$artifact'" --focused-command true >/dev/null ) \
+      --regression-test regression.test.sh --focused-command true >/dev/null ) \
     || fail "the evidence gate refused its own passing fixture commands"
 
   [ -e "$artifact" ] || fail "the regression command did not run"
@@ -335,6 +386,7 @@ test_private_records_do_not_impose_their_umask_on_tests() {
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
 test_stored_eligibility_uses_the_intake_rule
+test_later_gates_revalidate_typed_eligibility
 test_brief_commands_reach_the_scaffolding_home
 test_evidence_commands_ignore_a_login_profile
 test_private_records_do_not_impose_their_umask_on_tests
