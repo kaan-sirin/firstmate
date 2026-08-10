@@ -7,7 +7,7 @@
 #     --schema none --authentication none --authorization none --secrets none \
 #     --financial none --legal none --side-effects none
 #   fm-fast-repair.sh eligible <task-id>
-#   fm-fast-repair.sh evidence <task-id> --regression-test <relative-executable-test> --focused-command <command>
+#   fm-fast-repair.sh evidence <task-id> --regression-test <relative-executable-test> --focused-test <relative-executable-test>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
 #   fm-fast-repair.sh broader <task-id> --command <command>
 #   fm-fast-repair.sh progress <task-id>
@@ -21,8 +21,8 @@
 # uses normal intake for that request.
 #
 # A Fast Repair spawn must use mode=fast-repair, yolo=off, and the built-in
-# Codex gpt-5.6-luna medium profile. `evidence` executes one named regression
-# test directly and a focused-module command and records their result. `publish-pr` refuses
+# Codex gpt-5.6-luna medium profile. `evidence` executes named regression and
+# focused-module tests directly and records their result. `publish-pr` refuses
 # until both passed, then opens and registers a direct PR. `broader` is run
 # after publication while PR checks run concurrently. `ready` refuses until the
 # broader command and all PR checks are green. `progress` prints only a changed
@@ -48,8 +48,7 @@ fail() {
 }
 
 task_id_valid() {
-  case "$1" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
-  return 0
+  fm_task_id_creation_valid "$1"
 }
 
 regular_file() {
@@ -92,12 +91,15 @@ positive_fact_valid() { # <field> <value>
 
 risk_excluded() { [ "$1" = none ]; }
 
-regression_test_valid() { # <relative path>
+test_path_valid() {
   case "$1" in
     ''|/*|.|..|../*|*/../*|*'/..'|*$'\n'*|*$'\r'*) return 1 ;;
   esac
   regular_file "$1" && [ -x "$1" ]
 }
+
+regression_test_valid() { test_path_valid "$1"; }
+focused_test_valid() { test_path_valid "$1"; }
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
 tests_file() { printf '%s/%s.fast-repair-tests\n' "$STATE" "$1"; }
@@ -130,15 +132,18 @@ eligibility_valid() {
 }
 
 tests_passed() {
-  local id=$1 f regression_test
+  local id=$1 f regression_test focused_test
   f=$(tests_file "$id")
   regular_file "$f" || return 1
   regression_test=$(field_get "$f" regression_test)
+  focused_test=$(field_get "$f" focused_test)
   regression_test_valid "$regression_test" || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 3 ] || return 1
+  focused_test_valid "$focused_test" || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 4 ] || return 1
   [ "$(grep -c '^regression=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -c '^focused=passed$' "$f")" = 1 ] || return 1
-  [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ]
+  [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "focused_test=$focused_test" "$f")" = 1 ]
 }
 
 broader_passed() {
@@ -310,7 +315,7 @@ case "$command" in
     shift || true
     task_id_valid "$id" || fail "task id is missing or invalid"
     regression_test=
-    focused=
+    focused_test=
     while [ "$#" -gt 0 ]; do
       key=$1
       shift
@@ -319,7 +324,7 @@ case "$command" in
       shift
       case "$key" in
         --regression-test) regression_test=$value ;;
-        --focused-command) focused=$value ;;
+        --focused-test) focused_test=$value ;;
         *) fail "unknown test evidence flag $key" ;;
       esac
     done
@@ -327,17 +332,19 @@ case "$command" in
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     regression_test_valid "$regression_test" \
       || fail "regression-test must name an executable regular test file below the current worktree"
-    [ -n "$focused" ] || fail "a focused-module command is required"
+    focused_test_valid "$focused_test" \
+      || fail "focused-test must name an executable regular test file below the current worktree"
     mkdir -p "$STATE"
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
     if "./$regression_test" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && bash -c "$focused" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    if [ "$regression_result" = passed ] && "./$focused_test" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"
       printf 'focused=%s\n' "$focused_result"
+      printf 'focused_test=%s\n' "$focused_test"
     } | private_write "$record" || fail "the evidence record could not be written"
     mv -f "$record" "$(tests_file "$id")"
     tests_passed "$id" || fail "regression or focused-module evidence failed; PR publication remains blocked"

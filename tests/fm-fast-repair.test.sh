@@ -32,6 +32,12 @@ write_regression_test() {
   chmod +x "$home/regression.test.sh"
 }
 
+write_focused_test() {
+  local home=$1 code=${2:-0}
+  printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/focused.test.sh"
+  chmod +x "$home/focused.test.sh"
+}
+
 intake() {
   local home=$1 id=$2 reproduction=${3-reproduced} root_cause=${4-confirmed} isolation=${5-isolated}
   local schema=${6-none} authentication=${7-none} authorization=${8-none} secrets=${9-none} financial=${10-none} legal=${11-none} side_effects=${12-none}
@@ -105,6 +111,14 @@ test_eligibility_requires_every_typed_fact() {
   assert_contains "$out" "fast-repair eligible: $id" "complete typed eligibility did not pass"
   run_fast "$home" eligible "$id" >/dev/null || fail "stored complete eligibility did not validate"
 
+  for id in . ..; do
+    out=$(intake "$home" "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "a dot task id escaped the Fast Repair task directory: $id"
+  done
+  [ ! -e "$home/data/fast-repair-eligibility" ] || fail "the dot task id wrote outside its task directory"
+  [ ! -e "$home/fast-repair-eligibility" ] || fail "the dot-dot task id wrote outside the data directory"
+
   out=$(intake "$home" invalid-reproduction a confirmed isolated)
   status=$?
   [ "$status" -ne 0 ] || fail "an untyped reproduction proof was accepted"
@@ -161,17 +175,27 @@ test_evidence_and_ready_gates() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
   write_regression_test "$home" 1
+  write_focused_test "$home"
 
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
   status=$?
   [ "$status" -ne 0 ] || fail "failed regression evidence allowed publication"
   assert_contains "$out" "PR publication remains blocked" "failed evidence did not explain the publication block"
 
-  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-command true --focused-test focused.test.sh)
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful regression command was accepted"
   write_regression_test "$home"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null || fail "passing focused evidence was rejected"
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an arbitrary successful focused command was accepted"
+  write_focused_test "$home" 1
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a failing focused test allowed publication"
+  assert_contains "$out" "PR publication remains blocked" "failed focused evidence did not explain the publication block"
+  write_focused_test "$home"
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "passing focused evidence was rejected"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   # The real green rollup omits the pending segment when nothing is pending.
@@ -195,9 +219,10 @@ test_pr_check_rollup_states() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
+  write_focused_test "$home"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null \
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
     || fail "focused evidence fixture was rejected"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
     || fail "broader fixture was rejected"
@@ -263,7 +288,7 @@ test_stored_eligibility_uses_the_intake_rule() {
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still passed the eligibility gate"
   assert_contains "$out" "eligibility evidence" "the eligibility gate did not name its refusal"
-  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
   status=$?
   [ "$status" -ne 0 ] || fail "a stored fact intake refuses still reached the evidence gate"
   pass "every Fast Repair gate re-applies intake's own rule to the stored evidence record"
@@ -275,7 +300,8 @@ test_later_gates_revalidate_typed_eligibility() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true >/dev/null \
+  write_focused_test "$home"
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
     || fail "the later-gate fixture could not record focused evidence"
   f="$home/data/$id/fast-repair-eligibility"
   sed 's/^isolation=.*/isolation=isolated-change/' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
@@ -303,6 +329,7 @@ test_brief_commands_reach_the_scaffolding_home() {
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
   write_regression_test "$home"
+  write_focused_test "$home"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     "$ROOT/bin/fm-brief.sh" "$id" fixtureproj --mode fast-repair >/dev/null \
     || fail "the Fast Repair brief could not be scaffolded"
@@ -316,7 +343,7 @@ test_brief_commands_reach_the_scaffolding_home() {
   [ "$prefix" != "$cmd" ] || fail "the mandated evidence command could not be read from the brief"
 
   out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
-    bash -c "$prefix evidence $id --regression-test regression.test.sh --focused-command true" 2>&1)
+    bash -c "$prefix evidence $id --regression-test regression.test.sh --focused-test focused.test.sh" 2>&1)
   status=$?
   [ "$status" -eq 0 ] || fail "the brief's own evidence command could not reach the task record: $out"
   assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
@@ -342,11 +369,13 @@ exit 0
 SH
   chmod +x "$toolbin/fm-fixture-tool"
   write_regression_test "$home"
+  printf '#!/usr/bin/env bash\nfm-fixture-tool\n' > "$home/focused.test.sh"
+  chmod +x "$home/focused.test.sh"
 
   out=$(cd "$home" && HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     "$FAST" evidence "$id" --regression-test regression.test.sh \
-    --focused-command fm-fixture-tool 2>&1)
+    --focused-test focused.test.sh 2>&1)
   status=$?
   [ "$status" -eq 0 ] \
     || fail "a login profile's PATH reset decided the evidence result: $out
@@ -367,10 +396,11 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   artifact="$home/suite-artifact"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/regression.test.sh"
   chmod +x "$home/regression.test.sh"
+  write_focused_test "$home"
 
   ( umask 022
     run_fast "$home" evidence "$id" \
-      --regression-test regression.test.sh --focused-command true >/dev/null ) \
+      --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null ) \
     || fail "the evidence gate refused its own passing fixture commands"
 
   [ -e "$artifact" ] || fail "the regression command did not run"

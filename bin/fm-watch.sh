@@ -467,6 +467,7 @@ scan_signals() {
 
 FAST_REPAIR_ACTIVE=0
 FAST_REPAIR_TIMER_PID=
+FAST_REPAIR_TIMER_MARKER=
 
 # The one place that decides whether durable task metadata opts a task into Fast
 # Repair. One tick collects the eligible ids with it once and reuses that list
@@ -688,23 +689,32 @@ heartbeat_scan_finds_actionable() {
 }
 
 fast_repair_progress_timer_start() {
-  local remaining parent
+  local marker remaining parent
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
-  if [ -n "$FAST_REPAIR_TIMER_PID" ] && kill -0 "$FAST_REPAIR_TIMER_PID" 2>/dev/null; then
-    return 0
-  fi
-  remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
-  [ "$remaining" -ge 1 ] || remaining=1
-  [ "$remaining" -lt "$POLL" ] || return 0
+  rm -f "$STATE"/.fast-repair-progress-timer.*
+  marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
+  FAST_REPAIR_TIMER_MARKER=$marker
   parent=$WATCHER_PID
   (
     trap - EXIT HUP INT TERM
-    sleep $((remaining + 1))
-    [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
-    FM_FAST_REPAIR_TIMER_PARENT=1 fast_repair_progress_tick
+    while [ -f "$marker" ]; do
+      remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
+      [ "$remaining" -ge 1 ] || remaining=1
+      sleep $((remaining + 1))
+      [ -f "$marker" ] || exit 0
+      [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
+      FM_FAST_REPAIR_TIMER_PARENT=1 fast_repair_progress_tick
+      [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
+    done
   ) &
   FAST_REPAIR_TIMER_PID=$!
+}
+
+fast_repair_progress_timer_finish() {
+  [ -n "${FAST_REPAIR_TIMER_MARKER:-}" ] || return 0
+  rm -f "$FAST_REPAIR_TIMER_MARKER"
+  FAST_REPAIR_TIMER_MARKER=
 }
 
 fast_repair_progress_timer_wake() {
@@ -752,6 +762,7 @@ event_wait_or_sleep() {
 
   if [ "${#windows[@]}" -eq 0 ]; then
     sleep "$POLL"
+    fast_repair_progress_timer_finish
     fast_repair_progress_timer_wake
     return
   fi
@@ -769,6 +780,7 @@ event_wait_or_sleep() {
   fi
   if [ "$_event_cap_ok" != 1 ]; then
     sleep "$POLL"
+    fast_repair_progress_timer_finish
     fast_repair_progress_timer_wake
     return
   fi
@@ -794,6 +806,7 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
+  fast_repair_progress_timer_finish
   fast_repair_progress_timer_wake
 }
 
@@ -846,6 +859,7 @@ elif [ "$FM_RECOVERY_MARKER_ACTION" = recover ]; then
 fi
 watcher_cleanup() {
   local cleanup_status=0 owns_lock=0 transition=release-lock
+  fast_repair_progress_timer_finish
   if [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "${WATCHER_PID:-}" ]; then
     owns_lock=1
     if [ "${WATCHER_RECOVERY_PENDING:-0}" -eq 1 ] \

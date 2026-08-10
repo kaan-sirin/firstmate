@@ -142,6 +142,30 @@ WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
 
 reset_state
+unset -f sleep
+FAST_REPAIR_ACTIVE=1
+FAST_REPAIR_TIMER_PID=
+FAST_REPAIR_TIMER_MARKER=
+FAST_REPAIR_PROGRESS_INTERVAL=1
+POLL=10
+WATCHER_PID=$$
+mkdir -p "$WATCH_LOCK"
+printf '%s\n' "$WATCHER_PID" > "$WATCH_LOCK/pid"
+touch "$STATE_DIR/.last-fast-repair-progress"
+: > "$TMP/fast-repair-timer-ticks"
+fast_repair_progress_tick() {
+  printf 'tick\n' >> "$TMP/fast-repair-timer-ticks"
+  FAST_REPAIR_ACTIVE=1
+}
+fast_repair_progress_timer_start
+command sleep 4.5
+fast_repair_progress_timer_finish
+wait "$FAST_REPAIR_TIMER_PID" 2>/dev/null || true
+[ "$(wc -l < "$TMP/fast-repair-timer-ticks" | tr -d '[:space:]')" -ge 2 ] \
+  || fail "a long Fast Repair wait did not repeat its progress timer"
+pass "fast_repair_progress_timer_start: Fast Repair repeats progress ticks during a long wait"
+
+reset_state
 fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 FAST_REPAIR_ACTIVE=1
 fast_repair_progress_timer_start() {
