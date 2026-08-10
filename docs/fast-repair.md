@@ -25,6 +25,8 @@ Fast Repair requires typed evidence for all of these positive facts:
 - A confirmed root cause.
 - A narrow, isolated code change.
 
+The intake values are exact: `--reproduction reproduced`, `--root-cause confirmed`, and `--isolation isolated`.
+
 It also requires each of these exclusions to be explicitly `none`:
 
 - Schema or migration change.
@@ -49,8 +51,9 @@ An explicit conflicting task profile refuses instead of being replaced.
 The task always has `yolo=off`, so captain approval remains the only merge authority.
 Fast Repair never enables auto-merge.
 
-The repair must add a regression test that reproduces the defect and must pass focused module tests.
+The repair must add an executable regression test that reproduces the defect and must pass focused module tests.
 `bin/fm-fast-repair.sh evidence` executes and records both gates.
+Its `--regression-test` value is a relative executable test-file path, which the helper runs directly.
 Missing or failed evidence blocks direct PR publication.
 
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
@@ -62,8 +65,7 @@ A PR is not called ready or green until the broader test and all required PR che
 A rollup where no check passed is never green, because the forge reports a cancelled check as a skipped one.
 
 The Fast Repair progress check runs about every 20 seconds only while durable task metadata records an eligible Fast Repair task.
-While such a task exists, the supervision cycle waits only until that task's next check is due, so the ordinary poll interval cannot stretch this cadence.
-It does not change ordinary task polling, stale handling, watcher behavior, or global defaults.
+The timer runs during the existing watcher wait, so it does not change ordinary task polling, stale handling, pane scans, backend capture cadence, backend transition budgets, or global defaults.
 A relaunch of a Fast Repair task reuses the recorded profile, so the standard recovery command needs no profile flags.
 
 ## Examples
