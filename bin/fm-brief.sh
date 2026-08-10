@@ -367,14 +367,15 @@ case "$MODE" in
     IFS= read -r -d '' DOD <<EOF || true
 # Definition of done
 Delivery contract: mode=fast-repair
-This task is a strict Fast Repair exception and has already passed the typed eligibility record owned by \`bin/fm-fast-repair.sh\`.
+This task is a strict Fast Repair exception and has already passed the typed eligibility record owned by \`$FM_ROOT/bin/fm-fast-repair.sh\`.
+Every command below is that absolute helper path because your worktree is the project's, not firstmate's; run each one from your worktree.
 Do not create a scout or run plan, design, CEO, engineering, or other extra review workflows.
 Add a new regression test that reproduces the reported defect and make the narrow repair.
-Run \`bin/fm-fast-repair.sh evidence $ID --regression-command '<command>' --focused-command '<command>'\`.
+Run \`$FM_ROOT/bin/fm-fast-repair.sh evidence $ID --regression-command '<command>' --focused-command '<command>'\`.
 It runs and records both gates, and it refuses PR publication when either result is missing or failed.
-After it passes, use \`bin/fm-fast-repair.sh publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
-Then run \`bin/fm-fast-repair.sh broader $ID --command '<broader test command>'\` while the new PR's checks run concurrently.
-Do not call the PR ready or green until \`bin/fm-fast-repair.sh ready $ID\` passes.
+After it passes, use \`$FM_ROOT/bin/fm-fast-repair.sh publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
+Then run \`$FM_ROOT/bin/fm-fast-repair.sh broader $ID --command '<broader test command>'\` while the new PR's checks run concurrently.
+Do not call the PR ready or green until \`$FM_ROOT/bin/fm-fast-repair.sh ready $ID\` passes.
 If broader tests or PR checks fail after the PR opens, append \`failed: PR {url} is open but not green because {failed evidence}\` and stop.
 Never enable auto-merge, and never merge the PR.
 When ready passes, append \`done: PR {url} checks green\` and stop for captain approval.

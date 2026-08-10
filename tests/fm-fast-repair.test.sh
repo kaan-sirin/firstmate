@@ -31,6 +31,43 @@ intake() {
     --secrets "$secrets" --financial "$financial" --legal "$legal" --side-effects "$side_effects"
 }
 
+# The fake reproduces the real `gh-axi pr checks` contract: one TOON `summary:`
+# field whose comma-bearing value is double-quoted, and the distinct
+# no-checks-configured shape that carries no summary field at all. Every argv is
+# recorded so the repository the checks were read from is observable.
+write_fake_gh() {
+  local home=$1 fakebin="$1/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/gh-axi" <<EOF
+#!/usr/bin/env bash
+FAKE_HOME='$home'
+EOF
+  cat >> "$fakebin/gh-axi" <<'SH'
+printf '%s\n' "$*" >> "$FAKE_HOME/gh-axi.args"
+case "${1:-}" in
+  pr)
+    case "${2:-}" in
+      create) printf 'https://github.com/acme/repo/pull/42\n' ;;
+      checks) cat "$FAKE_HOME/checks-output" ;;
+    esac
+    ;;
+esac
+SH
+  cat > "$fakebin/gh" <<'SH'
+#!/usr/bin/env bash
+exit 1
+SH
+  chmod +x "$fakebin/gh-axi" "$fakebin/gh"
+}
+
+set_rollup() { # <home> <summary text>
+  printf 'summary: "%s"\n' "$2" > "$1/checks-output"
+}
+
+set_no_checks_rollup() { # <home>
+  printf 'checks: "0 passed, 0 failed — this PR has no CI checks configured"\n' > "$1/checks-output"
+}
+
 write_fast_meta() {
   local home=$1 id=$2 pr=${3:-}
   {
@@ -110,25 +147,10 @@ test_evidence_and_ready_gates() {
   assert_contains "$out" "PR publication remains blocked" "failed evidence did not explain the publication block"
 
   run_fast "$home" evidence "$id" --regression-command true --focused-command true >/dev/null || fail "passing focused evidence was rejected"
+  write_fake_gh "$home"
   fakebin="$home/fakebin"
-  mkdir -p "$fakebin"
-  cat > "$fakebin/gh-axi" <<'SH'
-#!/usr/bin/env bash
-case "${1:-}" in
-  pr)
-    case "${2:-}" in
-      create) printf 'https://github.com/acme/repo/pull/42\n' ;;
-      checks) printf 'summary: "4 passed, 0 failed, 0 pending, 4 total"\n' ;;
-    esac
-    ;;
-esac
-SH
-  cat > "$fakebin/gh" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$fakebin/gh-axi"
-  chmod +x "$fakebin/gh"
+  # The real green rollup omits the pending segment when nothing is pending.
+  set_rollup "$home" '4 passed, 0 failed, 4 total'
   printf 'Fast Repair fixture body.\n' > "$home/body.md"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
   assert_contains "$out" 'fast-repair PR opened: https://github.com/acme/repo/pull/42' "passing evidence did not open the direct PR"
@@ -138,10 +160,56 @@ SH
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
   assert_contains "$out" 'pr-checks-green' "green PR checks were not available to the Fast Repair progress cadence"
+  assert_grep '--repo acme/repo' "$home/gh-axi.args" "PR checks were not read from the registered PR's own repository"
   pass "Fast Repair blocks failed focused evidence and requires broader plus PR checks before ready"
+}
+
+test_pr_check_rollup_states() {
+  local home id=rollup-fixture fakebin out status
+  home=$(make_home rollup)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
+  write_fake_gh "$home"
+  fakebin="$home/fakebin"
+  run_fast "$home" evidence "$id" --regression-command true --focused-command true >/dev/null \
+    || fail "focused evidence fixture was rejected"
+  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
+    || fail "broader fixture was rejected"
+
+  # A skipped check is neither failed nor pending, so the rollup is still green.
+  set_rollup "$home" '3 passed, 1 skipped, 0 failed, 4 total'
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id") \
+    || fail "a rollup with only passed and skipped checks was refused: $out"
+  assert_contains "$out" 'fast-repair ready:' "skipped-but-green rollup did not report ready"
+
+  # "10 failed, 0 pending" contains "0 failed, 0 pending" as a substring.
+  set_rollup "$home" '3 passed, 10 failed, 0 pending, 13 total'
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a rollup with 10 failed checks was reported ready"
+  assert_contains "$out" 'PR checks are not green' "failed rollup did not name the refusal"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
+  assert_contains "$out" 'pr-checks-failed' "failed rollup was not surfaced to the progress cadence"
+
+  set_rollup "$home" '2 passed, 0 failed, 2 pending, 4 total'
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a pending rollup was reported ready"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
+  [ -z "$out" ] || fail "a pending rollup produced an actionable progress result: $out"
+
+  set_no_checks_rollup "$home"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a PR with no configured checks was reported ready"
+  assert_contains "$out" 'PR checks could not be read' "an absent rollup did not name the refusal"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
+  [ -z "$out" ] || fail "an absent rollup produced an actionable progress result: $out"
+  pass "Fast Repair reads the PR rollup counts numerically for ready and the progress cadence"
 }
 
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
 test_evidence_and_ready_gates
+test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"

@@ -471,6 +471,11 @@ scan_signals() {
 # stale, custom-check, heartbeat, or sleep cadence, and it never starts another
 # watcher. Each actionable result is deduplicated per task so an unchanged failed
 # PR check cannot wake firstmate every twenty seconds.
+# The progress helper reads the PR's checks from the forge, so it is a network
+# call and runs through run_check_capture exactly like every other per-task
+# check: bounded by CHECK_TIMEOUT in its own process group, so a hung or slow
+# forge call can neither stall the beat, the signal scan, and the stale and
+# wedge detection of other crewmates, nor hold off a stop signal.
 fast_repair_progress_tick() {
   local meta id result marker prior active=0
   for meta in "$STATE"/*.meta; do
@@ -487,8 +492,12 @@ fast_repair_progress_tick() {
     grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
     grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
-    result=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" 2>/dev/null || true)
+    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id"; then
+      result=$FM_CHECK_RESULT
+    else
+      result=
+    fi
     [ -n "$result" ] || continue
     marker="$STATE/.fast-repair-progress-$id"
     prior=$(cat "$marker" 2>/dev/null || true)
