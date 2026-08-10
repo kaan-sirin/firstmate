@@ -310,14 +310,19 @@ pass "fast_repair_progress_timer_wake: torn-down tasks discard pending handoffs"
 reset_state
 fm_write_meta "$STATE_DIR/tk14.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 FAST_REPAIR_PROGRESS_INTERVAL=20
-PROGRESS_CHECKS=0
+: > "$TMP/progress-checks"
 run_check_capture() {
-  PROGRESS_CHECKS=$((PROGRESS_CHECKS + 1))
+  printf 'check\n' >> "$TMP/progress-checks"
   FM_CHECK_RESULT=
 }
 FM_FAST_REPAIR_TIMER_GENERATION=9 fast_repair_progress_tick
 FM_FAST_REPAIR_TIMER_GENERATION=10 fast_repair_progress_tick
-[ "$PROGRESS_CHECKS" = 1 ] || fail "short waits reset the Fast Repair progress cadence"
+for progress_wait in $(seq 1 50); do
+  [ -s "$TMP/progress-checks" ] && break
+  command sleep 0.01
+done
+[ "$(wc -l < "$TMP/progress-checks" | tr -d '[:space:]')" = 1 ] \
+  || fail "short waits reset the Fast Repair progress cadence"
 pass "fast_repair_progress_tick: short waits retain the task progress cadence"
 
 reset_state
@@ -335,6 +340,12 @@ run_check_capture() {
 FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
   FM_FAST_REPAIR_TIMER_GENERATION=3 \
   fast_repair_progress_tick
+for progress_wait in $(seq 1 50); do
+  compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9a-3" >/dev/null \
+    && compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9b-3" >/dev/null \
+    && break
+  command sleep 0.01
+done
 fast_repair_progress_timer_wake
 grep -q 'fast-repair:tk9a' "$STATE_DIR/.wake-queue" \
   || fail "the first Fast Repair task was not queued"
@@ -376,5 +387,73 @@ fast_repair_progress_timer_wake
 grep -q 'fast-repair:tk11' "$STATE_DIR/.wake-queue" \
   || fail "a retained Fast Repair handoff did not retry its append"
 pass "fast_repair_progress_timer_wake: append failure retains the handoff for retry"
+
+reset_state
+retirement_pids=()
+for retirement_id in a b; do
+  retirement_ready="$TMP/retirement-$retirement_id.ready"
+  retirement_term="$TMP/retirement-$retirement_id.term"
+  FM_RETIREMENT_READY="$retirement_ready" FM_RETIREMENT_TERM="$retirement_term" \
+    bash -c 'trap '\''printf term > "$FM_RETIREMENT_TERM"; sleep 0.15; exit 0'\'' TERM; : > "$FM_RETIREMENT_READY"; while :; do :; done' &
+  retirement_pid=$!
+  retirement_pids+=("$retirement_pid")
+  for retirement_wait in $(seq 1 50); do
+    [ -e "$retirement_ready" ] && break
+    command sleep 0.01
+  done
+  [ -e "$retirement_ready" ] || fail "a Fast Repair retirement fixture did not start"
+  printf '%s\n' "$retirement_pid" > "$STATE_DIR/.fast-repair-progress-child-$retirement_id-20"
+done
+fast_repair_progress_timer_tasks_finish 20 &
+retirement_finish_pid=$!
+command sleep 0.08
+[ -e "$TMP/retirement-a.term" ] && [ -e "$TMP/retirement-b.term" ] || {
+  kill "$retirement_finish_pid" 2>/dev/null || true
+  wait "$retirement_finish_pid" 2>/dev/null || true
+  for retirement_pid in "${retirement_pids[@]}"; do
+    kill -TERM "$retirement_pid" 2>/dev/null || true
+    wait "$retirement_pid" 2>/dev/null || true
+  done
+  fail "Fast Repair timer retirement did not signal every task before its bounded reap"
+}
+wait "$retirement_finish_pid" || fail "Fast Repair timer retirement did not finish"
+for retirement_pid in "${retirement_pids[@]}"; do
+  wait "$retirement_pid" 2>/dev/null || true
+done
+for retirement_id in a b; do
+  [ ! -e "$STATE_DIR/.fast-repair-progress-child-$retirement_id-20" ] \
+    || fail "Fast Repair timer retirement retained a child marker"
+done
+pass "fast_repair_progress_timer_tasks_finish: task retirement signals children concurrently"
+
+normal_home="$TMP/normal-usr1-home"
+normal_state="$normal_home/state"
+normal_data="$normal_home/data"
+normal_out="$TMP/normal-usr1.out"
+mkdir -p "$normal_state" "$normal_data"
+FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$normal_home" FM_STATE_OVERRIDE="$normal_state" \
+  FM_DATA_OVERRIDE="$normal_data" FM_POLL=60 FM_SIGNAL_GRACE=1 \
+  FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$normal_out" 2>&1 &
+normal_pid=$!
+normal_ready=0
+for normal_wait in $(seq 1 50); do
+  if [ -s "$normal_state/.watch.lock/pid" ]; then
+    normal_ready=1
+    break
+  fi
+  kill -0 "$normal_pid" 2>/dev/null || break
+  command sleep 0.02
+done
+if [ "$normal_ready" -ne 1 ]; then
+  kill "$normal_pid" 2>/dev/null || true
+  wait "$normal_pid" 2>/dev/null || true
+  fail "an ordinary watcher did not start for the USR1 regression: $(cat "$normal_out")"
+fi
+kill -USR1 "$normal_pid" || fail "could not signal the ordinary watcher with USR1"
+wait "$normal_pid"
+normal_status=$?
+[ "$normal_status" -eq 138 ] \
+  || fail "an ordinary watcher changed its USR1 termination status: $normal_status"
+pass "ordinary watcher keeps default USR1 termination behavior"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
