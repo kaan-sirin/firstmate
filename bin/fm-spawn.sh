@@ -2255,6 +2255,13 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
+if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ]; then
+  "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" --worktree "$WT" >/dev/null || {
+    echo "error: Fast Repair spawn refused because its reproduction revision is not proven for the task worktree; use the normal delivery path" >&2
+    exit 1
+  }
+fi
+
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
