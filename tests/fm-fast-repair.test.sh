@@ -17,6 +17,7 @@ make_home() {
   local name=$1 home
   home="$TMP_ROOT/$name"
   mkdir -p "$home/data" "$home/state" "$home/config"
+  fm_git_init_commit "$home"
   printf '%s\n' "$home"
 }
 
@@ -88,7 +89,7 @@ write_fast_meta() {
   local home=$1 id=$2 pr=${3:-}
   {
     printf 'window=firstmate:fm-%s\n' "$id"
-    printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n'
+    printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nworktree=%s\n' "$home"
     [ -z "$pr" ] || printf 'pr=%s\n' "$pr"
   } > "$home/state/$id.meta"
 }
@@ -118,6 +119,15 @@ test_eligibility_requires_every_typed_fact() {
   done
   [ ! -e "$home/data/fast-repair-eligibility" ] || fail "the dot task id wrote outside its task directory"
   [ ! -e "$home/fast-repair-eligibility" ] || fail "the dot-dot task id wrote outside the data directory"
+  write_fast_meta "$home" eligible-all
+  for id in ../outside ../../outside; do
+    out=$(run_fast "$home" progress "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "progress accepted an escaping task id: $id"
+    out=$(run_fast "$home" ready "$id")
+    status=$?
+    [ "$status" -ne 0 ] || fail "ready accepted an escaping task id: $id"
+  done
 
   out=$(intake "$home" invalid-reproduction a confirmed isolated)
   status=$?
@@ -170,7 +180,7 @@ test_eligibility_requires_every_typed_fact() {
 }
 
 test_evidence_and_ready_gates() {
-  local home id=gate-fixture out status fakebin
+  local home id=gate-fixture out status fakebin outside branch
   home=$(make_home gates)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
@@ -189,6 +199,15 @@ test_evidence_and_ready_gates() {
   out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful focused command was accepted"
+  outside="$TMP_ROOT/escaped-focused-test"
+  mkdir -p "$outside" "$home/tests"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/escaped-test-ran" > "$outside/escaped.test.sh"
+  chmod +x "$outside/escaped.test.sh"
+  ln -s "$outside" "$home/tests/link"
+  out=$(run_fast "$home" evidence "$id" --regression-test tests/link/escaped.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a parent symlink escaped the Fast Repair worktree"
+  [ ! -e "$home/escaped-test-ran" ] || fail "an escaped test path was executed"
   write_focused_test "$home" 1
   out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
   status=$?
@@ -196,14 +215,28 @@ test_evidence_and_ready_gates() {
   assert_contains "$out" "PR publication remains blocked" "failed focused evidence did not explain the publication block"
   write_focused_test "$home"
   run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "passing focused evidence was rejected"
+  git -C "$home" commit --quiet --allow-empty -m 'advance repair fixture'
+  printf 'Fast Repair fixture body.\n' > "$home/body.md"
+  out=$(run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair published a commit that its evidence did not test"
+  assert_contains "$out" 'focused evidence is absent or failed' "untested commit refusal was not actionable"
+  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "updated task HEAD evidence was rejected"
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   # The real green rollup omits the pending segment when nothing is pending.
   set_rollup "$home" '4 passed, 0 failed, 4 total'
-  printf 'Fast Repair fixture body.\n' > "$home/body.md"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md" --head unrelated)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair published an untested head branch"
+  assert_contains "$out" '--head must equal the tested task branch' "untested head refusal was not actionable"
+  assert_no_grep 'pr=' "$home/state/$id.meta" "untested head publication wrote a PR record"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
   assert_contains "$out" 'fast-repair PR opened: https://github.com/acme/repo/pull/42' "passing evidence did not open the direct PR"
   assert_grep 'pr=https://github.com/acme/repo/pull/42' "$home/state/$id.meta" "direct PR was not registered"
+  branch=$(git -C "$home" symbolic-ref --short HEAD)
+  assert_grep "pr create --title Fast Repair fixture --body-file $home/body.md --head $branch" "$home/gh-axi.args" \
+    "direct PR did not use the tested task branch"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null || fail "broader tests could not start after direct PR publication"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
@@ -301,8 +334,9 @@ test_later_gates_revalidate_typed_eligibility() {
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
   write_focused_test "$home"
-  run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null \
-    || fail "the later-gate fixture could not record focused evidence"
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the later-gate fixture could not record focused evidence: $out"
   f="$home/data/$id/fast-repair-eligibility"
   sed 's/^isolation=.*/isolation=isolated-change/' "$f" > "$f.tmp" && mv -f "$f.tmp" "$f"
   printf 'Fast Repair fixture body.\n' > "$home/body.md"

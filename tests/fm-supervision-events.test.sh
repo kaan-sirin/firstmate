@@ -35,6 +35,7 @@ reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.fast-repair-progress-wake \
+    "$STATE_DIR"/.fast-repair-progress-timer.* \
     "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled "$TMP"/fast-repair-transition-complete 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
@@ -140,6 +141,16 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+FAST_REPAIR_ACTIVE=0
+: > "$TMP/forge-called"
+fast_repair_progress_tick() { printf 'called\n' >> "$TMP/forge-called"; }
+fast_repair_progress_discover
+[ "$FAST_REPAIR_ACTIVE" = 1 ] || fail "Fast Repair metadata was not discovered for its wait-time timer"
+[ ! -s "$TMP/forge-called" ] || fail "Fast Repair Forge progress work ran in the main supervision loop"
+pass "fast_repair_progress_discover: main supervision reads only Fast Repair metadata"
 
 reset_state
 unset -f sleep
