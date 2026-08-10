@@ -36,12 +36,15 @@ reset_state() {
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
     "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.fast-repair-progress-wake \
     "$STATE_DIR"/.fast-repair-progress-timer.* \
-    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled "$TMP"/fast-repair-transition-complete 2>/dev/null || true
+    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled "$TMP"/fast-repair-transition-complete \
+    "$TMP"/fast-repair-parent-returned "$TMP"/fast-repair-handoff-blocked 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  FAST_REPAIR_TIMER_MARKER=
+  FAST_REPAIR_TIMER_HANDOFF_LOCK=
 }
 
 mkrec() {  # <pane_id> <status>
@@ -193,5 +196,44 @@ event_wait_or_sleep
 grep -q 'check: fast-repair tk6 broader-tests-failed' "$WAKE_LOG" \
   || fail "the durable Fast Repair timer result was not surfaced after the backend transition wait"
 pass "event_wait_or_sleep: Fast Repair keeps its timer result durable through the full backend wait"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk7.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+FAST_REPAIR_ACTIVE=1
+FAST_REPAIR_TIMER_MARKER=
+FAST_REPAIR_TIMER_HANDOFF_LOCK=
+WATCHER_PID=$$
+mkdir -p "$WATCH_LOCK"
+printf '%s\n' "$WATCHER_PID" > "$WATCH_LOCK/pid"
+fast_repair_progress_timer_start() {
+  local marker closing lock parent=$WATCHER_PID
+  marker=$(mktemp "$STATE_DIR/.fast-repair-progress-timer.XXXXXX")
+  closing="$marker.closing"
+  lock="$marker.handoff.lock"
+  FAST_REPAIR_TIMER_MARKER=$marker
+  (
+    command sleep 0.5
+    [ -e "$TMP/fast-repair-parent-returned" ] || : > "$TMP/fast-repair-handoff-blocked"
+    FM_FAST_REPAIR_TIMER_PARENT="$parent" \
+      FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
+      FM_FAST_REPAIR_TIMER_HANDOFF_LOCK="$lock" \
+      fast_repair_progress_timer_publish 'fast-repair tk7 pr-checks-failed'
+  ) &
+  FAST_REPAIR_TIMER_PID=$!
+}
+fm_backend_events_capable() { return 0; }
+fm_backend_wait_transition() {
+  command sleep 0.05
+  printf 'complete\n' > "$TMP/fast-repair-transition-complete"
+  return 1
+}
+event_wait_or_sleep
+: > "$TMP/fast-repair-parent-returned"
+command sleep 0.6
+[ -e "$TMP/fast-repair-transition-complete" ] || fail "the shutdown handoff interrupted the backend transition wait"
+[ ! -e "$TMP/fast-repair-handoff-blocked" ] || fail "the shutdown handoff blocked on the Fast Repair check"
+grep -q 'check: fast-repair tk7 pr-checks-failed' "$WAKE_LOG" \
+  || fail "a result written after timer shutdown was not delivered"
+pass "event_wait_or_sleep: Fast Repair delivers a result that races timer shutdown"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"
