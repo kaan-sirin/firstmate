@@ -101,6 +101,7 @@ request_valid() {
     *) return 1 ;;
   esac
   case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  case "${1#fast-repair: }" in *[![:space:]]*) ;; *) return 1 ;; esac
 }
 
 # The one rule for a proven positive fact and for an excluded risk. intake

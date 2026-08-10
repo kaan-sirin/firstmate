@@ -736,7 +736,7 @@ test_fast_repair_requires_and_records_its_builtin_profile() {
     printf 'Delivery contract: mode=fast-repair\n' > "$HOME_DIR/data/$task/brief.md"
     FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       "$FAST_REPAIR" intake "$task" --request 'fast-repair: fixture' \
-      --reproduction reproduced --root-cause confirmed --isolation isolated \
+      --reproduction reproduced --reproduction-revision 0000000000000000000000000000000000000000 --root-cause confirmed --isolation isolated \
       --schema none --authentication none --authorization none --secrets none \
       --financial none --legal none --side-effects none >/dev/null
   done

@@ -127,7 +127,7 @@ record_fast_repair_eligibility() {
   local dir=$1 id=$2
   FM_HOME="$dir" FM_STATE_OVERRIDE="$dir/state" FM_DATA_OVERRIDE="$dir/data" \
     "$ROOT/bin/fm-fast-repair.sh" intake "$id" --request 'fast-repair: watcher fixture' \
-    --reproduction reproduced --root-cause confirmed --isolation isolated \
+    --reproduction reproduced --reproduction-revision "$(git -C "$ROOT" rev-parse HEAD)" --root-cause confirmed --isolation isolated \
     --schema none --authentication none --authorization none --secrets none \
     --financial none --legal none --side-effects none >/dev/null
 }
@@ -1857,11 +1857,11 @@ test_afk_paused_changed_pane_hands_off_plain_stale() {
 test_fast_repair_progress_cadence_is_task_scoped() {
   local fast_dir fast_state fast_bin fast_out fast_pid normal_dir normal_state normal_bin normal_out normal_pid
   fast_dir=$(make_case fast-repair-progress); fast_state="$fast_dir/state"; fast_bin="$fast_dir/fakebin"; fast_out="$fast_dir/watch.out"
-  printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$fast_state/fast.meta"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nworktree=%s\n' "$ROOT" > "$fast_state/fast.meta"
   record_fast_repair_eligibility "$fast_dir" fast
   printf 'broader=failed\n' > "$fast_state/fast.fast-repair-broader"
-  PATH="$fast_bin:$PATH" FM_STATE_OVERRIDE="$fast_state" FM_DATA_OVERRIDE="$fast_dir/data" \
-    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+  PATH="$fast_bin:$PATH" FM_FAKE_CREW_STATE='state: working · source: run-step · validating (running)' FM_STATE_OVERRIDE="$fast_state" FM_DATA_OVERRIDE="$fast_dir/data" \
+    FM_POLL=3 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$fast_out" &
   fast_pid=$!
   wait_for_exit "$fast_pid" 40 || fail "Fast Repair progress result did not wake the watcher"

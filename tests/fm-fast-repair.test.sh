@@ -141,7 +141,7 @@ test_exact_prefix_only() {
   for request in 'fast-repair: fix fixture' 'fast-repair: a'; do
     "$FAST" is-request "$request" || fail "exact Fast Repair prefix was not recognized: $request"
   done
-  for request in 'fast-repair:' 'Fast-repair: fix' 'fast repair: fix' 'fast-repair : fix' 'xfast-repair: fix'; do
+  for request in 'fast-repair:' 'fast-repair: ' $'fast-repair: \t' 'Fast-repair: fix' 'fast repair: fix' 'fast-repair : fix' 'xfast-repair: fix'; do
     "$FAST" is-request "$request" && fail "near-match activated Fast Repair: $request"
   done
   pass "Fast Repair recognizes only the exact fast-repair: prefix"
