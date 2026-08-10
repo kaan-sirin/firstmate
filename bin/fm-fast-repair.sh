@@ -184,9 +184,37 @@ tests_passed() {
 }
 
 broader_passed() {
-  local f="$STATE/$1.fast-repair-broader"
+  local id=$1 f worktree branch head
+  f="$STATE/$id.fast-repair-broader"
   regular_file "$f" || return 1
-  [ "$(field_get "$f" broader)" = passed ]
+  task_revision_for "$id" || return 1
+  worktree=$(field_get "$f" worktree)
+  branch=$(field_get "$f" branch)
+  head=$(field_get "$f" head)
+  [ "$worktree" = "$TASK_WORKTREE" ] || return 1
+  [ "$branch" = "$TASK_BRANCH" ] || return 1
+  [ "$head" = "$TASK_HEAD" ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 4 ] || return 1
+  [ "$(grep -c '^broader=passed$' "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "worktree=$worktree" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "branch=$branch" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "head=$head" "$f")" = 1 ]
+}
+
+pr_head_matches_tested() {
+  local id=$1 meta pr_head remote_head
+  task_revision_for "$id" || return 1
+  meta="$STATE/$id.meta"
+  pr_identity_for "$id" || return 1
+  pr_head=$(field_get "$meta" pr_head)
+  fm_pr_head_valid "$pr_head" || return 1
+  [ "$(grep -Fxc "pr_head=$pr_head" "$meta")" = 1 ] || return 1
+  [ "$pr_head" = "$TASK_HEAD" ] || return 1
+  [ "$FM_PR_PROVIDER" = github ] || return 1
+  command -v gh >/dev/null 2>&1 || return 1
+  remote_head=$(cd "$TASK_WORKTREE" && gh pr view "$FM_PR_URL" --json headRefOid -q .headRefOid 2>/dev/null) || return 1
+  fm_pr_head_valid "$remote_head" || return 1
+  [ "$remote_head" = "$TASK_HEAD" ]
 }
 
 # The recorded pr= URL is re-parsed with the shared strict forge validator, so
@@ -429,6 +457,8 @@ case "$command" in
     url=$(printf '%s\n' "$out" | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -n 1 || true)
     [ -n "$url" ] || fail "PR creation returned no GitHub pull-request URL"
     "$SCRIPT_DIR/fm-pr-check.sh" "$id" "$url" >/dev/null
+    pr_head_matches_tested "$id" \
+      || fail "registered PR head does not match the exact tested task commit"
     printf 'fast-repair PR opened: %s\n' "$url"
     ;;
   broader)
@@ -439,13 +469,20 @@ case "$command" in
     broader_command=$2
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
+    tests_passed "$id" || fail "focused evidence is absent or failed"
+    task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     pr_identity_for "$id" || fail "broader tests start only after the direct PR is registered"
     [ -n "$broader_command" ] || fail "broader command is empty"
     log="$STATE/$id.fast-repair-broader.log"
     record="$STATE/.$id.fast-repair-broader.$$"
     private_truncate "$log" || fail "the broader-test log could not be created"
-    if bash -c "$broader_command" >>"$log" 2>&1; then result=passed; else result=failed; fi
-    printf 'broader=%s\n' "$result" | private_write "$record" \
+    if ( cd "$TASK_WORKTREE" && bash -c "$broader_command" ) >>"$log" 2>&1; then result=passed; else result=failed; fi
+    {
+      printf 'broader=%s\n' "$result"
+      printf 'worktree=%s\n' "$TASK_WORKTREE"
+      printf 'branch=%s\n' "$TASK_BRANCH"
+      printf 'head=%s\n' "$TASK_HEAD"
+    } | private_write "$record" \
       || fail "the broader-test record could not be written"
     mv -f "$record" "$STATE/$id.fast-repair-broader"
     [ "$result" = passed ] || fail "broader tests failed after PR publication; inspect $log and report the open PR as not green"
@@ -477,6 +514,7 @@ case "$command" in
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     tests_passed "$id" || fail "focused evidence is absent or failed"
     broader_passed "$id" || fail "broader tests are not passed"
+    pr_head_matches_tested "$id" || fail "registered PR head does not match the exact tested task commit"
     pr_identity_for "$id" || fail "no registered Fast Repair PR"
     summary=$(checks_summary "$FM_PR_NUMBER" "$FM_PR_OWNER/$FM_PR_REPO") || fail "PR checks could not be read"
     [ -n "$summary" ] || fail "PR checks could not be read"
