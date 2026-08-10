@@ -422,8 +422,8 @@ case "$command" in
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if "$regression_path" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && "$focused_path" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    if ( cd "$TASK_WORKTREE" && "$regression_path" ) >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
+    if [ "$regression_result" = passed ] && ( cd "$TASK_WORKTREE" && "$focused_path" ) >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"

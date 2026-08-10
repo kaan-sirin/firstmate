@@ -204,7 +204,7 @@ test_eligibility_requires_every_typed_fact() {
 }
 
 test_evidence_and_ready_gates() {
-  local home id=gate-fixture out status fakebin outside branch other
+  local home id=gate-fixture out status fakebin outside branch other evidence_other
   home=$(make_home gates)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
@@ -256,6 +256,19 @@ test_evidence_and_ready_gates() {
   [ "$status" -ne 0 ] || fail "a failing focused test allowed publication"
   assert_contains "$out" "PR publication remains blocked" "failed focused evidence did not explain the publication block"
   write_focused_test "$home"
+  printf 'task worktree\n' > "$home/cwd-proof"
+  commit_test_file "$home" cwd-proof
+  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/regression.test.sh"
+  chmod +x "$home/regression.test.sh"
+  commit_test_file "$home" regression.test.sh
+  printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/focused.test.sh"
+  chmod +x "$home/focused.test.sh"
+  commit_test_file "$home" focused.test.sh
+  evidence_other=$(make_home evidence-cwd)
+  printf 'other checkout\n' > "$evidence_other/cwd-proof"
+  out=$(run_fast_from "$evidence_other" "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -eq 0 ] || fail "evidence tests did not run from the task worktree: $out"
   run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh >/dev/null || fail "passing focused evidence was rejected"
   git -C "$home" commit --quiet --allow-empty -m 'advance repair fixture'
   printf 'Fast Repair fixture body.\n' > "$home/body.md"
