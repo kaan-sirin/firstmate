@@ -799,11 +799,21 @@ fast_repair_progress_timer_start() {
 }
 
 fast_repair_progress_timer_finish() {
-  local marker=${FAST_REPAIR_TIMER_MARKER:-}
+  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} i=0
   [ -n "$marker" ] || return 0
   : > "$marker.closing" || return 0
   rm -f "$marker"
   FAST_REPAIR_TIMER_MARKER=
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
+  FAST_REPAIR_TIMER_PID=
 }
 
 fast_repair_progress_timer_wake() {
@@ -990,7 +1000,6 @@ watcher_cleanup() {
 }
 trap watcher_cleanup EXIT
 trap 'exit 1' HUP INT TERM
-trap '' USR1
 # This watcher's own pid, as recorded in the lock by fm_lock_claim (which writes
 # ${BASHPID:-$$} from this same main shell). Read directly, never via a command
 # substitution, so it matches the stored holder pid for the self-eviction check.
