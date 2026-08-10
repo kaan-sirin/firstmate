@@ -467,9 +467,6 @@ scan_signals() {
 
 FAST_REPAIR_ACTIVE=0
 FAST_REPAIR_TIMER_PID=
-FAST_REPAIR_WAIT_PID=
-FAST_REPAIR_WAIT_OUTPUT=
-FAST_REPAIR_EVENT_REC=
 
 # The one place that decides whether durable task metadata opts a task into Fast
 # Repair. One tick collects the eligible ids with it once and reuses that list
@@ -710,64 +707,13 @@ fast_repair_progress_timer_start() {
   FAST_REPAIR_TIMER_PID=$!
 }
 
-fast_repair_wait_sleep() {
-  local rc
-  if [ "$FAST_REPAIR_ACTIVE" != 1 ]; then
-    sleep "$POLL"
-    return
-  fi
-  sleep "$POLL" &
-  FAST_REPAIR_WAIT_PID=$!
-  while kill -0 "$FAST_REPAIR_WAIT_PID" 2>/dev/null; do
-    fast_repair_progress_timer_wake
-    sleep 0.1
-  done
-  wait "$FAST_REPAIR_WAIT_PID"
-  rc=$?
-  FAST_REPAIR_WAIT_PID=
-  return "$rc"
-}
-
-fast_repair_wait_stop() {
-  [ -n "${FAST_REPAIR_WAIT_PID:-}" ] || return 0
-  kill "$FAST_REPAIR_WAIT_PID" 2>/dev/null || true
-  wait "$FAST_REPAIR_WAIT_PID" 2>/dev/null || true
-  FAST_REPAIR_WAIT_PID=
-  rm -f "${FAST_REPAIR_WAIT_OUTPUT:-}" 2>/dev/null || true
-  FAST_REPAIR_WAIT_OUTPUT=
-}
-
 fast_repair_progress_timer_wake() {
   local result
   [ -f "$STATE/.fast-repair-progress-wake" ] || return 0
   result=$(cat "$STATE/.fast-repair-progress-wake" 2>/dev/null || true)
   rm -f "$STATE/.fast-repair-progress-wake"
   [ -n "$result" ] || return 0
-  fast_repair_wait_stop
   wake "check: $result"
-}
-
-fast_repair_wait_transition() {
-  local backend=$1 session=$2 rc
-  FAST_REPAIR_EVENT_REC=
-  if [ "$FAST_REPAIR_ACTIVE" != 1 ]; then
-    FAST_REPAIR_EVENT_REC=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$backend" "$session" "$POLL" "$STATE" "${windows[@]}")
-    return $?
-  fi
-  FAST_REPAIR_WAIT_OUTPUT=$(mktemp "$STATE/.fm-fast-repair-event.XXXXXX") || return 1
-  FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$backend" "$session" "$POLL" "$STATE" "${windows[@]}" > "$FAST_REPAIR_WAIT_OUTPUT" &
-  FAST_REPAIR_WAIT_PID=$!
-  while kill -0 "$FAST_REPAIR_WAIT_PID" 2>/dev/null; do
-    fast_repair_progress_timer_wake
-    sleep 0.1
-  done
-  wait "$FAST_REPAIR_WAIT_PID"
-  rc=$?
-  FAST_REPAIR_WAIT_PID=
-  FAST_REPAIR_EVENT_REC=$(cat "$FAST_REPAIR_WAIT_OUTPUT" 2>/dev/null || true)
-  rm -f "$FAST_REPAIR_WAIT_OUTPUT"
-  FAST_REPAIR_WAIT_OUTPUT=
-  return "$rc"
 }
 
 # event_wait_or_sleep: the terminal wait of each supervision cycle. For a home
@@ -805,7 +751,8 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    fast_repair_wait_sleep
+    sleep "$POLL"
+    fast_repair_progress_timer_wake
     return
   fi
 
@@ -821,13 +768,13 @@ event_wait_or_sleep() {
     _event_cap_fails=0
   fi
   if [ "$_event_cap_ok" != 1 ]; then
-    fast_repair_wait_sleep
+    sleep "$POLL"
+    fast_repair_progress_timer_wake
     return
   fi
 
-  fast_repair_wait_transition "$first_backend" "$first_session"
+  rec=$(FM_BACKEND_EVENTS_CAPABILITY_CONFIRMED=1 fm_backend_wait_transition "$first_backend" "$first_session" "$POLL" "$STATE" "${windows[@]}")
   rc=$?
-  rec=$FAST_REPAIR_EVENT_REC
   case "$rc" in
     0)
       _event_cap_fails=0
@@ -839,7 +786,7 @@ event_wait_or_sleep() {
       # pure polling for the rest of this watcher process.
       _event_cap_fails=$((_event_cap_fails + 1))
       [ "$_event_cap_fails" -ge "$EVENT_CAP_FAIL_MAX" ] && _event_cap_ok=0
-      fast_repair_wait_sleep
+      sleep "$POLL"
       ;;
     *)
       # 1: a clean full-budget wait with no actionable edge - the reader already
@@ -847,6 +794,7 @@ event_wait_or_sleep() {
       _event_cap_fails=0
       ;;
   esac
+  fast_repair_progress_timer_wake
 }
 
 # --- Main entry: the runtime below runs only when this file is executed as a
@@ -905,7 +853,6 @@ watcher_cleanup() {
       transition=release-lock-existing
     fi
   fi
-  fast_repair_wait_stop
   fm_active_check_stop || cleanup_status=1
   fm_check_output_cleanup
   fm_custom_check_snapshot_cleanup

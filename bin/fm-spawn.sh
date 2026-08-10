@@ -1178,6 +1178,7 @@ launch_template() {
 
 case "$ARG3" in
   *' '*)  # raw launch command (unverified-adapter escape hatch)
+    RAW_LAUNCH=1
     LAUNCH=$ARG3
     HARNESS=""
     for word in $LAUNCH; do
@@ -1185,6 +1186,7 @@ case "$ARG3" in
     done
     ;;
   '')
+    RAW_LAUNCH=0
     # No explicit harness: resolve from config. A secondmate AGENT launches on the
     # secondmate harness (config/secondmate-harness -> config/crew-harness -> own);
     # every other kind uses the crew harness only when no dispatch profile file is
@@ -1207,6 +1209,7 @@ case "$ARG3" in
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: no launch template for harness '$HARNESS' (from $harness_src or detection); pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
   *)
+    RAW_LAUNCH=0
     HARNESS=$ARG3
     LAUNCH=$(launch_template "$HARNESS" "$KIND") || { echo "error: unknown harness '$HARNESS'; pass a raw launch command to use an unverified adapter" >&2; exit 1; }
     ;;
@@ -1648,7 +1651,7 @@ if [ "$KIND" = ship ]; then
       echo "error: Fast Repair spawn refused because its typed eligibility evidence is absent or incomplete; use the normal delivery path" >&2
       exit 1
     }
-    if [ "$HARNESS" != codex ] || [ "$MODEL" != gpt-5.6-luna ] || [ "$EFFORT" != medium ]; then
+    if [ "${RAW_LAUNCH:-0}" = 1 ] || [ "$HARNESS" != codex ] || [ "$MODEL" != gpt-5.6-luna ] || [ "$EFFORT" != medium ]; then
       echo "error: Fast Repair requires the built-in profile --harness codex --model gpt-5.6-luna --effort medium; an explicit conflicting per-task profile is not overridden" >&2
       exit 1
     fi

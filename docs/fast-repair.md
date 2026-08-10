@@ -48,6 +48,7 @@ The exact typed interface and evidence record are owned by `bin/fm-fast-repair.s
 
 Eligible work uses the built-in Codex profile `gpt-5.6-luna` with `medium` effort.
 An explicit conflicting task profile refuses instead of being replaced.
+A raw launch command also refuses because it cannot prove that canonical profile.
 The task always has `yolo=off`, so captain approval remains the only merge authority.
 Fast Repair never enables auto-merge.
 

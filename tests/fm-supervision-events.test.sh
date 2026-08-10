@@ -34,7 +34,8 @@ sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 reset_state() {
   rm -f "$STATE_DIR"/*.meta "$STATE_DIR"/*.status "$STATE_DIR"/.wake-queue \
     "$STATE_DIR"/.wake-queue.seq "$STATE_DIR"/.watch-triage.log \
-    "$STATE_DIR"/.herdr-escalated-* "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled 2>/dev/null || true
+    "$STATE_DIR"/.herdr-escalated-* "$STATE_DIR"/.fast-repair-progress-wake \
+    "$TMP"/panes "$TMP"/wtcalls "$TMP"/wtcalled "$TMP"/fast-repair-transition-complete 2>/dev/null || true
   : > "$WAKE_LOG"
   : > "$SLEEP_LOG"
   _event_cap_key=""
@@ -139,5 +140,23 @@ event_wait_or_sleep   # disabled: sleeps without calling wait_transition
 WTN=$(wc -l < "$TMP/wtcalls" | tr -d '[:space:]')
 [ "$WTN" = 2 ] || fail "after EVENT_CAP_FAIL_MAX connect failures the event path must be disabled for the process (expected 2 wait_transition calls, got $WTN)"
 pass "event_wait_or_sleep: consecutive event-path failures disable the fast-path and revert to pure polling (fail-closed)"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "backend=herdr" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+FAST_REPAIR_ACTIVE=1
+fast_repair_progress_timer_start() {
+  ( command sleep 0.05; printf 'fast-repair tk6 broader-tests-failed' > "$STATE_DIR/.fast-repair-progress-wake" ) &
+}
+fm_backend_events_capable() { return 0; }
+fm_backend_wait_transition() {
+  command sleep 0.15
+  printf 'complete\n' > "$TMP/fast-repair-transition-complete"
+  return 1
+}
+event_wait_or_sleep
+[ -e "$TMP/fast-repair-transition-complete" ] || fail "a Fast Repair timer interrupted the existing backend transition wait"
+grep -q 'check: fast-repair tk6 broader-tests-failed' "$WAKE_LOG" \
+  || fail "the durable Fast Repair timer result was not surfaced after the backend transition wait"
+pass "event_wait_or_sleep: Fast Repair keeps its timer result durable through the full backend wait"
 
 echo "# fm-supervision-events.test.sh: all assertions passed"

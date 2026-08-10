@@ -726,12 +726,13 @@ test_active_dispatch_profile_does_not_block_secondmate_launch() {
 }
 
 test_fast_repair_requires_and_records_its_builtin_profile() {
-  local rec id conflict_id out status launch
+  local rec id conflict_id raw_id out status launch
   id=fast-repair-profile-z20
   conflict_id=fast-repair-conflict-z21
-  rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id")
+  raw_id=fast-repair-raw-z22
+  rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id" "$raw_id")
   read_case_record "$rec"
-  for task in "$id" "$conflict_id"; do
+  for task in "$id" "$conflict_id" "$raw_id"; do
     printf 'Delivery contract: mode=fast-repair\n' > "$HOME_DIR/data/$task/brief.md"
     FM_HOME="$HOME_DIR" FM_STATE_OVERRIDE="$HOME_DIR/state" FM_DATA_OVERRIDE="$HOME_DIR/data" \
       "$FAST_REPAIR" intake "$task" --request 'fast-repair: fixture' \
@@ -757,6 +758,14 @@ test_fast_repair_requires_and_records_its_builtin_profile() {
   [ "$status" -ne 0 ] || fail "Fast Repair silently accepted a conflicting profile"
   assert_contains "$out" "requires the built-in profile" "Fast Repair profile refusal was not actionable"
   assert_absent "$HOME_DIR/state/$conflict_id.meta" "conflicting Fast Repair profile wrote metadata"
+
+  out=$(run_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$raw_id" "$PROJ_DIR" \
+    --mode fast-repair --yolo off --harness 'codex --model gpt-5.6-terra -c model_reasoning_effort=high' \
+    --model gpt-5.6-luna --effort medium)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Fast Repair accepted a raw launch command with a different actual profile"
+  assert_contains "$out" "requires the built-in profile" "raw Fast Repair profile refusal was not actionable"
+  assert_absent "$HOME_DIR/state/$raw_id.meta" "raw Fast Repair profile wrote metadata"
   pass "Fast Repair enforces Codex Luna medium without changing ordinary dispatch profiles"
 }
 
