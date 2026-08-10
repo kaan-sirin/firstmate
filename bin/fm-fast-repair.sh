@@ -37,6 +37,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 TASK_WORKTREE=
 TASK_BRANCH=
 TASK_HEAD=
+TEST_PATH=
+BODY_FILE=
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
@@ -113,7 +115,7 @@ positive_fact_valid() { # <field> <value>
 risk_excluded() { [ "$1" = none ]; }
 
 test_path_valid() {
-  local path=$1 parent resolved
+  local path=$1 parent resolved rel
   case "$path" in
     ''|/*|.|..|../*|*/../*|*'/..'|*$'\n'*|*$'\r'*) return 1 ;;
   esac
@@ -122,7 +124,11 @@ test_path_valid() {
   resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
   resolved="$resolved/$(basename "$path")"
   case "$resolved" in "$TASK_WORKTREE"/*) ;; *) return 1 ;; esac
-  regular_file "$resolved" && [ -x "$resolved" ]
+  regular_file "$resolved" && [ -x "$resolved" ] || return 1
+  rel=${resolved#"$TASK_WORKTREE/"}
+  [ "$(git -C "$TASK_WORKTREE" cat-file -t "$TASK_HEAD:$rel" 2>/dev/null || true)" = blob ] || return 1
+  git -C "$TASK_WORKTREE" diff --no-ext-diff --quiet "$TASK_HEAD" -- ":(literal)$rel" || return 1
+  TEST_PATH=$resolved
 }
 
 regression_test_valid() { test_path_valid "$1"; }
@@ -130,6 +136,16 @@ focused_test_valid() { test_path_valid "$1"; }
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
 tests_file() { printf '%s/%s.fast-repair-tests\n' "$STATE" "$1"; }
+
+body_file_valid() {
+  local path=$1 parent resolved
+  [ -n "$path" ] || return 1
+  parent=$(dirname "$path")
+  resolved=$(cd "$parent" 2>/dev/null && pwd -P) || return 1
+  resolved="$resolved/$(basename "$path")"
+  regular_file "$resolved" || return 1
+  BODY_FILE=$resolved
+}
 
 require_fast_repair_meta() {
   local id meta
@@ -397,15 +413,17 @@ case "$command" in
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     regression_test_valid "$regression_test" \
-      || fail "regression-test must name an executable regular test file below the current worktree"
+      || fail "regression-test must name an unchanged executable test file in the task commit"
+    regression_path=$TEST_PATH
     focused_test_valid "$focused_test" \
-      || fail "focused-test must name an executable regular test file below the current worktree"
+      || fail "focused-test must name an unchanged executable test file in the task commit"
+    focused_path=$TEST_PATH
     mkdir -p "$STATE"
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if ( cd "$TASK_WORKTREE" && "./$regression_test" ) >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
-    if [ "$regression_result" = passed ] && ( cd "$TASK_WORKTREE" && "./$focused_test" ) >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
+    if "$regression_path" >>"$log" 2>&1; then regression_result=passed; else regression_result=failed; fi
+    if [ "$regression_result" = passed ] && "$focused_path" >>"$log" 2>&1; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"
@@ -446,13 +464,13 @@ case "$command" in
     tests_passed "$id" || fail "focused evidence is absent or failed; direct PR publication is blocked"
     [ -z "$head" ] || [ "$head" = "$TASK_BRANCH" ] \
       || fail "--head must equal the tested task branch $TASK_BRANCH"
-    if [ -z "$title" ] || ! regular_file "$body_file"; then
+    if [ -z "$title" ] || ! body_file_valid "$body_file"; then
       fail "a title and safe body file are required"
     fi
-    args=(pr create --title "$title" --body-file "$body_file")
+    args=(pr create --title "$title" --body-file "$BODY_FILE")
     [ -z "$base" ] || args+=(--base "$base")
     args+=(--head "$TASK_BRANCH")
-    out=$(gh-axi "${args[@]}") || exit $?
+    out=$(cd "$TASK_WORKTREE" && gh-axi "${args[@]}") || exit $?
     printf '%s\n' "$out"
     url=$(printf '%s\n' "$out" | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -n 1 || true)
     [ -n "$url" ] || fail "PR creation returned no GitHub pull-request URL"

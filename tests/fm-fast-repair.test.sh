@@ -27,16 +27,30 @@ run_fast() {
   ( cd "$home" && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$FAST" "$@" ) 2>&1
 }
 
+run_fast_from() {
+  local cwd=$1 home=$2
+  shift 2
+  ( cd "$cwd" && FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" "$FAST" "$@" ) 2>&1
+}
+
+commit_test_file() {
+  local home=$1 file=$2
+  git -C "$home" add -- "$file"
+  git -C "$home" commit --quiet --only -m "add Fast Repair test" -- "$file"
+}
+
 write_regression_test() {
   local home=$1 code=${2:-0}
   printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/regression.test.sh"
   chmod +x "$home/regression.test.sh"
+  commit_test_file "$home" regression.test.sh
 }
 
 write_focused_test() {
   local home=$1 code=${2:-0}
   printf '#!/usr/bin/env bash\nexit %s\n' "$code" > "$home/focused.test.sh"
   chmod +x "$home/focused.test.sh"
+  commit_test_file "$home" focused.test.sh
 }
 
 intake() {
@@ -61,6 +75,7 @@ FAKE_HOME='$home'
 EOF
   cat >> "$fakebin/gh-axi" <<'SH'
 printf '%s\n' "$*" >> "$FAKE_HOME/gh-axi.args"
+pwd >> "$FAKE_HOME/gh-axi.cwd"
 case "${1:-}" in
   pr)
     case "${2:-}" in
@@ -189,7 +204,7 @@ test_eligibility_requires_every_typed_fact() {
 }
 
 test_evidence_and_ready_gates() {
-  local home id=gate-fixture out status fakebin outside branch
+  local home id=gate-fixture out status fakebin outside branch other
   home=$(make_home gates)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
@@ -204,6 +219,24 @@ test_evidence_and_ready_gates() {
   out=$(run_fast "$home" evidence "$id" --regression-command true --focused-test focused.test.sh)
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful regression command was accepted"
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/untracked.test.sh"
+  chmod +x "$home/untracked.test.sh"
+  out=$(run_fast "$home" evidence "$id" --regression-test untracked.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an untracked regression test was accepted"
+  [ ! -e "$home/untracked-test-ran" ] || fail "an untracked regression test was executed"
+  git -C "$home" add -- untracked.test.sh
+  out=$(run_fast "$home" evidence "$id" --regression-test untracked.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a staged-only regression test was accepted"
+  [ ! -e "$home/untracked-test-ran" ] || fail "a staged-only regression test was executed"
+  git -C "$home" rm --cached --quiet -- untracked.test.sh
+  printf '#!/usr/bin/env bash\ntouch %q\n' "$home/modified-test-ran" > "$home/regression.test.sh"
+  chmod +x "$home/regression.test.sh"
+  out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-test focused.test.sh)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a modified tracked regression test was accepted"
+  [ ! -e "$home/modified-test-ran" ] || fail "a modified tracked regression test was executed"
   write_regression_test "$home"
   out=$(run_fast "$home" evidence "$id" --regression-test regression.test.sh --focused-command true)
   status=$?
@@ -246,12 +279,16 @@ test_evidence_and_ready_gates() {
   [ "$status" -ne 0 ] || fail "Fast Repair accepted a PR with an untested remote head"
   assert_contains "$out" 'registered PR head does not match' "remote-head refusal was not actionable"
   printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
-  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
+  other=$(make_home other-caller)
+  printf 'Fast Repair caller body.\n' > "$other/body.md"
+  out=$(PATH="$fakebin:$PATH" run_fast_from "$other" "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file body.md)
   assert_contains "$out" 'fast-repair PR opened: https://github.com/acme/repo/pull/42' "passing evidence did not open the direct PR"
   assert_grep 'pr=https://github.com/acme/repo/pull/42' "$home/state/$id.meta" "direct PR was not registered"
   branch=$(git -C "$home" symbolic-ref --short HEAD)
-  assert_grep "pr create --title Fast Repair fixture --body-file $home/body.md --head $branch" "$home/gh-axi.args" \
+  assert_grep "pr create --title Fast Repair fixture --body-file $other/body.md --head $branch" "$home/gh-axi.args" \
     "direct PR did not use the tested task branch"
+  [ "$(tail -n 1 "$home/gh-axi.cwd")" = "$home" ] \
+    || fail "direct PR creation ran outside the task worktree"
   PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null || fail "broader tests could not start after direct PR publication"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
@@ -278,9 +315,9 @@ test_pr_check_rollup_states() {
   local home id=rollup-fixture fakebin out status
   home=$(make_home rollup)
   intake "$home" "$id" >/dev/null
-  write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
   write_focused_test "$home"
+  write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_fake_gh "$home"
   fakebin="$home/fakebin"
   printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
@@ -434,6 +471,7 @@ SH
   write_regression_test "$home"
   printf '#!/usr/bin/env bash\nfm-fixture-tool\n' > "$home/focused.test.sh"
   chmod +x "$home/focused.test.sh"
+  commit_test_file "$home" focused.test.sh
 
   out=$(cd "$home" && HOME="$loginhome" PATH="$toolbin:$PATH" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
@@ -459,6 +497,7 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   artifact="$home/suite-artifact"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$artifact" > "$home/regression.test.sh"
   chmod +x "$home/regression.test.sh"
+  commit_test_file "$home" regression.test.sh
   write_focused_test "$home"
 
   ( umask 022
