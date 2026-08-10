@@ -544,11 +544,58 @@ fast_repair_progress_record() {
   fm_wake_append check "fast-repair:$id" "check: $result" || return 2
   printf '%s' "$result" > "$marker"
   [ -z "$generation" ] || printf '%s' "$generation" > "$generation_marker"
-  touch "$STATE/.last-fast-repair-progress"
+}
+
+fast_repair_progress_task_marker() { # <task-id> <generation>
+  printf '%s/.fast-repair-progress-child-%s-%s' "$STATE" "$1" "$2"
+}
+
+fast_repair_progress_task_stop() { # <marker>
+  local marker=$1 pid i=0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 0
+  pid=$(cat "$marker" 2>/dev/null || true)
+  case "$pid" in ''|*[!0-9]*) rm -f "$marker"; return 0 ;; esac
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -TERM "$pid" 2>/dev/null || true
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+      sleep 0.01
+      i=$((i + 1))
+    done
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  rm -f "$marker"
+}
+
+fast_repair_progress_timer_tasks_finish() { # <generation>
+  local generation=$1 marker
+  for marker in "$STATE"/.fast-repair-progress-child-*"-$generation"; do
+    [ -e "$marker" ] || continue
+    fast_repair_progress_task_stop "$marker"
+  done
+}
+
+fast_repair_progress_task_start() { # <task-id> <generation>
+  local id=$1 generation=$2 marker result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-}
+  marker=$(fast_repair_progress_task_marker "$id" "$generation") || return 1
+  if [ -f "$marker" ] && [ ! -L "$marker" ]; then
+    return 0
+  fi
+  touch "$STATE/.last-fast-repair-progress-$id"
+  (
+    [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
+    printf '%s\n' "${BASHPID:-$$}" > "$marker" || exit 1
+    trap 'rm -f "$marker"' EXIT
+    trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
+    [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
+    result=$FM_CHECK_RESULT
+    [ -z "$result" ] || fast_repair_progress_timer_publish "$id" "$result"
+  ) &
 }
 
 fast_repair_progress_tick() {
-  local meta id result progress_stamp timer_published=0
+  local meta id progress_stamp generation
   local ids=()
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -560,26 +607,13 @@ fast_repair_progress_tick() {
     return 0
   fi
   FAST_REPAIR_ACTIVE=1
-  progress_stamp="$STATE/.last-fast-repair-progress"
-  [ "$(age_of "$progress_stamp")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || return 0
-  touch "$progress_stamp"
+  generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
+  case "$generation" in *[!0-9]*|'') return 1 ;; esac
   for id in "${ids[@]}"; do
-    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
-    result=$FM_CHECK_RESULT
-    [ -n "$result" ] || continue
-    if [ -n "${FM_FAST_REPAIR_TIMER_PARENT:-}" ]; then
-      if fast_repair_progress_timer_publish "$id" "$result"; then
-        timer_published=1
-      fi
-      continue
-    fi
-    fast_repair_progress_record "$id" "$result" || continue
-    wake "check: $result"
+    progress_stamp="$STATE/.last-fast-repair-progress-$id"
+    [ "$(age_of "$progress_stamp")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || continue
+    fast_repair_progress_task_start "$id" "$generation"
   done
-  if [ "$timer_published" = 1 ]; then
-    FAST_REPAIR_TIMER_RESULT_PUBLISHED=1
-  fi
 }
 
 fast_repair_progress_timer_publish() {
@@ -768,7 +802,7 @@ heartbeat_scan_finds_actionable() {
 }
 
 fast_repair_progress_timer_start() {
-  local marker remaining parent closing generation
+  local marker parent closing generation
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
   generation=$(fast_repair_progress_generation_next) || return 0
@@ -781,17 +815,13 @@ fast_repair_progress_timer_start() {
     trap 'rm -f "$closing"' EXIT
     trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
     while [ -f "$marker" ]; do
-      remaining=$(( FAST_REPAIR_PROGRESS_INTERVAL - $(age_of "$STATE/.last-fast-repair-progress") ))
-      [ "$remaining" -ge 1 ] || remaining=1
-      sleep $((remaining + 1))
+      sleep "$FAST_REPAIR_PROGRESS_INTERVAL"
       [ -f "$marker" ] || exit 0
       [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
-      FAST_REPAIR_TIMER_RESULT_PUBLISHED=0
       FM_FAST_REPAIR_TIMER_PARENT="$parent" \
         FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
         FM_FAST_REPAIR_TIMER_GENERATION="$generation" \
         fast_repair_progress_tick
-      [ "$FAST_REPAIR_TIMER_RESULT_PUBLISHED" = 1 ] && exit 0
       [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
     done
   ) &
@@ -799,11 +829,12 @@ fast_repair_progress_timer_start() {
 }
 
 fast_repair_progress_timer_finish() {
-  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} i=0
+  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} generation=${FAST_REPAIR_TIMER_GENERATION:-} i=0
   [ -n "$marker" ] || return 0
   : > "$marker.closing" || return 0
   rm -f "$marker"
   FAST_REPAIR_TIMER_MARKER=
+  case "$generation" in *[!0-9]*|'') ;; *) fast_repair_progress_timer_tasks_finish "$generation" ;; esac
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
     while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do

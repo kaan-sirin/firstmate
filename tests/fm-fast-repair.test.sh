@@ -76,10 +76,10 @@ write_test_runner() {
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
     'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused; exit 0; fi' \
     'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
-    '[ "${1:-}" = --family ] && [ "$#" = 2 ] || exit 2' \
-    'printf "FM_TEST_BEGIN fixture %s family=%s\n" "$2" "$2"' \
-    'if case "$2" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
-    'printf "FM_TEST_END fixture %s exit=%s duration_ms=0 gate_skip=false\n" "$2" "$status"; exit "$status"' > "$home/bin/fm-test-run.sh"
+    'if [ "${1:-}" = --family ] && [ "$#" = 2 ]; then family=$2; elif [ "$#" = 1 ]; then case "$1" in tests/fixture-regression.test.sh) family=fixture-regression ;; tests/fixture-focused.test.sh) family=fixture-focused ;; *) exit 2 ;; esac; else exit 2; fi' \
+    'printf "FM_TEST_BEGIN fixture %s family=%s\n" "$family" "$family"' \
+    'if case "$family" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
+    'printf "FM_TEST_END fixture %s exit=%s duration_ms=0 gate_skip=false\n" "$family" "$status"; exit "$status"' > "$home/bin/fm-test-run.sh"
   chmod +x "$home/bin/fm-test-run.sh"
   commit_test_file "$home" bin/fm-test-run.sh
 }
@@ -257,7 +257,7 @@ test_evidence_and_ready_gates() {
   out=$(run_fast "$home" evidence "$id" --regression-test pass --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a generic exit-zero script satisfied regression evidence"
-  assert_contains "$out" 'supported runner family with a new tracked selector' "the pass-script refusal did not require a runner-owned selector"
+  assert_contains "$out" 'one new tracked runner selector' "the pass-script refusal did not require a runner-owned selector"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$home/untracked-test-ran" > "$home/tests/fm-untracked-regression.test.sh"
   chmod +x "$home/tests/fm-untracked-regression.test.sh"
   out=$(run_fast "$home" evidence "$id" --regression-test tests/fm-untracked-regression.test.sh --focused-test "$FOCUSED_TEST")
@@ -375,8 +375,47 @@ test_regression_selector_must_be_new_since_reproduction() {
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a regression selector already present at reproduction was accepted"
-  assert_contains "$out" 'new tracked selector' "an old regression selector did not state the Fast Repair contract"
+  assert_contains "$out" 'one new tracked runner selector' "an old regression selector did not state the Fast Repair contract"
   pass "Fast Repair requires a runner-owned regression selector added after reproduction"
+}
+
+test_regression_witness_requires_a_failing_reproduction() {
+  local home id=unrelated-witness out status
+  home=$(make_home unrelated-witness)
+  intake "$home" "$id" >/dev/null
+  mkdir -p "$home/tests"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/fixture-unrelated.test.sh"
+  chmod +x "$home/tests/fixture-unrelated.test.sh"
+  commit_test_file "$home" tests/fixture-unrelated.test.sh
+  sed -i 's/fixture-regression fixture-focused/fixture-regression fixture-focused fixture-unrelated/' "$home/bin/fm-test-run.sh"
+  sed -i 's/fixture-focused) printf "%s\\n" tests\/fixture-focused.test.sh ;;/fixture-focused) printf "%s\\n" tests\/fixture-focused.test.sh ;; fixture-unrelated) printf "%s\\n" tests\/fixture-unrelated.test.sh ;;/' "$home/bin/fm-test-run.sh"
+  sed -i 's/tests\/fixture-focused.test.sh) family=fixture-focused ;;/tests\/fixture-focused.test.sh) family=fixture-focused ;; tests\/fixture-unrelated.test.sh) family=fixture-unrelated ;;/' "$home/bin/fm-test-run.sh"
+  sed -i 's/fixture-focused) \[ "$(cat fixture-focused-state)" = passed \] ;;/fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; fixture-unrelated) true ;;/' "$home/bin/fm-test-run.sh"
+  commit_test_file "$home" bin/fm-test-run.sh
+  write_focused_test "$home"
+  write_fast_meta "$home" "$id"
+  out=$(run_fast "$home" evidence "$id" --regression-test fixture-unrelated --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unrelated passing selector proved reproduction evidence"
+  assert_contains "$out" 'PR publication remains blocked' "an unrelated passing selector did not block publication"
+  pass "Fast Repair requires the overlaid regression selector to fail before the repair"
+}
+
+test_regression_witness_requires_overlay_runner_support() {
+  local home id=unsupported-overlay out status
+  home=$(make_home unsupported-overlay)
+  sed -i 's/if \[ "${1:-}" = --list \].*/if [ "${1:-}" = --list ]; then exit 2; fi/' "$home/bin/fm-test-run.sh"
+  commit_test_file "$home" bin/fm-test-run.sh
+  intake "$home" "$id" >/dev/null
+  write_test_runner "$home"
+  write_regression_test "$home"
+  write_focused_test "$home"
+  write_fast_meta "$home" "$id"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unsupported reproduction runner accepted overlay evidence"
+  assert_contains "$out" 'PR publication remains blocked' "an unsupported reproduction runner did not block publication"
+  pass "Fast Repair refuses a reproduction runner without selector overlay support"
 }
 
 test_pr_check_rollup_states() {
@@ -587,5 +626,7 @@ test_evidence_commands_ignore_a_login_profile
 test_private_records_do_not_impose_their_umask_on_tests
 test_evidence_and_ready_gates
 test_regression_selector_must_be_new_since_reproduction
+test_regression_witness_requires_a_failing_reproduction
+test_regression_witness_requires_overlay_runner_support
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"

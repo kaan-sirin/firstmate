@@ -40,6 +40,8 @@ TASK_BRANCH=
 TASK_HEAD=
 TEST_RUNNER=
 REPRODUCTION_REVISION=
+REGRESSION_SELECTOR=
+REGRESSION_ARTIFACT=
 BODY_FILE=
 
 # shellcheck source=bin/fm-pr-lib.sh
@@ -179,19 +181,26 @@ runner_selected_test_valid() { # <path>
 }
 
 regression_test_valid() { # <task-id> <family>
-  local id=$1 family=$2 selected path has_new=0
+  local id=$1 family=$2 selected path artifact new_count=0
   runner_family_valid "$family" || return 1
   reproduction_revision_for "$id" || return 1
   selected=$(runner_selected_tests "$family") || return 1
   [ -n "$selected" ] || return 1
+  REGRESSION_SELECTOR=
+  REGRESSION_ARTIFACT=
   while IFS= read -r path; do
     [ -n "$path" ] || return 1
     runner_selected_test_valid "$path" || return 1
-    git -C "$TASK_WORKTREE" cat-file -e "$REPRODUCTION_REVISION:$path" 2>/dev/null || has_new=1
+    git -C "$TASK_WORKTREE" cat-file -e "$REPRODUCTION_REVISION:$path" 2>/dev/null && continue
+    artifact=$(git -C "$TASK_WORKTREE" ls-tree "$TASK_HEAD" -- "$path" 2>/dev/null | awk '{print $1 ":" $2 ":" $3}') || return 1
+    case "$artifact" in 100755:blob:*) ;; *) return 1 ;; esac
+    new_count=$((new_count + 1))
+    REGRESSION_SELECTOR=$path
+    REGRESSION_ARTIFACT="${artifact%%:blob:*}:${artifact#*:blob:}"
   done <<EOF
 $selected
 EOF
-  [ "$has_new" = 1 ]
+  [ "$new_count" -eq 1 ]
 }
 
 focused_test_valid() { runner_family_valid "$1"; }
@@ -220,6 +229,61 @@ run_typed_test() { # <worktree> <family> <pass|fail> <log>
   fi
   rm -f "$output"
   return 1
+}
+
+run_typed_selector() { # <worktree> <selector> <pass|fail> <log>
+  local worktree=$1 selector=$2 expected=$3 log=$4 output status
+  output=$(mktemp "$STATE/.fast-repair-test-output.XXXXXX") || return 1
+  chmod 600 "$output" || { rm -f "$output"; return 1; }
+  if ( cd "$worktree" && "$worktree/bin/fm-test-run.sh" "$selector" ) >"$output" 2>&1; then
+    status=0
+  else
+    status=1
+  fi
+  cat "$output" >> "$log" || status=1
+  if awk -v expected="$expected" -v status="$status" '
+      $1 == "FM_TEST_BEGIN" { began = 1 }
+      $1 == "FM_TEST_END" && $4 == "exit=0" { passed = 1 }
+      $1 == "FM_TEST_END" && $4 != "exit=0" { failed = 1 }
+      END {
+        if (expected == "pass") exit !(status == 0 && began && passed)
+        exit !(status != 0 && began && failed)
+      }
+    ' "$output"; then
+    rm -f "$output"
+    return 0
+  fi
+  rm -f "$output"
+  return 1
+}
+
+regression_witness_valid() { # <family> <selector> <artifact> <log>
+  local family=$1 selector=$2 artifact=$3 log=$4 sandbox mode file_mode oid old_selected
+  case "$artifact" in 100755:*) ;; *) return 1 ;; esac
+  mode=${artifact%%:*}
+  file_mode=${mode#100}
+  oid=${artifact#*:}
+  sandbox=$(mktemp -d "$STATE/.fast-repair-reproduction.XXXXXX") || return 1
+  rmdir "$sandbox" || return 1
+  if ! git clone --quiet --no-hardlinks "$TASK_WORKTREE" "$sandbox" \
+    || ! git -C "$sandbox" checkout --quiet --detach "$REPRODUCTION_REVISION" \
+    || ! mkdir -p "$(dirname "$sandbox/$selector")" \
+    || ! git -C "$TASK_WORKTREE" show "$TASK_HEAD:$selector" > "$sandbox/$selector" \
+    || ! chmod "$file_mode" "$sandbox/$selector" \
+    || ! [ "$(git -C "$sandbox" hash-object "$selector")" = "$oid" ]; then
+    rm -rf "$sandbox"
+    return 1
+  fi
+  old_selected=$(cd "$sandbox" && ./bin/fm-test-run.sh --list --family "$family" 2>/dev/null) || {
+    rm -rf "$sandbox"
+    return 1
+  }
+  if ! printf '%s\n' "$old_selected" | grep -Fx "$selector" >/dev/null \
+    || ! run_typed_selector "$sandbox" "$selector" fail "$log"; then
+    rm -rf "$sandbox"
+    return 1
+  fi
+  rm -rf "$sandbox"
 }
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }
@@ -265,11 +329,15 @@ eligibility_valid() {
 }
 
 tests_passed() {
-  local id=$1 f regression_test focused_test reproduction_revision worktree branch head
+  local id=$1 f regression_test regression_selector regression_artifact regression_reproduction regression_head focused_test reproduction_revision worktree branch head
   f=$(tests_file "$id")
   regular_file "$f" || return 1
   task_revision_for "$id" || return 1
   regression_test=$(field_get "$f" regression_test)
+  regression_selector=$(field_get "$f" regression_selector)
+  regression_artifact=$(field_get "$f" regression_artifact)
+  regression_reproduction=$(field_get "$f" regression_reproduction)
+  regression_head=$(field_get "$f" regression_head)
   focused_test=$(field_get "$f" focused_test)
   reproduction_revision=$(field_get "$f" reproduction_revision)
   worktree=$(field_get "$f" worktree)
@@ -279,13 +347,21 @@ tests_passed() {
   regression_test_valid "$id" "$regression_test" || return 1
   focused_test_valid "$focused_test" || return 1
   [ "$reproduction_revision" = "$REPRODUCTION_REVISION" ] || return 1
+  [ "$regression_selector" = "$REGRESSION_SELECTOR" ] || return 1
+  [ "$regression_artifact" = "$REGRESSION_ARTIFACT" ] || return 1
+  [ "$regression_reproduction" = failed ] || return 1
+  [ "$regression_head" = passed ] || return 1
   [ "$worktree" = "$TASK_WORKTREE" ] || return 1
   [ "$branch" = "$TASK_BRANCH" ] || return 1
   [ "$head" = "$TASK_HEAD" ] || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 8 ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 12 ] || return 1
   [ "$(grep -c '^regression=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -c '^focused=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "regression_test=$regression_test" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "regression_selector=$regression_selector" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "regression_artifact=$regression_artifact" "$f")" = 1 ] || return 1
+  [ "$(grep -c '^regression_reproduction=failed$' "$f")" = 1 ] || return 1
+  [ "$(grep -c '^regression_head=passed$' "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "focused_test=$focused_test" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "reproduction_revision=$reproduction_revision" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "worktree=$worktree" "$f")" = 1 ] || return 1
@@ -527,7 +603,7 @@ case "$command" in
     reproduction_revision_for "$id" \
       || fail "reproduction revision is unknown, current, or not an ancestor of the task head"
     regression_test_valid "$id" "$regression_test" \
-      || fail "regression-test must name a supported runner family with a new tracked selector"
+      || fail "regression-test must name one new tracked runner selector"
     focused_test_valid "$focused_test" \
       || fail "focused-test must name a supported bin/fm-test-run.sh family"
     [ "$regression_test" != "$focused_test" ] \
@@ -536,11 +612,18 @@ case "$command" in
     log="$STATE/$id.fast-repair-tests.log"
     record="$STATE/.$id.fast-repair-tests.$$"
     private_truncate "$log" || fail "the evidence log could not be created"
-    if run_typed_test "$TASK_WORKTREE" "$regression_test" pass "$log"; then regression_result=passed; else regression_result=failed; fi
+    if regression_witness_valid "$regression_test" "$REGRESSION_SELECTOR" "$REGRESSION_ARTIFACT" "$log"; then regression_reproduction=failed; else regression_reproduction=unproven; fi
+    if [ "$regression_reproduction" = failed ] \
+      && run_typed_selector "$TASK_WORKTREE" "$REGRESSION_SELECTOR" pass "$log"; then regression_head=passed; else regression_head=failed; fi
+    if [ "$regression_reproduction" = failed ] && [ "$regression_head" = passed ]; then regression_result=passed; else regression_result=failed; fi
     if [ "$regression_result" = passed ] && run_typed_test "$TASK_WORKTREE" "$focused_test" pass "$log"; then focused_result=passed; else focused_result=failed; fi
     {
       printf 'regression=%s\n' "$regression_result"
       printf 'regression_test=%s\n' "$regression_test"
+      printf 'regression_selector=%s\n' "$REGRESSION_SELECTOR"
+      printf 'regression_artifact=%s\n' "$REGRESSION_ARTIFACT"
+      printf 'regression_reproduction=%s\n' "$regression_reproduction"
+      printf 'regression_head=%s\n' "$regression_head"
       printf 'focused=%s\n' "$focused_result"
       printf 'focused_test=%s\n' "$focused_test"
       printf 'reproduction_revision=%s\n' "$REPRODUCTION_REVISION"
