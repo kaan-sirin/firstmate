@@ -786,7 +786,7 @@ test_spawn_relaunch_reuses_a_fast_repair_profile() {
   mv -f "$meta.tmp" "$meta"
   printf 'Delivery contract: mode=fast-repair\n' > "$dir/home/data/rl40/brief.md"
   FM_HOME="$dir/home" "$ROOT/bin/fm-fast-repair.sh" intake rl40 \
-    --request 'fast-repair: fixture' --reproduction reproduced --root-cause confirmed \
+    --request 'fast-repair: fixture' --reproduction reproduced --reproduction-revision 0000000000000000000000000000000000000000 --root-cause confirmed \
     --isolation isolated --schema none --authentication none --authorization none \
     --secrets none --financial none --legal none --side-effects none >/dev/null \
     || fail "the Fast Repair eligibility fixture could not be recorded"
