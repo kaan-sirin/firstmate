@@ -35,6 +35,9 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 
+# shellcheck source=bin/fm-pr-lib.sh
+. "$SCRIPT_DIR/fm-pr-lib.sh"
+
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
 }
@@ -97,36 +100,76 @@ tests_passed() {
   [ "$(field_get "$f" regression)" = passed ] && [ "$(field_get "$f" focused)" = passed ]
 }
 
-parse_url_number() {
-  case "$1" in
-    https://github.com/*/pull/[0-9]*) printf '%s\n' "${1##*/}" ;;
-    *) return 1 ;;
-  esac
+broader_passed() {
+  local f="$STATE/$1.fast-repair-broader"
+  regular_file "$f" || return 1
+  [ "$(field_get "$f" broader)" = passed ]
 }
 
-pr_url_for() {
-  local id meta url
-  id=$1
-  meta="$STATE/$id.meta"
+# The recorded pr= URL is re-parsed with the shared strict forge validator, so
+# the repository and number always come from that one canonical record instead
+# of from the caller's working directory. Fast Repair publishes through
+# gh-axi, so only a GitHub pull request can be read here. On success the
+# FM_PR_* identity of the shared parser is set for the caller.
+pr_identity_for() {
+  local meta url
+  meta="$STATE/$1.meta"
+  regular_file "$meta" || return 1
   url=$(field_get "$meta" pr)
-  parse_url_number "$url" >/dev/null || return 1
-  printf '%s\n' "$url"
+  fm_pr_url_parse "$url" || return 1
+  [ "$FM_PR_PROVIDER" = github ]
 }
 
-checks_summary() {
-  local url=$1 number
-  number=$(parse_url_number "$url") || return 1
+checks_summary() { # <number> <owner/repo>
+  local raw
   command -v gh-axi >/dev/null 2>&1 || return 1
-  gh-axi pr checks "$number" 2>/dev/null | sed -n 's/^summary: *//p' | head -n 1
+  raw=$(gh-axi pr checks "$1" --repo "$2" 2>/dev/null | sed -n 's/^summary: *//p' | head -n 1)
+  # gh-axi renders its fields as TOON, which double-quotes every value holding a
+  # comma, so the rollup summary always arrives quoted.
+  case "$raw" in
+    '"'*'"') raw=${raw#\"}; raw=${raw%\"} ;;
+  esac
+  printf '%s\n' "$raw"
 }
 
+# gh-axi renders the rollup as ["<n> passed","<n> failed", "<n> skipped" when
+# non-zero, "<n> pending" when non-zero, "<n> total"], so a green PR omits the
+# pending segment entirely and a substring test on the rendered string both
+# misses green and reads "10 failed, 0 pending" as green. The counts are
+# therefore extracted and compared numerically, and any segment, label, or
+# total this does not recognize stays unknown rather than becoming green.
 checks_state() { # <summary> -> green|failed|pending|unknown
-  case "$1" in
-    *'0 failed, 0 pending,'*) printf 'green\n' ;;
-    *'0 failed,'*) printf 'pending\n' ;;
-    *' failed,'*) printf 'failed\n' ;;
-    *) printf 'unknown\n' ;;
-  esac
+  local rest=${1-} part count label
+  local passed='' failed='' total='' skipped=0 pending=0
+  [ -n "$rest" ] || { printf 'unknown\n'; return 0; }
+  while [ -n "$rest" ]; do
+    case "$rest" in
+      *', '*) part=${rest%%, *}; rest=${rest#*, } ;;
+      *) part=$rest; rest= ;;
+    esac
+    case "$part" in *' '*) ;; *) printf 'unknown\n'; return 0 ;; esac
+    count=${part%% *}
+    label=${part#* }
+    case "$count" in ''|*[!0-9]*) printf 'unknown\n'; return 0 ;; esac
+    case "$label" in
+      passed) passed=$count ;;
+      failed) failed=$count ;;
+      skipped) skipped=$count ;;
+      pending) pending=$count ;;
+      total) total=$count ;;
+      *) printf 'unknown\n'; return 0 ;;
+    esac
+  done
+  [ -n "$passed" ] && [ -n "$failed" ] && [ -n "$total" ] || { printf 'unknown\n'; return 0; }
+  [ "$total" -gt 0 ] || { printf 'unknown\n'; return 0; }
+  [ "$((passed + failed + skipped + pending))" -eq "$total" ] || { printf 'unknown\n'; return 0; }
+  if [ "$failed" -gt 0 ]; then
+    printf 'failed\n'
+  elif [ "$pending" -gt 0 ]; then
+    printf 'pending\n'
+  else
+    printf 'green\n'
+  fi
 }
 
 command=${1:-}
@@ -294,7 +337,7 @@ case "$command" in
     [ "${1:-}" = --command ] && [ "$#" -eq 2 ] || fail "broader requires exactly --command <command>"
     broader_command=$2
     require_fast_repair_meta "$id"
-    pr_url_for "$id" >/dev/null || fail "broader tests start only after the direct PR is registered"
+    pr_identity_for "$id" || fail "broader tests start only after the direct PR is registered"
     [ -n "$broader_command" ] || fail "broader command is empty"
     log="$STATE/$id.fast-repair-broader.log"
     record="$STATE/.$id.fast-repair-broader.$$"
@@ -314,9 +357,8 @@ case "$command" in
       printf 'fast-repair %s broader-tests-failed\n' "$id"
       exit 0
     fi
-    url=$(pr_url_for "$id" 2>/dev/null || true)
-    [ -n "$url" ] || exit 0
-    summary=$(checks_summary "$url" 2>/dev/null || true)
+    pr_identity_for "$id" 2>/dev/null || exit 0
+    summary=$(checks_summary "$FM_PR_NUMBER" "$FM_PR_OWNER/$FM_PR_REPO" 2>/dev/null || true)
     state=$(checks_state "$summary")
     case "$state" in
       failed) printf 'fast-repair %s pr-checks-failed: %s\n' "$id" "$summary" ;;
@@ -328,11 +370,12 @@ case "$command" in
     id=$1
     require_fast_repair_meta "$id"
     tests_passed "$id" || fail "focused evidence is absent or failed"
-    [ "$(field_get "$STATE/$id.fast-repair-broader" broader)" = passed ] || fail "broader tests are not passed"
-    url=$(pr_url_for "$id") || fail "no registered Fast Repair PR"
-    summary=$(checks_summary "$url") || fail "PR checks could not be read"
+    broader_passed "$id" || fail "broader tests are not passed"
+    pr_identity_for "$id" || fail "no registered Fast Repair PR"
+    summary=$(checks_summary "$FM_PR_NUMBER" "$FM_PR_OWNER/$FM_PR_REPO") || fail "PR checks could not be read"
+    [ -n "$summary" ] || fail "PR checks could not be read"
     [ "$(checks_state "$summary")" = green ] || fail "PR checks are not green: $summary"
-    printf 'fast-repair ready: %s\n' "$url"
+    printf 'fast-repair ready: %s\n' "$FM_PR_URL"
     ;;
   *) usage >&2; exit 2 ;;
 esac

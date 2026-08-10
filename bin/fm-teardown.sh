@@ -2539,7 +2539,10 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.muse-session-current" \
   "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
+  "$STATE/$ID.fast-repair-tests" "$STATE/$ID.fast-repair-tests.log" \
+  "$STATE/$ID.fast-repair-broader" "$STATE/$ID.fast-repair-broader.log" \
+  "$STATE/.fast-repair-progress-$ID"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
