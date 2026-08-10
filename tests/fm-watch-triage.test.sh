@@ -1871,8 +1871,39 @@ test_fast_repair_progress_cadence_is_task_scoped() {
   pass "Fast Repair uses a 20-second-class task-only progress cadence without changing ordinary watcher state"
 }
 
+# A directory at the wake queue's sequence path makes the durable append fail
+# the way a lock or disk error would, without touching the watcher's code.
+test_fast_repair_marker_waits_for_the_durable_wake() {
+  local dir state out pid exit_status
+  dir=$(make_case fast-repair-marker-order); state="$dir/state"; out="$dir/watch.out"
+  printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
+  mkdir -p "$state/.wake-queue.seq"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" 2>/dev/null &
+  pid=$!
+  wait_for_exit "$pid" 60
+  exit_status=$?
+  [ "$exit_status" -ne 124 ] || fail "the watcher survived a failed Fast Repair wake enqueue"
+  [ ! -e "$state/.fast-repair-progress-fast" ] \
+    || fail "a failed enqueue still committed the Fast Repair dedup marker"
+
+  rmdir "$state/.wake-queue.seq"
+  : > "$out"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_POLL=1 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 \
+    FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
+  pid=$!
+  wait_for_exit "$pid" 60 || fail "the Fast Repair transition did not replay after a failed enqueue"
+  grep -F 'check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "a failed enqueue swallowed the Fast Repair transition: $(cat "$out")"
+  pass "a Fast Repair progress marker commits only after its durable wake is queued"
+}
+
 test_signal_reason_is_actionable_classifier
 test_fast_repair_progress_cadence_is_task_scoped
+test_fast_repair_marker_waits_for_the_durable_wake
 test_stale_is_terminal_classifier
 test_scan_captain_relevant_statuses_classifier
 test_classifier_primitives

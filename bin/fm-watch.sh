@@ -470,7 +470,10 @@ scan_signals() {
 # mode=fast-repair and fast_repair=eligible. It does not change the normal signal,
 # stale, custom-check, heartbeat, or sleep cadence, and it never starts another
 # watcher. Each actionable result is deduplicated per task so an unchanged failed
-# PR check cannot wake firstmate every twenty seconds.
+# PR check cannot wake firstmate every twenty seconds. That dedup marker is
+# advanced only after the durable wake is queued, the same discipline .seen-*
+# follows above, so a watcher that dies mid-cycle re-announces the transition
+# instead of swallowing it.
 # The progress helper reads the PR's checks from the forge, so it is a network
 # call and runs through run_check_capture exactly like every other per-task
 # check: bounded by CHECK_TIMEOUT in its own process group, so a hung or slow
@@ -492,19 +495,16 @@ fast_repair_progress_tick() {
     grep -qx 'mode=fast-repair' "$meta" 2>/dev/null || continue
     grep -qx 'fast_repair=eligible' "$meta" 2>/dev/null || continue
     id=$(basename "$meta" .meta)
-    if FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id"; then
-      result=$FM_CHECK_RESULT
-    else
-      result=
-    fi
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
+      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
+    result=$FM_CHECK_RESULT
     [ -n "$result" ] || continue
     marker="$STATE/.fast-repair-progress-$id"
     prior=$(cat "$marker" 2>/dev/null || true)
     [ "$prior" = "$result" ] && continue
+    fm_wake_append check "fast-repair:$id" "check: $result" || exit 1
     printf '%s' "$result" > "$marker"
     touch "$STATE/.last-fast-repair-progress"
-    fm_wake_append check "fast-repair:$id" "check: $result" || exit 1
     wake "check: $result"
   done
   touch "$STATE/.last-fast-repair-progress"
