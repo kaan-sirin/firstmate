@@ -10,7 +10,7 @@
 #   fm-fast-repair.sh evidence <task-id> --regression-test <runner-family> --focused-test <runner-family>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
 #   fm-fast-repair.sh broader <task-id> --test <runner-family>
-#   fm-fast-repair.sh progress <task-id>
+#   fm-fast-repair.sh progress <task-id> [--local-only]
 #   fm-fast-repair.sh ready <task-id>
 #
 # `fast-repair:` is the only accepted request prefix, and it must be followed by
@@ -28,7 +28,10 @@
 # after publication while PR checks run concurrently, and its family must differ
 # from the focused family already proven before the PR. `ready` refuses until the
 # broader test family and all PR checks are green. `progress` prints only a changed
-# actionable state for the watcher's Fast-Repair-only cadence.
+# actionable state for the watcher's Fast-Repair-only cadence. `progress
+# --local-only` reads just this home's own broader-test record and never contacts
+# the forge, so the watcher can keep following a still-running broader family
+# after it has stopped polling PR checks.
 #
 # `eligible --worktree` is the dispatch-time gate, so it proves only what exists
 # before the crewmate branches and commits: a clean worktree of the task's own
@@ -820,8 +823,13 @@ case "$command" in
     printf 'fast-repair broader tests passed: %s\n' "$id"
     ;;
   progress)
-    [ "$#" -eq 1 ] || { usage >&2; exit 2; }
-    id=$1
+    id=${1:-}
+    shift || true
+    local_only=0
+    if [ "$#" -gt 0 ]; then
+      [ "$#" -eq 1 ] && [ "$1" = --local-only ] || { usage >&2; exit 2; }
+      local_only=1
+    fi
     task_id_valid "$id" || fail "task id is missing or invalid"
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
@@ -829,6 +837,7 @@ case "$command" in
       printf 'fast-repair %s broader-tests-failed\n' "$id"
       exit 0
     fi
+    [ "$local_only" -eq 0 ] || exit 0
     pr_identity_for "$id" 2>/dev/null || exit 0
     summary=$(checks_summary "$FM_PR_NUMBER" "$FM_PR_OWNER/$FM_PR_REPO" 2>/dev/null || true)
     state=$(checks_state "$summary")

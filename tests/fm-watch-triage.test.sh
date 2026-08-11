@@ -2156,53 +2156,260 @@ test_fast_repair_beat_survives_the_poll_boundary() {
 
 # The twenty-second forge poll exists to catch the first actionable transition of
 # an open Fast Repair PR. Once green is queued the ordinary PR poll owns it.
-test_fast_repair_cadence_retires_after_the_first_green_rollup() {
-  local dir state out
-  dir=$(make_case fast-repair-green-retire); state="$dir/state"; out="$dir/result"
-  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
-  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/other.meta"
+# After the first green rollup the twenty-second beat must stop reading the forge
+# and let the ordinary PR poll own PR checks, but a broader family can still be
+# running and its failure has no other machine-side surface, so the local half of
+# the beat has to survive. This drives the real bin/fm-fast-repair.sh progress
+# helper against a fake gh-axi whose every invocation is recorded, so "stopped
+# polling the forge" is observed rather than assumed.
+test_fast_repair_green_stops_forge_poll_but_keeps_broader_followup() {
+  local dir state out fakebin ghargs
+  dir=$(make_case fast-repair-green-local); state="$dir/state"; out="$dir/result"
+  fakebin="$dir/fakebin"; ghargs="$dir/gh-axi.args"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\npr=https://github.com/acme/repo/pull/42\n' \
+    > "$state/fast.meta"
   record_fast_repair_eligibility "$dir" fast
-  record_fast_repair_eligibility "$dir" other
-  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_FAST_REPAIR_PROGRESS_INTERVAL=20 \
+  cat > "$fakebin/gh-axi" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> '$ghargs'
+printf 'summary: "4 passed, 0 failed, 4 total"\n'
+EOF
+  chmod +x "$fakebin/gh-axi"
+  : > "$ghargs"
+  PATH="$fakebin:$PATH" FM_HOME="$dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
     bash -c '
       set -u
       . "$1"
+      ghargs=$2
       wake() { printf "WAKE %s\n" "$*"; }
-      fast_repair_progress_discover
-      [ "$FAST_REPAIR_ACTIVE" = 1 ] || { echo "an eligible task was not discovered"; exit 1; }
-      FM_FAST_REPAIR_TIMER_GENERATION=1 \
-        fast_repair_progress_timer_publish fast "fast-repair fast pr-checks-green: 4 passed, 0 failed, 4 total"
-      fast_repair_progress_timer_wake
-      fast_repair_progress_discover
-      [ "$FAST_REPAIR_ACTIVE" = 1 ] || { echo "the remaining Fast Repair task stopped the cadence"; exit 1; }
-      mv -f "$STATE/other.meta" "$STATE/other.meta.parked"
-      fast_repair_progress_discover
-      [ "$FAST_REPAIR_ACTIVE" = 0 ] || { echo "the cadence stayed active with only a green task left"; exit 1; }
-      FM_FAST_REPAIR_TIMER_GENERATION=1 FAST_REPAIR_ACTIVE=1 fast_repair_progress_tick
-      [ "$FAST_REPAIR_ACTIVE" = 0 ] || { echo "the tick kept working a retired green task"; exit 1; }
-      [ ! -e "$STATE/.last-fast-repair-progress-fast" ] \
-        || { echo "the retired green task was polled again"; exit 1; }
-      mv -f "$STATE/other.meta.parked" "$STATE/other.meta"
-      ids=$(fast_repair_progress_task_ids)
-      case "$ids" in
-        *fast*) echo "the green task is still worked by the twenty-second cadence"; exit 1 ;;
-      esac
-      case "$ids" in
-        *other*) ;;
-        *) echo "retiring the green task also retired an unrelated Fast Repair task"; exit 1 ;;
-      esac
-    ' _ "$WATCH" > "$out" 2>&1 \
-    || fail "the Fast Repair cadence did not retire after its first green rollup: $(cat "$out")"
+      FAST_REPAIR_ACTIVE=1
+      FAST_REPAIR_PROGRESS_INTERVAL=600
+      beat() {
+        local gen=$1 i=0
+        fast_repair_progress_due_set fast 0
+        FM_FAST_REPAIR_TIMER_GENERATION="$gen" fast_repair_progress_tick
+        while fast_repair_progress_task_running fast "$gen" && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+        fast_repair_progress_timer_tasks_finish "$gen"
+        fast_repair_progress_timer_wake
+      }
+      beat 1
+      [ -e "$(fast_repair_progress_green_marker fast)" ] \
+        || { echo "the green rollup did not retire the forge poll"; exit 1; }
+      polled=$(wc -l < "$ghargs")
+      [ "$polled" -gt 0 ] || { echo "the first beat never reached the forge"; exit 1; }
+
+      beat 2
+      [ "$(wc -l < "$ghargs")" = "$polled" ] \
+        || { echo "the retired task kept polling the forge"; exit 1; }
+
+      printf "broader=failed\n" > "$STATE/fast.fast-repair-broader"
+      beat 3
+      [ "$(wc -l < "$ghargs")" = "$polled" ] \
+        || { echo "the local broader follow-up reached the forge"; exit 1; }
+    ' _ "$WATCH" "$ghargs" > "$out" 2>&1 \
+    || fail "the Fast Repair green retirement contract failed: $(cat "$out")"
   grep -F 'WAKE check: fast-repair fast pr-checks-green' "$out" >/dev/null \
-    || fail "the green rollup was not surfaced before the cadence retired: $(cat "$out")"
-  pass "the Fast Repair cadence retires a task after its first green rollup is queued"
+    || fail "the green rollup was not surfaced: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "a broader failure landing after the green rollup was never surfaced: $(cat "$out")"
+  pass "a green rollup stops the Fast Repair forge poll while local broader failures still surface"
+}
+
+# The cadence may only pull the watcher out of its wait for a transition. An
+# unchanged result would otherwise cost an extra full supervision cycle every
+# twenty seconds for the life of the task.
+test_fast_repair_unchanged_result_does_not_interrupt_the_wait() {
+  local dir state out
+  dir=$(make_case fast-repair-unchanged-wait); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      wake() { printf "WAKE %s\n" "$*"; }
+      run_check_capture() { FM_CHECK_RESULT="fast-repair fast broader-tests-failed"; }
+      POLL=8
+      FAST_REPAIR_PROGRESS_INTERVAL=1
+      # Never run in a command substitution: the wait has to stay a direct child
+      # of this shell for the notify path to accept it, exactly as it is in the
+      # real watcher.
+      cycle() {  # <elapsed-file>
+        local start
+        fast_repair_progress_due_set fast 0
+        fast_repair_progress_discover
+        fast_repair_progress_timer_start
+        start=$(date +%s)
+        fast_repair_progress_timer_sleep "$POLL"
+        printf "%s\n" "$(( $(date +%s) - start ))" > "$1"
+        fast_repair_progress_timer_finish
+        fast_repair_progress_timer_wake
+      }
+      cycle "$STATE/.elapsed-changed"
+      changed=$(cat "$STATE/.elapsed-changed")
+      [ "$changed" -lt 6 ] \
+        || { echo "a new Fast Repair result did not interrupt the wait (${changed}s)"; exit 1; }
+      cycle "$STATE/.elapsed-unchanged"
+      unchanged=$(cat "$STATE/.elapsed-unchanged")
+      [ "$unchanged" -ge 6 ] \
+        || { echo "an unchanged Fast Repair result tore the watcher out of its wait (${unchanged}s)"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the unchanged-result wait contract failed: $(cat "$out")"
+  [ "$(grep -cF 'WAKE check: fast-repair fast broader-tests-failed' "$out")" = 1 ] \
+    || fail "the unchanged result was surfaced more than once: $(cat "$out")"
+  pass "an unchanged Fast Repair result never interrupts the watcher's wait"
+}
+
+# A watcher signalled while blocked in the forked backend wait must stop that
+# wait's whole group - the backend event reader inside it keeps mutating this
+# home's transition state otherwise - and must leave no capture file behind.
+test_fast_repair_terminated_watcher_stops_the_backend_wait() {
+  local dir state out readerpid pid reader i
+  dir=$(make_case fast-repair-wait-teardown); state="$dir/state"; out="$dir/result"
+  readerpid="$dir/reader.pid"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_TEST_READER_PID="$readerpid" \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      FAST_REPAIR_ACTIVE=1
+      POLL=120
+      FAST_REPAIR_PROGRESS_INTERVAL=600
+      # Stands in for the backend event reader: a real subprocess of the wait
+      # that outlives its parent shell unless the whole group is signalled.
+      fm_backend_wait_transition() {
+        ( printf "%s\n" "$BASHPID" > "$FM_TEST_READER_PID"; exec sleep 300 ) &
+        wait $!
+      }
+      trap "exit 1" HUP INT TERM
+      trap fast_repair_progress_timer_finish EXIT
+      fast_repair_progress_timer_start
+      fast_repair_progress_timer_wait_transition herdr sess "$POLL" "$STATE" sess:pane1
+    ' _ "$WATCH" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -s "$readerpid" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -s "$readerpid" ] || { kill -KILL "$pid" 2>/dev/null; fail "the backend wait never started its reader: $(cat "$out")"; }
+  reader=$(cat "$readerpid")
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  i=0
+  while kill -0 "$reader" 2>/dev/null && [ "$i" -lt 100 ]; do sleep 0.05; i=$((i + 1)); done
+  if kill -0 "$reader" 2>/dev/null; then
+    kill -KILL "$reader" 2>/dev/null || true
+    fail "a terminated watcher orphaned its backend event reader (pid $reader)"
+  fi
+  set -- "$state"/.fm-event-wait.*
+  [ ! -e "$1" ] || fail "a terminated watcher left its backend wait capture file behind: $1"
+  pass "a terminated watcher stops its backend wait group and leaves no capture file"
+}
+
+# A result published before the wait is armed used to be invisible to notify and
+# cost the whole poll budget - the exact delay this cadence exists to remove.
+test_fast_repair_handoff_published_before_the_wait_is_consumed() {
+  local dir state out
+  dir=$(make_case fast-repair-prewait-race); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      wake() { printf "WAKE %s\n" "$*"; }
+      FAST_REPAIR_ACTIVE=1
+      POLL=10
+      FAST_REPAIR_PROGRESS_INTERVAL=600
+      fast_repair_progress_timer_start
+      # Published with no wait armed and no notify parent, which is exactly the
+      # window between starting the timer and reaching the wait.
+      FM_FAST_REPAIR_TIMER_GENERATION="$FAST_REPAIR_TIMER_GENERATION" \
+        fast_repair_progress_timer_publish fast "fast-repair fast broader-tests-failed" \
+        || { echo "the fixture handoff could not be published"; exit 1; }
+      start=$(date +%s)
+      fast_repair_progress_timer_sleep "$POLL"
+      elapsed=$(( $(date +%s) - start ))
+      fast_repair_progress_timer_finish
+      fast_repair_progress_timer_wake
+      [ "$elapsed" -lt 6 ] \
+        || { echo "a handoff published before the wait was armed cost the whole ${elapsed}s budget"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the pre-wait handoff race was not closed: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "the pre-wait handoff was never surfaced: $(cat "$out")"
+  pass "a handoff published before the wait is armed is consumed instead of waiting out the budget"
+}
+
+# A start that fails before forking must re-arm on the ordinary interval; leaving
+# the beat immediately due spins the timer loop for the rest of every cycle.
+test_fast_repair_failed_start_rearms_instead_of_spinning() {
+  local dir state out
+  dir=$(make_case fast-repair-failed-start); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  mkdir -p "$dir/data/fast"
+  # An eligibility record with no lifecycle= line: task_start refuses before it
+  # can fork, which is the failure class that used to leave the due in the past.
+  printf 'request=fast-repair: fixture\n' > "$dir/data/fast/fast-repair-eligibility"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      FAST_REPAIR_ACTIVE=1
+      FAST_REPAIR_PROGRESS_INTERVAL=30
+      fast_repair_progress_due_set fast 0
+      FM_FAST_REPAIR_TIMER_GENERATION=1 fast_repair_progress_tick
+      fast_repair_progress_task_running fast 1 \
+        && { echo "the fixture unexpectedly forked a progress child"; exit 1; }
+      due=$(fast_repair_progress_due_in fast)
+      [ "$due" -gt 0 ] \
+        || { echo "a failed start left the beat immediately due"; exit 1; }
+      delay=$(fast_repair_progress_timer_delay 1)
+      [ "$delay" -gt 1 ] \
+        || { echo "the timer loop would spin at ${delay}s after a failed start"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "a failed Fast Repair start did not re-arm on the interval: $(cat "$out")"
+  pass "a Fast Repair start that fails before forking re-arms on the ordinary interval"
+}
+
+# The forked wait must report backend diagnostics exactly as the unforked call
+# does, or a herdr socket failure goes silent on Fast Repair homes only.
+test_fast_repair_backend_wait_keeps_stderr() {
+  local dir state out
+  dir=$(make_case fast-repair-wait-stderr); state="$dir/state"; out="$dir/result"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      fm_backend_wait_transition() { printf "herdr: subscribe refused\n" >&2; return 2; }
+      fast_repair_progress_timer_wait_transition herdr sess 1 "$STATE" sess:pane1
+      rc=$?
+      [ "$rc" = 2 ] || { echo "the forked wait lost the backend exit status ($rc)"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the forked backend wait did not report its backend status: $(cat "$out")"
+  grep -F 'herdr: subscribe refused' "$out" >/dev/null \
+    || fail "the forked backend wait discarded its backend diagnostic: $(cat "$out")"
+  pass "the forked backend wait preserves backend stderr diagnostics"
 }
 
 test_signal_reason_is_actionable_classifier
 test_fast_repair_check_signal_race_stops_the_check_group
 test_fast_repair_cadence_interrupts_the_push_transition_wait
 test_fast_repair_beat_survives_the_poll_boundary
-test_fast_repair_cadence_retires_after_the_first_green_rollup
+test_fast_repair_green_stops_forge_poll_but_keeps_broader_followup
+test_fast_repair_unchanged_result_does_not_interrupt_the_wait
+test_fast_repair_terminated_watcher_stops_the_backend_wait
+test_fast_repair_handoff_published_before_the_wait_is_consumed
+test_fast_repair_failed_start_rearms_instead_of_spinning
+test_fast_repair_backend_wait_keeps_stderr
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
 test_fast_repair_cadence_runs_inside_a_long_ordinary_poll

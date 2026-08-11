@@ -79,9 +79,12 @@ A rollup where no check passed is never green, because the forge reports a cance
 
 The Fast Repair progress check runs about every 20 seconds only while durable task metadata records an eligible Fast Repair task.
 The timer runs during the existing watcher wait, so it does not change ordinary task polling, stale handling, pane scans, backend capture cadence, backend transition budgets, or global defaults.
-A result found by that timer interrupts whichever wait the watcher is in, including the backend event and push-transition wait, so it reaches the captain in the cycle it was found rather than at the end of the poll budget.
+A changed result found by that timer interrupts whichever wait the watcher is in, including the backend event and push-transition wait, so it reaches the captain in the cycle it was found rather than at the end of the poll budget.
+A result identical to the one already surfaced never interrupts a wait, so an unchanged Fast Repair state costs no extra supervision cycles.
 A progress check that is stopped at a poll boundary keeps its due time, so the beat is retried on the next tick instead of being skipped for a whole interval.
-The cadence retires a task once its first green rollup is queued; from then on the ordinary PR check poll owns that PR.
+That is a retry guarantee, not a delivery one: a forge call slower than the remaining poll window is reaped before it can publish, and the ordinary PR check poll stays the backstop.
+Once the first green rollup is queued the cadence stops polling the forge for that task, and the ordinary PR check poll owns its PR checks from then on.
+The task-scoped beat continues in a local-only form that reads only this home's own broader-test record, so a broader failure landing after the rollup turned green is still surfaced.
 A relaunch of a Fast Repair task reuses the recorded profile, so the standard recovery command needs no profile flags.
 
 ## Examples
