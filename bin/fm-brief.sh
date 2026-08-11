@@ -380,7 +380,7 @@ Add a new regression test that reproduces the reported defect and make the narro
 Run \`$FAST_REPAIR_HELPER evidence $ID --regression-test '<runner family>' --focused-test '<different runner family>'\` through the tracked \`bin/fm-test-run.sh\` runner.
 It runs and records both gates, and it refuses PR publication when either result is missing or failed.
 After it passes, use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
-Then run \`$FAST_REPAIR_HELPER broader $ID --test '<runner family>'\` while the new PR's checks run concurrently.
+Then run \`$FAST_REPAIR_HELPER broader $ID --test '<runner family broader than the focused one>'\` while the new PR's checks run concurrently.
 Do not call the PR ready or green until \`$FAST_REPAIR_HELPER ready $ID\` passes.
 If broader tests or PR checks fail after the PR opens, append \`failed: PR {url} is open but not green because {failed evidence}\` and stop.
 Never enable auto-merge, and never merge the PR.
