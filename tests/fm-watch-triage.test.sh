@@ -2076,8 +2076,133 @@ SH
   pass "a signal racing the active-check group handoff still stops that check group"
 }
 
+# On a push-capable home the terminal wait is a foreground read on the backend's
+# event stream, not an interruptible sleep, so a Fast Repair result found by the
+# timer must still stop that wait and reach the captain inside the same cycle.
+# The backend seam is stubbed so the assertion is about the watcher's own wait,
+# not about herdr.
+test_fast_repair_cadence_interrupts_the_push_transition_wait() {
+  local dir state out elapsed
+  dir=$(make_case fast-repair-push-cadence); state="$dir/state"; out="$dir/result"
+  printf 'window=herdrsess:pane1\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nbackend=herdr\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
+  PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    FM_POLL=25 FM_FAST_REPAIR_PROGRESS_INTERVAL=1 FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      recorded_windows() { printf "%s\n" herdrsess:pane1; }
+      window_backend() { printf "herdr\n"; }
+      window_kind() { printf "ship\n"; }
+      fm_backend_has_push() { return 0; }
+      fm_backend_events_capable() { return 0; }
+      # The real reader blocks on a fifo for the whole budget; this stands in for
+      # that uninterruptible foreground wait.
+      fm_backend_wait_transition() { sleep "$3"; return 1; }
+      handle_push_transition() { :; }
+      wake() { printf "WAKE %s\n" "$*"; }
+      start=$(date +%s)
+      fast_repair_progress_discover
+      event_wait_or_sleep
+      printf "ELAPSED %s\n" "$(( $(date +%s) - start ))"
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the push-path Fast Repair cycle failed: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "the Fast Repair result was not delivered during the push-transition wait: $(cat "$out")"
+  elapsed=$(sed -n 's/^ELAPSED //p' "$out" | head -n 1)
+  case "$elapsed" in ''|*[!0-9]*) fail "the push-path cycle reported no elapsed time: $(cat "$out")" ;; esac
+  [ "$elapsed" -lt 15 ] \
+    || fail "the Fast Repair result waited out the ${elapsed}s push-transition budget instead of interrupting it"
+  pass "a Fast Repair result interrupts the push-transition wait instead of waiting out the poll budget"
+}
+
+# A progress child killed at the poll boundary has proven nothing, so its beat
+# must stay due; a child that completed its check owns the next due time.
+test_fast_repair_beat_survives_the_poll_boundary() {
+  local dir state out
+  dir=$(make_case fast-repair-beat-boundary); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      FAST_REPAIR_ACTIVE=1
+      FAST_REPAIR_PROGRESS_INTERVAL=600
+      run_check_capture() { : > "$STATE/.fixture-check-started"; sleep 10; FM_CHECK_RESULT=; }
+      FM_FAST_REPAIR_TIMER_GENERATION=1 fast_repair_progress_tick
+      i=0
+      while [ ! -e "$STATE/.fixture-check-started" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+      [ -e "$STATE/.fixture-check-started" ] || { echo "the progress child never started"; exit 1; }
+      fast_repair_progress_timer_tasks_finish 1
+      due=$(fast_repair_progress_due_in fast)
+      [ "$due" = 0 ] || { echo "a reaped beat advanced its due time to ${due}s"; exit 1; }
+
+      run_check_capture() { FM_CHECK_RESULT=; }
+      FM_FAST_REPAIR_TIMER_GENERATION=2 fast_repair_progress_tick
+      i=0
+      while [ "$(fast_repair_progress_due_in fast)" = 0 ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+      due=$(fast_repair_progress_due_in fast)
+      [ "$due" -gt 0 ] || { echo "a completed check did not advance its own due time"; exit 1; }
+      fast_repair_progress_timer_tasks_finish 2
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the Fast Repair beat was lost at the poll boundary: $(cat "$out")"
+  pass "a Fast Repair beat reaped at a poll boundary stays due and a completed check owns its next due"
+}
+
+# The twenty-second forge poll exists to catch the first actionable transition of
+# an open Fast Repair PR. Once green is queued the ordinary PR poll owns it.
+test_fast_repair_cadence_retires_after_the_first_green_rollup() {
+  local dir state out
+  dir=$(make_case fast-repair-green-retire); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/other.meta"
+  record_fast_repair_eligibility "$dir" fast
+  record_fast_repair_eligibility "$dir" other
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_FAST_REPAIR_PROGRESS_INTERVAL=20 \
+    bash -c '
+      set -u
+      . "$1"
+      wake() { printf "WAKE %s\n" "$*"; }
+      fast_repair_progress_discover
+      [ "$FAST_REPAIR_ACTIVE" = 1 ] || { echo "an eligible task was not discovered"; exit 1; }
+      FM_FAST_REPAIR_TIMER_GENERATION=1 \
+        fast_repair_progress_timer_publish fast "fast-repair fast pr-checks-green: 4 passed, 0 failed, 4 total"
+      fast_repair_progress_timer_wake
+      fast_repair_progress_discover
+      [ "$FAST_REPAIR_ACTIVE" = 1 ] || { echo "the remaining Fast Repair task stopped the cadence"; exit 1; }
+      mv -f "$STATE/other.meta" "$STATE/other.meta.parked"
+      fast_repair_progress_discover
+      [ "$FAST_REPAIR_ACTIVE" = 0 ] || { echo "the cadence stayed active with only a green task left"; exit 1; }
+      FM_FAST_REPAIR_TIMER_GENERATION=1 FAST_REPAIR_ACTIVE=1 fast_repair_progress_tick
+      [ "$FAST_REPAIR_ACTIVE" = 0 ] || { echo "the tick kept working a retired green task"; exit 1; }
+      [ ! -e "$STATE/.last-fast-repair-progress-fast" ] \
+        || { echo "the retired green task was polled again"; exit 1; }
+      mv -f "$STATE/other.meta.parked" "$STATE/other.meta"
+      ids=$(fast_repair_progress_task_ids)
+      case "$ids" in
+        *fast*) echo "the green task is still worked by the twenty-second cadence"; exit 1 ;;
+      esac
+      case "$ids" in
+        *other*) ;;
+        *) echo "retiring the green task also retired an unrelated Fast Repair task"; exit 1 ;;
+      esac
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the Fast Repair cadence did not retire after its first green rollup: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast pr-checks-green' "$out" >/dev/null \
+    || fail "the green rollup was not surfaced before the cadence retired: $(cat "$out")"
+  pass "the Fast Repair cadence retires a task after its first green rollup is queued"
+}
+
 test_signal_reason_is_actionable_classifier
 test_fast_repair_check_signal_race_stops_the_check_group
+test_fast_repair_cadence_interrupts_the_push_transition_wait
+test_fast_repair_beat_survives_the_poll_boundary
+test_fast_repair_cadence_retires_after_the_first_green_rollup
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
 test_fast_repair_cadence_runs_inside_a_long_ordinary_poll
