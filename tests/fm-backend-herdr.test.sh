@@ -4200,6 +4200,71 @@ test_wait_transition_clean_timeout_returns_1() {
   pass "fm_backend_herdr_wait_transition: stock macOS Bash clean timeout closes fd 9 and returns 1"
 }
 
+# The watcher runs this wait as its own process group and signals that group as
+# soon as a Fast Repair result is ready, so interruption mid-read is a routine
+# path, not only a shutdown one. Every interrupted wait must still reclaim its
+# private FIFO directory, or one directory accumulates under TMPDIR per result.
+test_wait_transition_signalled_removes_its_fifo_dir() {
+  local dir state agent temp fb reader ready pid i left
+  dir="$TMP_ROOT/wt-signalled"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"
+  mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  # A reader that acknowledges and then holds the stream open, so the wait is
+  # blocked in its read when the signal lands.
+  reader="$dir/blocking-reader.sh"; ready="$dir/subscribed"
+  cat > "$reader" <<'SH'
+#!/usr/bin/env bash
+set -u
+printf '@subscribed\n'
+: > "$FM_FAKE_READER_READY_FILE"
+sleep 30
+SH
+  chmod +x "$reader"
+  PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess \
+    FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_READY_FILE="$ready" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 30 "$1" sess:wG:pQ' \
+    "$ROOT" "$state" >/dev/null 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+  [ -e "$ready" ] || { kill -KILL "$pid" 2>/dev/null || true; fail "the signalled-wait fixture never subscribed"; }
+  sleep 0.3
+  kill -TERM "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  left=$(find "$temp" -mindepth 1 -print -quit)
+  [ -z "$left" ] || fail "an interrupted event wait leaked its private FIFO directory: $left"
+  pass "fm_backend_herdr_wait_transition: an interrupted wait removes its private FIFO directory"
+}
+
+# The cleanup above must not become the caller's signal policy: the watcher
+# installs its own HUP/INT/TERM handling around this wait, and a completed wait
+# has to hand that handling back exactly as it found it.
+test_wait_transition_restores_the_callers_signal_handling() {
+  local dir state agent temp fb reader lines out
+  dir="$TMP_ROOT/wt-restore-traps"; state="$dir/state"; agent="$dir/agents"; temp="$dir/temp"
+  mkdir -p "$state" "$agent" "$temp"
+  fb=$(make_herdr_eventfake "$dir")
+  set_fake_agent "$agent" "wG:pQ" idle
+  reader=$(make_fake_reader "$dir"); lines="$dir/lines"; : > "$lines"
+  out=$(PATH="$fb:$PATH" TMPDIR="$temp" FM_BACKEND_HERDR_EVENTS_FORCE=1 FM_FAKE_SESSION_NAME=sess \
+    FM_FAKE_SOCKET="$dir/x.sock" FM_FAKE_AGENT_DIR="$agent" \
+    FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_LINES="$lines" \
+    bash -c '
+      . "$0/bin/backends/herdr.sh"
+      trap "printf caller-handled\n" TERM
+      fm_backend_herdr_wait_transition sess 1 "$1" sess:wG:pQ >/dev/null 2>&1
+      kill -TERM $$
+      sleep 0.2
+    ' "$ROOT" "$state")
+  case "$out" in
+    *caller-handled*) : ;;
+    *) fail "a completed event wait did not restore the caller's TERM handling, got '$out'" ;;
+  esac
+  pass "fm_backend_herdr_wait_transition: a completed wait restores the caller's own signal handling"
+}
+
 # shellcheck source=bin/fm-backend.sh
 . "$ROOT/bin/fm-backend.sh"
 
@@ -4374,3 +4439,5 @@ test_wait_transition_stream_absorb_clears_then_timeout
 test_wait_transition_reader_failure_returns_2
 test_wait_transition_bad_ack_returns_2_and_cleans_up
 test_wait_transition_clean_timeout_returns_1
+test_wait_transition_signalled_removes_its_fifo_dir
+test_wait_transition_restores_the_callers_signal_handling
