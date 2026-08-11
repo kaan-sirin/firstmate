@@ -111,7 +111,6 @@ EOF
 
   [ "$shown" -gt 0 ] || return 0
 }
-
 # Print the consolidated OPEN DECISIONS section: every still-open
 # needs-decision/blocked, fleet-wide, folded from the durable status logs by
 # fm-classify-lib.sh's status_open_decisions fold (via its cursor-backed
