@@ -41,6 +41,7 @@ An absent, empty, unknown, ambiguous, false, or otherwise different value refuse
 Agent confidence is not evidence.
 The refusal names the condition that was not proven, and the request returns to normal intake with the project's existing delivery rules.
 An eligible Fast Repair does not create a scout or add plan, design, CEO, engineering, or other review workflows.
+A scout cannot be promoted into Fast Repair either, because eligibility needs a known end-user reproduction and its typed record at normal intake.
 
 The exact typed interface and evidence record are owned by `bin/fm-fast-repair.sh --help`.
 
@@ -54,7 +55,7 @@ Fast Repair never enables auto-merge.
 
 The repair must add a regression test that reproduces the defect and must pass focused module tests.
 `bin/fm-fast-repair.sh evidence` executes and records both gates.
-The only supported interface is the tracked `bin/fm-test-run.sh` runner and distinct families from its `--list-families` output: the regression family, the focused family, and later a third broader family.
+The only supported interface is the tracked `bin/fm-test-run.sh` runner and named families from its `--list-families` output: the regression family, a different focused family, and later a broader family.
 The recorded pre-fix reproduction commit must be an ancestor of the tested head.
 Fast Repair identifies exactly one new test artifact from the regression family's runner-owned selector, overlays that artifact onto an isolated reproduction checkout, and requires that selected artifact to fail there and pass at the tested head.
 The evidence record binds the selector, test artifact identity, reproduction revision, tested revision, and both results.
