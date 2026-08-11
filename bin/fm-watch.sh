@@ -526,6 +526,63 @@ fast_repair_eligible_task() {
   [ -f "$meta" ] && [ ! -L "$meta" ] && fast_repair_eligible_meta "$meta"
 }
 
+fast_repair_progress_due_path() {
+  printf '%s/.fast-repair-progress-next-due-%s' "$STATE" "$1"
+}
+
+fast_repair_progress_due_set() {
+  local id=$1 due=$2 path tmp
+  fm_pr_task_id_valid "$id" || return 1
+  case "$due" in *[!0-9]*|'') return 1 ;; esac
+  path=$(fast_repair_progress_due_path "$id") || return 1
+  tmp=$(mktemp "$path.XXXXXX") || return 1
+  if ! printf '%s\n' "$due" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$path"; then
+    rm -f "$tmp"
+    return 1
+  fi
+}
+
+fast_repair_progress_due_in() {
+  local path now due
+  path=$(fast_repair_progress_due_path "$1") || return 1
+  now=$(date +%s) || return 1
+  due=$(cat "$path" 2>/dev/null || true)
+  case "$due" in *[!0-9]*|'') printf '0\n'; return 0 ;; esac
+  if [ "$due" -le "$now" ]; then
+    printf '0\n'
+  else
+    printf '%s\n' "$((due - now))"
+  fi
+}
+
+fast_repair_progress_schedule_missing() {
+  local meta id path now due
+  now=$(date +%s) || return 1
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    fast_repair_eligible_meta "$meta" || continue
+    id=$(basename "$meta" .meta)
+    path=$(fast_repair_progress_due_path "$id") || continue
+    due=$(cat "$path" 2>/dev/null || true)
+    case "$due" in *[!0-9]*|'') fast_repair_progress_due_set "$id" "$((now + FAST_REPAIR_PROGRESS_INTERVAL))" || continue ;; esac
+  done
+}
+
+fast_repair_progress_timer_delay() {
+  local meta id delay shortest=
+  for meta in "$STATE"/*.meta; do
+    [ -e "$meta" ] || continue
+    fast_repair_eligible_meta "$meta" || continue
+    id=$(basename "$meta" .meta)
+    delay=$(fast_repair_progress_due_in "$id") || continue
+    case "$delay" in *[!0-9]*|'') continue ;; esac
+    if [ -z "$shortest" ] || [ "$delay" -lt "$shortest" ]; then
+      shortest=$delay
+    fi
+  done
+  printf '%s\n' "${shortest:-$FAST_REPAIR_PROGRESS_INTERVAL}"
+}
+
 fast_repair_progress_record() {
   local id=$1 result=$2 generation=${3:-} marker generation_marker prior prior_generation
   marker="$STATE/.fast-repair-progress-$id"
@@ -639,7 +696,7 @@ fast_repair_progress_task_start() { # <task-id> <generation>
 }
 
 fast_repair_progress_tick() {
-  local meta id progress_stamp generation
+  local meta id due generation now
   local ids=()
   for meta in "$STATE"/*.meta; do
     [ -e "$meta" ] || continue
@@ -654,28 +711,39 @@ fast_repair_progress_tick() {
   generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
   case "$generation" in *[!0-9]*|'') return 1 ;; esac
   for id in "${ids[@]}"; do
-    progress_stamp="$STATE/.last-fast-repair-progress-$id"
-    [ "$(age_of "$progress_stamp")" -ge "$FAST_REPAIR_PROGRESS_INTERVAL" ] || continue
+    due=$(fast_repair_progress_due_in "$id") || continue
+    [ "$due" -eq 0 ] || continue
+    now=$(date +%s) || continue
+    fast_repair_progress_due_set "$id" "$((now + FAST_REPAIR_PROGRESS_INTERVAL))" || continue
+    touch "$STATE/.last-fast-repair-progress-$id"
     fast_repair_progress_task_start "$id" "$generation"
   done
 }
 
 fast_repair_progress_timer_publish() {
   local id=$1 result=$2 generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
-  local file tmp
+  local file tmp lock counter current next
   case "$generation" in *[!0-9]*|'') return 1 ;; esac
   case "$id:$result" in *$'\n'*|*$'\r'*) return 1 ;; esac
   fm_pr_task_id_valid "$id" || return 1
-  file="$STATE/.fast-repair-progress-handoff-$id-$generation"
-  tmp=$(mktemp "$file.XXXXXX") || return 1
+  lock="$STATE/.fast-repair-progress-sequence-$id-$generation.lock"
+  counter="$STATE/.fast-repair-progress-sequence-$id-$generation"
+  fm_lock_acquire_wait "$lock" || return 1
+  current=$(cat "$counter" 2>/dev/null || true)
+  case "$current" in ''|*[!0-9]*) current=0 ;; esac
+  next=$((current + 1))
+  tmp=$(mktemp "$STATE/.fast-repair-progress-pending.XXXXXX") || { fm_lock_release "$lock"; return 1; }
+  file=$(printf '%s/.fast-repair-progress-handoff-%s-%s-%020d' "$STATE" "$id" "$generation" "$next")
   if ! {
     printf '%s\n' "$generation"
     printf '%s\n' "$id"
     printf '%s\n' "$result"
-  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file"; then
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$file" || ! printf '%s\n' "$next" > "$counter"; then
     rm -f "$tmp"
+    fm_lock_release "$lock"
     return 1
   fi
+  fm_lock_release "$lock"
 }
 
 fast_repair_progress_timer_notify() {
@@ -853,9 +921,10 @@ heartbeat_scan_finds_actionable() {
 }
 
 fast_repair_progress_timer_start() {
-  local marker parent closing generation
+  local marker parent closing generation delay
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
+  fast_repair_progress_schedule_missing || return 0
   generation=$(fast_repair_progress_generation_next) || return 0
   FAST_REPAIR_TIMER_GENERATION=$generation
   marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
@@ -866,14 +935,18 @@ fast_repair_progress_timer_start() {
     trap 'rm -f "$closing"' EXIT
     trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
     while [ -f "$marker" ]; do
-      sleep "$FAST_REPAIR_PROGRESS_INTERVAL"
-      [ -f "$marker" ] || exit 0
       [ "$(cat "$WATCH_LOCK/pid" 2>/dev/null || true)" = "$parent" ] || exit 0
       FM_FAST_REPAIR_TIMER_PARENT="$parent" \
         FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
         FM_FAST_REPAIR_TIMER_GENERATION="$generation" \
         fast_repair_progress_tick
       [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
+      [ -f "$marker" ] || exit 0
+      delay=$(fast_repair_progress_timer_delay) || exit 0
+      case "$delay" in *[!0-9]*|'') exit 0 ;; esac
+      [ "$delay" -gt 0 ] || delay=1
+      sleep "$delay"
+      [ -f "$marker" ] || exit 0
     done
   ) &
   FAST_REPAIR_TIMER_PID=$!
