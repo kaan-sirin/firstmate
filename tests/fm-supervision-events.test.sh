@@ -426,6 +426,78 @@ for retirement_id in a b; do
 done
 pass "fast_repair_progress_timer_tasks_finish: task retirement signals children concurrently"
 
+ordinary_check_state="$TMP/ordinary-check-state"
+ordinary_check="$TMP/ordinary-check.sh"
+ordinary_check_pid="$TMP/ordinary-check.pid"
+ordinary_check_out="$TMP/ordinary-check.out"
+mkdir -p "$ordinary_check_state"
+cat > "$ordinary_check" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_ORDINARY_CHECK_PID"
+trap '' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$ordinary_check"
+if ! FM_STATE_OVERRIDE="$ordinary_check_state" FM_ORDINARY_CHECK_PID="$ordinary_check_pid" \
+  bash -c '
+    set -u
+    . "$1"
+    run_check_capture "$2" &
+    runner=$!
+    i=0
+    while [ ! -s "$3" ] && [ "$i" -lt 50 ]; do sleep 0.01; i=$((i + 1)); done
+    [ -s "$3" ] || exit 1
+    check_pid=$(cat "$3")
+    pgid=$(ps -o pgid= -p "$check_pid" 2>/dev/null | tr -d "[:space:]")
+    case "$pgid" in ""|*[!0-9]*) exit 1 ;; esac
+    trap "kill -KILL -- -$pgid 2>/dev/null || true; wait \"$runner\" 2>/dev/null || true" EXIT
+    kill -TERM "$runner"
+    wait "$runner"
+    runner_status=$?
+    [ "$runner_status" -eq 1 ] || exit 1
+    kill -0 "$check_pid" 2>/dev/null
+  ' _ "$ROOT/bin/fm-watch.sh" "$ordinary_check" "$ordinary_check_pid" > "$ordinary_check_out" 2>&1; then
+  fail "an ordinary check signal stopped its active check group: $(cat "$ordinary_check_out")"
+fi
+pass "ordinary checks keep their original signal behavior"
+
+fast_check_state="$TMP/fast-check-state"
+fast_check="$TMP/fast-check.sh"
+fast_check_pid="$TMP/fast-check.pid"
+fast_check_out="$TMP/fast-check.out"
+mkdir -p "$fast_check_state"
+cat > "$fast_check" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_FAST_CHECK_PID"
+trap '' TERM
+while :; do sleep 1; done
+SH
+chmod +x "$fast_check"
+if ! FM_STATE_OVERRIDE="$fast_check_state" FM_FAST_CHECK_PID="$fast_check_pid" \
+  bash -c '
+    set -u
+    . "$1"
+    check=$2
+    WATCHER_PID=$$
+    mkdir -p "$WATCH_LOCK"
+    printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+    FAST_REPAIR_ACTIVE=1
+    POLL=10
+    FAST_REPAIR_PROGRESS_INTERVAL=1
+    fast_repair_progress_tick() { run_check_capture --stop-active-check-on-signal "$check"; }
+    fast_repair_progress_timer_start
+    trap "fast_repair_progress_timer_finish || true" EXIT
+    i=0
+    while [ ! -s "$3" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
+    [ -s "$3" ] || exit 1
+    fast_repair_progress_timer_finish
+    check_pid=$(cat "$3")
+    ! kill -0 "$check_pid" 2>/dev/null
+  ' _ "$ROOT/bin/fm-watch.sh" "$fast_check" "$fast_check_pid" > "$fast_check_out" 2>&1; then
+  fail "Fast Repair timer retirement left its active check group alive: $(cat "$fast_check_out")"
+fi
+pass "Fast Repair timer retirement stops its active check group"
+
 normal_home="$TMP/normal-usr1-home"
 normal_state="$normal_home/state"
 normal_data="$normal_home/data"

@@ -564,7 +564,7 @@ fast_repair_progress_timer_tasks_finish() { # <generation>
     pids+=("$pid")
     kill -TERM "$pid" 2>/dev/null || true
   done
-  while [ "$i" -lt 20 ]; do
+  while [ "$i" -lt 40 ]; do
     live=0
     for pid in "${pids[@]}"; do
       kill -0 "$pid" 2>/dev/null && { live=1; break; }
@@ -595,7 +595,7 @@ fast_repair_progress_task_start() { # <task-id> <generation>
     while [ ! -f "$ready" ]; do sleep 0.01; done
     [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
-      run_check_capture "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
+      run_check_capture --stop-active-check-on-signal "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
     result=$FM_CHECK_RESULT
     [ -z "$result" ] || fast_repair_progress_timer_publish "$id" "$result"
   ) &
@@ -757,7 +757,10 @@ fm_active_check_stop() {
 }
 
 run_check_capture() {
-  local pgid
+  local pgid stop_active_check=0
+  case "${1:-}" in
+    --stop-active-check-on-signal) stop_active_check=1; shift ;;
+  esac
   fm_check_output_cleanup
   FM_CHECK_RESULT=
   FM_CHECK_OUTPUT=$(mktemp "$STATE/.fm-check-output.XXXXXX") || return 1
@@ -770,7 +773,11 @@ run_check_capture() {
   FM_ACTIVE_CHECK_PGID=$FM_ACTIVE_CHECK_PID
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
-  trap 'fm_active_check_stop || true; exit 1' HUP INT TERM
+  if [ "$stop_active_check" -eq 1 ]; then
+    trap 'fm_active_check_stop || true; exit 1' HUP INT TERM
+  else
+    trap 'exit 1' HUP INT TERM
+  fi
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true
     fm_check_output_cleanup
@@ -852,7 +859,7 @@ fast_repair_progress_timer_finish() {
   case "$generation" in *[!0-9]*|'') ;; *) fast_repair_progress_timer_tasks_finish "$generation" ;; esac
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     kill -TERM "$pid" 2>/dev/null || true
-    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 20 ]; do
+    while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 40 ]; do
       sleep 0.01
       i=$((i + 1))
     done
