@@ -229,6 +229,12 @@ if [ -n "$ACK_THROUGH" ]; then
   fi
   fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
   DRAIN_LOCK_HELD=true
+  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+  if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
+    echo "wake drain: recovery generation changed while recording inactive outcome receipts" >&2
+    exit 1
+  fi
   DRAIN_TMP=$(mktemp "$STATE/.wake-queue.ack.XXXXXX") || exit 1
   chmod 0600 "$DRAIN_TMP" || exit 1
   awk -F '\t' -v cutoff="$ACK_THROUGH" '
