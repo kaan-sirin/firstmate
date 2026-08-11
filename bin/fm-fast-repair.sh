@@ -829,7 +829,9 @@ case "$command" in
     args=(pr create --title "$title" --body-file "$BODY_FILE")
     [ -z "$base" ] || args+=(--base "$base")
     args+=(--head "$TASK_BRANCH")
-    out=$(cd "$TASK_WORKTREE" && gh-axi "${args[@]}") || exit $?
+    # An unpushed task branch must fail here and be reported, never block the
+    # crewmate's pane on the forge CLI's "where should we push" question.
+    out=$(cd "$TASK_WORKTREE" && GH_PROMPT_DISABLED=1 gh-axi "${args[@]}") || exit $?
     printf '%s\n' "$out"
     url=$(printf '%s\n' "$out" | grep -Eo 'https://github\.com/[^[:space:]]+/pull/[0-9]+' | head -n 1 || true)
     [ -n "$url" ] || fail "PR creation returned no GitHub pull-request URL"

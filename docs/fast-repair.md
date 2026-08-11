@@ -44,6 +44,7 @@ An eligible Fast Repair does not create a scout or add plan, design, CEO, engine
 A scout cannot be promoted into Fast Repair either, because eligibility needs a known end-user reproduction and its typed record at normal intake.
 
 The exact typed interface and evidence record are owned by `bin/fm-fast-repair.sh --help`.
+The record authorizes that one task, so teardown removes it with the task's other durable records; a later task that reuses the same id must record its own evidence, and its report and other task data stay untouched.
 
 ## Delivery
 
@@ -68,7 +69,8 @@ The branch binding and the requirement that the reproduction commit be strictly 
 A relaunch replaces a wedged crewmate in a worktree that already holds unlanded repair work, so it skips that dispatch-time clean-worktree proof; the typed eligibility gate that runs on every Fast Repair spawn still refuses a relaunch whose authorization record is gone or no longer valid.
 The recorded reproduction revision is a lowercase commit id of 40 or 64 characters, so both git object formats are supported.
 
-After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
+After those gates pass, the worker pushes only its `fm/<id>` branch, and `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
+The PR is opened from that pushed branch, so publication of a branch that is only local fails and is reported; it never waits for an interactive answer in the crewmate's pane.
 The worker then starts one supported broader runner family while the new PR's checks run concurrently.
 The broader family must differ from the focused family, because the focused module was already proven before the PR opened.
 Re-running the focused family as the broader gate is refused, and `ready` re-applies that same rule to the stored broader record.

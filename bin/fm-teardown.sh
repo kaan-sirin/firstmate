@@ -2579,6 +2579,10 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/.fast-repair-progress-$ID" "$STATE/.fast-repair-progress-generation-$ID" \
   "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID" \
   "$STATE/.fast-repair-progress-green-$ID"
+# The Fast Repair authorization proves this task's own request, so it dies with
+# the task: a later task reusing this id must present its own intake evidence.
+# Only that exact record goes; the report and the rest of data/<id>/ stay.
+rm -f "$DATA/$ID/fast-repair-eligibility"
 remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-handoff "$ID" 2 || exit 1
 remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-sequence "$ID" 1 || exit 1
 remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-child "$ID" 1 || exit 1

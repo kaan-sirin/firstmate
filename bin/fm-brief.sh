@@ -363,7 +363,7 @@ fi
 case "$MODE" in
   fast-repair)
     SETUP2=""
-    RULE1='1. Never push to the default branch, never merge a PR, and never use a different profile than Codex gpt-5.6-luna with medium effort.'
+    RULE1='1. Never push to the default branch (push only your `fm/'"$ID"'` branch), never merge a PR, and never use a different profile than Codex gpt-5.6-luna with medium effort.'
     # The crewmate's pane comes from a long-lived tmux/herdr daemon and inherits
     # none of firstmate's environment, so the helper would otherwise re-derive
     # its own home and read a different (or absent) task record. The resolved
@@ -379,7 +379,9 @@ Do not create a scout or run plan, design, CEO, engineering, or other extra revi
 Add a new regression test that reproduces the reported defect and make the narrow repair.
 Run \`$FAST_REPAIR_HELPER evidence $ID --regression-test '<runner family>' --focused-test '<different runner family>'\` through the tracked \`bin/fm-test-run.sh\` runner.
 It runs and records both gates, and it refuses PR publication when either result is missing or failed.
-After it passes, use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
+After it passes, run \`git push --set-upstream origin fm/$ID\` from your worktree: push that branch only, never the default branch, and never answer an interactive prompt.
+The direct PR is opened from that pushed branch, so publication refuses while it exists only locally.
+Then use \`$FAST_REPAIR_HELPER publish-pr $ID --title '<title>' --body-file <path>\` to open and register the direct PR immediately.
 Then run \`$FAST_REPAIR_HELPER broader $ID --test '<runner family broader than the focused one>'\` while the new PR's checks run concurrently.
 Do not call the PR ready or green until \`$FAST_REPAIR_HELPER ready $ID\` passes.
 If broader tests or PR checks fail after the PR opens, append \`failed: PR {url} is open but not green because {failed evidence}\` and stop.

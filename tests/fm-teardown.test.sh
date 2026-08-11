@@ -944,6 +944,63 @@ test_fast_repair_progress_cleanup_is_exact_for_one_task_id() {
   pass "Fast Repair progress cleanup removes only the torn-down task's artifacts, never a hyphenated sibling's"
 }
 
+# The typed eligibility record is the authorization for ONE task's request, and
+# task ids are short reusable labels. If teardown leaves it behind, the next task
+# that happens to reuse the id enters Fast Repair on the retired task's proof of
+# reproduction, root cause, isolation, and risk exclusions - the exact failure the
+# path must fail closed on. Asserted through the real consumers: the brief gate a
+# reused id must be refused by, and a hyphenated sibling that must stay authorized.
+test_fast_repair_eligibility_dies_with_its_task() {
+  local case_dir state data rc out sha id
+  case_dir=$(make_case fast-repair-eligibility-scope)
+  state="$case_dir/state"
+  data="$case_dir/data"
+  write_meta "$case_dir" fast-repair ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  sha=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  mkdir -p "$data/task-x1"
+  printf '# report\n' > "$data/task-x1/report.md"
+  printf 'unlanded evidence\n' > "$data/task-x1/notes.md"
+  for id in task-x1 task-x1-2; do
+    FM_HOME="$case_dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+      "$ROOT/bin/fm-fast-repair.sh" intake "$id" --request 'fast-repair: repair the fixture' \
+      --reproduction reproduced --reproduction-revision "$sha" --root-cause confirmed \
+      --isolation isolated --schema none --authentication none --authorization none \
+      --secrets none --financial none --legal none --side-effects none > /dev/null \
+      || fail "the eligibility fixture for $id could not be recorded"
+  done
+
+  set +e
+  FM_DATA_OVERRIDE="$data" run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "fast-repair-eligibility-scope: teardown should succeed (stderr: $(cat "$case_dir/stderr"))"
+
+  set +e
+  out=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-brief.sh" task-x1 some-proj --mode fast-repair 2>&1)
+  rc=$?
+  set -e
+  [ "$rc" -ne 0 ] || fail "a task id reused after teardown still passed the Fast Repair brief gate: $out"
+  case "$out" in
+    *"typed eligibility evidence"*) : ;;
+    *) fail "the reused id was not refused for missing eligibility evidence: $out" ;;
+  esac
+
+  set +e
+  out=$(FM_HOME="$case_dir" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$data" \
+    "$ROOT/bin/fm-fast-repair.sh" eligible task-x1-2 2>&1)
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "teardown of task-x1 revoked the authorization of task-x1-2: $out"
+
+  [ -f "$data/task-x1/report.md" ] || fail "teardown removed the torn-down task's report"
+  [ -f "$data/task-x1/notes.md" ] || fail "teardown removed unrelated task data alongside the authorization"
+  pass "Fast Repair eligibility is revoked with its own task and never a hyphenated sibling's"
+}
+
 test_content_fallback_refreshes_stale_origin_ref() {
   local case_dir rc
   case_dir=$(make_case content-stale-ref)
@@ -2677,6 +2734,7 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_fast_repair_progress_cleanup_is_exact_for_one_task_id
+test_fast_repair_eligibility_dies_with_its_task
 test_content_fallback_refreshes_stale_origin_ref
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses

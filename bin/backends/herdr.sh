@@ -3175,6 +3175,49 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
   rm -f "$marker" 2>/dev/null || true
 }
 
+# The wait below is now routinely interrupted where it stands: the watcher runs
+# it as its own process group and signals that group the moment a Fast Repair
+# result is ready. Its private FIFO directory therefore needs an owner on the
+# signal path too, not only on the return paths, or one directory per interrupted
+# wait accumulates under TMPDIR. The handler cleans, restores whatever HUP/INT/TERM
+# disposition the caller had, and re-raises, so an interrupted wait keeps the exact
+# stop semantics it has today and a returning wait leaves the caller's traps intact.
+FM_BACKEND_HERDR_EVENTWAIT_DIR=
+FM_BACKEND_HERDR_EVENTWAIT_READER_PID=
+FM_BACKEND_HERDR_EVENTWAIT_TRAPS=
+
+fm_backend_herdr_eventwait_cleanup() {
+  local dir=${FM_BACKEND_HERDR_EVENTWAIT_DIR:-} pid=${FM_BACKEND_HERDR_EVENTWAIT_READER_PID:-}
+  FM_BACKEND_HERDR_EVENTWAIT_DIR=
+  FM_BACKEND_HERDR_EVENTWAIT_READER_PID=
+  [ -z "$pid" ] || kill "$pid" 2>/dev/null || true
+  [ -z "$dir" ] || rm -rf "$dir" 2>/dev/null || true
+  return 0
+}
+
+fm_backend_herdr_eventwait_traps_restore() {
+  local prior=${FM_BACKEND_HERDR_EVENTWAIT_TRAPS:-}
+  FM_BACKEND_HERDR_EVENTWAIT_TRAPS=
+  trap - HUP INT TERM
+  [ -z "$prior" ] || eval "$prior"
+  return 0
+}
+
+fm_backend_herdr_eventwait_traps_install() {
+  FM_BACKEND_HERDR_EVENTWAIT_TRAPS=$(trap -p HUP; trap -p INT; trap -p TERM)
+  trap 'fm_backend_herdr_eventwait_signal HUP' HUP
+  trap 'fm_backend_herdr_eventwait_signal INT' INT
+  trap 'fm_backend_herdr_eventwait_signal TERM' TERM
+}
+
+fm_backend_herdr_eventwait_signal() {  # <signal>
+  local sig=$1
+  fm_backend_herdr_eventwait_cleanup
+  exec 9<&- 2>/dev/null || true
+  fm_backend_herdr_eventwait_traps_restore
+  kill -s "$sig" "${BASHPID:-$$}" 2>/dev/null || exit 1
+}
+
 # fm_backend_herdr_wait_transition: the bounded event wait. Blocks up to
 # <timeout_secs> for one of <pane_window...> ("<session>:<pane_id>") to reach a
 # fresh `blocked` edge, then prints the normalized record and returns 0.
@@ -3218,16 +3261,24 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
 
   local fifo_dir fifo reader_pid line ws status agent raw record hit rc=1 reader_rc=0
   fifo_dir=$(mktemp -d "${TMPDIR:-/tmp}/fm-herdr-eventwait.XXXXXX") || return 2
+  FM_BACKEND_HERDR_EVENTWAIT_DIR=$fifo_dir
+  fm_backend_herdr_eventwait_traps_install
   fifo="$fifo_dir/events"
   if ! mkfifo "$fifo" 2>/dev/null; then
+    fm_backend_herdr_eventwait_traps_restore
+    FM_BACKEND_HERDR_EVENTWAIT_DIR=
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
   "${reader[@]}" "$sock" "$timeout" "${pane_ids[@]}" > "$fifo" 2>/dev/null &
   reader_pid=$!
+  FM_BACKEND_HERDR_EVENTWAIT_READER_PID=$reader_pid
   if ! exec 9< "$fifo"; then
     kill "$reader_pid" 2>/dev/null || true
     wait "$reader_pid" 2>/dev/null || true
+    FM_BACKEND_HERDR_EVENTWAIT_READER_PID=
+    fm_backend_herdr_eventwait_traps_restore
+    FM_BACKEND_HERDR_EVENTWAIT_DIR=
     rm -rf "$fifo_dir" 2>/dev/null || true
     return 2
   fi
@@ -3288,7 +3339,10 @@ fm_backend_herdr_wait_transition() {  # <session> <timeout_secs> <state_dir> <pa
   # failure, exit non-zero -> return 2, caller sleeps and counts toward the
   # runtime-disable threshold).
   wait "$reader_pid" 2>/dev/null || reader_rc=$?
+  FM_BACKEND_HERDR_EVENTWAIT_READER_PID=
   exec 9<&-
+  fm_backend_herdr_eventwait_traps_restore
+  FM_BACKEND_HERDR_EVENTWAIT_DIR=
   rm -rf "$fifo_dir" 2>/dev/null || true
   [ "$rc" -eq 0 ] && return 0
   [ "$rc" -eq 2 ] && return 2

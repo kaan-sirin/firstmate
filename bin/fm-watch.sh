@@ -1083,9 +1083,9 @@ run_check_capture() {
   set +m
   pgid=$(ps -o pgid= -p "$FM_ACTIVE_CHECK_PID" 2>/dev/null | tr -d '[:space:]')
   if [ "$stop_active_check" -eq 1 ]; then
-    trap 'fm_active_check_stop || true; exit 1' HUP INT TERM
+    trap 'fm_active_check_stop || true; fm_check_output_cleanup; exit 1' HUP INT TERM
   else
-    trap 'exit 1' HUP INT TERM
+    trap 'fm_check_output_cleanup; exit 1' HUP INT TERM
   fi
   if [ -n "$pgid" ] && [ "$pgid" != "$FM_ACTIVE_CHECK_PGID" ]; then
     fm_active_check_stop || true

@@ -2076,6 +2076,45 @@ SH
   pass "a signal racing the active-check group handoff still stops that check group"
 }
 
+# The capture's output file is private to one check, and a Fast Repair progress
+# child is signalled at every poll boundary while it sits in that capture. The
+# signal path must therefore reclaim the file itself: the child replaced the
+# watcher's EXIT trap, so nothing else in the home ever removes it and one
+# orphan per reaped beat would accumulate in the state directory.
+test_signalled_capture_removes_its_private_check_output() {
+  local dir state check out pid i left
+  dir=$(make_case fast-repair-check-output-signal); state="$dir/state"; check="$dir/check.sh"; out="$dir/result"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_TEST_CHECK_PID"
+# Signal only once the capture has certainly reached its `wait`, so this is the
+# swapped-in trap and not the pre-group window (which already cleans up).
+sleep 0.3
+kill -TERM "$(cat "$FM_TEST_CAPTURE_PID")" 2>/dev/null || true
+while :; do sleep 1; done
+SH
+  chmod +x "$check"
+  FM_STATE_OVERRIDE="$state" FM_TEST_CHECK_PID="$dir/check.pid" \
+    FM_TEST_CAPTURE_PID="$dir/capture.pid" FM_CHECK_TIMEOUT=600 \
+    bash -c '
+      set -u
+      . "$1"
+      printf "%s\n" "$$" > "$FM_TEST_CAPTURE_PID"
+      run_check_capture --stop-active-check-on-signal "$2"
+    ' _ "$WATCH" "$check" > "$out" 2>&1
+  [ -s "$dir/check.pid" ] || fail "the signalled capture never started its check: $(cat "$out")"
+  pid=$(cat "$dir/check.pid")
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  kill -KILL "$pid" 2>/dev/null || true
+  left=$(find "$state" -maxdepth 1 -name '.fm-check-output.*' -print -quit 2>/dev/null || true)
+  [ -z "$left" ] || fail "a signalled check capture leaked its private output file: $left"
+  pass "a signalled check capture removes its private output file"
+}
+
 # On a push-capable home the terminal wait is a foreground read on the backend's
 # event stream, not an interruptible sleep, so a Fast Repair result found by the
 # timer must still stop that wait and reach the captain inside the same cycle.
@@ -2686,6 +2725,7 @@ test_fast_repair_local_followup_retires_after_the_broader_result
 test_fast_repair_local_followup_retires_on_a_broader_pass
 test_fast_repair_wait_stop_refuses_a_foreign_pid
 test_fast_repair_check_signal_race_stops_the_check_group
+test_signalled_capture_removes_its_private_check_output
 test_fast_repair_cadence_interrupts_the_push_transition_wait
 test_fast_repair_beat_survives_the_poll_boundary
 test_fast_repair_green_stops_forge_poll_but_keeps_broader_followup

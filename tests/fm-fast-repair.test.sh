@@ -663,6 +663,95 @@ test_brief_commands_reach_the_scaffolding_home() {
   pass "the Fast Repair brief's commands run against the home that scaffolded them"
 }
 
+# publish-pr opens the PR from the task branch as the forge sees it, so a brief
+# that never mandates the push dead-ends there: the forge CLI cannot raise a PR
+# for a branch that exists only locally. The brief is firstmate's emitted worker
+# interface, so the mandated push is extracted from it and executed, and the
+# publication that follows is run against a forge stub that enforces the real
+# constraint - once before the push and once after.
+test_brief_mandates_the_task_branch_push_before_publication() {
+  local home id=brief-push brief line cmd origin body out status heads push_at publish_at
+  home=$(make_home brief-push)
+  intake "$home" "$id" >/dev/null
+  git -C "$home" checkout -q -b "fm/$id"
+  write_fast_meta "$home" "$id"
+  write_regression_test "$home"
+  write_focused_test "$home"
+  origin="$TMP_ROOT/brief-push-origin.git"
+  git init -q --bare "$origin"
+  git -C "$home" remote add origin "$origin"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    "$ROOT/bin/fm-brief.sh" "$id" fixtureproj --mode fast-repair >/dev/null \
+    || fail "the Fast Repair brief could not be scaffolded"
+  brief="$home/data/$id/brief.md"
+
+  push_at=$(grep -n -F 'git push' "$brief" | head -n 1 | cut -d: -f1)
+  publish_at=$(grep -n -F " publish-pr $id " "$brief" | head -n 1 | cut -d: -f1)
+  [ -n "$push_at" ] || fail "the Fast Repair brief mandates no push of the task branch"
+  [ -n "$publish_at" ] || fail "the Fast Repair brief mandates no publication command"
+  [ "$push_at" -lt "$publish_at" ] \
+    || fail "the Fast Repair brief orders its branch push after publication"
+
+  line=$(grep -n -F 'git push' "$brief" | head -n 1 | cut -d: -f2-)
+  cmd=${line#*\`}
+  cmd=${cmd%\`*}
+
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -eq 0 ] || fail "the push fixture could not record focused evidence: $out"
+
+  # A forge stub with the constraint that makes the push load-bearing: a PR can
+  # only be opened for a head the remote already carries.
+  write_fake_gh "$home"
+  cat > "$FAKE_GH_BIN/gh-axi" <<EOF
+#!/usr/bin/env bash
+FAKE_HOME='$FAKE_GH_DIR'
+EOF
+  cat >> "$FAKE_GH_BIN/gh-axi" <<'SH'
+printf '%s\n' "$*" >> "$FAKE_HOME/gh-axi.args"
+case "${1:-} ${2:-}" in
+  "pr create")
+    head=
+    while [ "$#" -gt 0 ]; do
+      [ "${1:-}" = --head ] && head=${2:-}
+      shift
+    done
+    if ! git ls-remote --exit-code --heads origin "$head" >/dev/null 2>&1; then
+      printf 'pull request create failed: head branch %s is not on any remote\n' "$head" >&2
+      exit 1
+    fi
+    printf 'https://github.com/acme/repo/pull/42\n' ;;
+  "pr checks") cat "$FAKE_HOME/checks-output" ;;
+esac
+SH
+  chmod +x "$FAKE_GH_BIN/gh-axi"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
+  set_rollup "$FAKE_GH_DIR" '4 passed, 0 failed, 4 total'
+  body="$TMP_ROOT/brief-push-body.md"
+  printf 'Fast Repair brief body.\n' > "$body"
+
+  out=$(cd "$home" && PATH="$FAKE_GH_BIN:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$FAST" publish-pr "$id" --title 'Brief Fast Repair' --body-file "$body" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "publication succeeded for a branch that was never pushed: $out"
+
+  out=$(cd "$home" && bash -c "$cmd" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the brief's own push command could not push the task branch: $out"
+
+  heads=$(git -C "$home" ls-remote --heads origin | awk '{print $2}' | sort | tr '\n' ' ')
+  [ "$heads" = "refs/heads/fm/$id " ] \
+    || fail "the brief's push command pushed something other than the task branch alone: $heads"
+
+  out=$(cd "$home" && PATH="$FAKE_GH_BIN:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_DATA_OVERRIDE="$home/data" "$FAST" publish-pr "$id" --title 'Brief Fast Repair' --body-file "$body" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "publication failed after the brief's own push command: $out"
+  assert_contains "$out" 'fast-repair PR opened' "the pushed task branch did not publish its direct PR"
+  pass "the Fast Repair brief mandates the task-branch push its own publication needs"
+}
+
 # The evidence commands must see the environment the crewmate hands the helper,
 # not a login profile's. The fixture HOME holds a profile that clobbers PATH,
 # which is exactly the reported harm: a correct repair recorded as failed.
@@ -990,6 +1079,7 @@ test_skipped_selector_run_cannot_satisfy_evidence
 test_stored_eligibility_uses_the_intake_rule
 test_later_gates_revalidate_typed_eligibility
 test_brief_commands_reach_the_scaffolding_home
+test_brief_mandates_the_task_branch_push_before_publication
 test_evidence_commands_ignore_a_login_profile
 test_private_records_do_not_impose_their_umask_on_tests
 test_skipped_runner_family_cannot_satisfy_evidence
