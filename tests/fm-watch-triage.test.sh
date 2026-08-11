@@ -2545,7 +2545,101 @@ test_fast_repair_wait_stop_refuses_a_foreign_pid() {
   pass "the Fast Repair wait stop refuses a pid this watcher did not fork"
 }
 
+# A Bash older than 4.4, where expanding an EMPTY array under `set -u` is a fatal
+# unbound-variable error rather than nothing. macOS still ships 3.2 as /bin/bash
+# and this repository supports it, so the empty-set paths below are replayed on
+# such an interpreter whenever one is reachable. Prints nothing (and returns 1)
+# on hosts that only carry a modern Bash.
+legacy_empty_array_bash() {
+  local candidate version
+  for candidate in ${FM_TEST_LEGACY_BASH:-} /bin/bash /usr/bin/bash /usr/local/bin/bash /opt/homebrew/bin/bash; do
+    [ -x "$candidate" ] || continue
+    # shellcheck disable=SC2016 # The candidate interpreter must expand its OWN version, not this shell's.
+    version=$("$candidate" -c 'printf "%s.%s\n" "${BASH_VERSINFO[0]}" "${BASH_VERSINFO[1]}"' 2>/dev/null) || continue
+    case "$version" in
+      1.*|2.*|3.*|4.0|4.1|4.2|4.3) printf '%s\n' "$candidate"; return 0 ;;
+    esac
+  done
+  return 1
+}
+
+# Every supervision cycle arms a Fast Repair generation and retires it at the
+# end of the cycle, and the overwhelming majority of cycles reach that sweep with
+# NOTHING live for the generation: a completed progress child removes its own
+# marker, and a cycle shorter than the Fast Repair interval never starts one. The
+# sweep must therefore finish on an empty set and hand control back, or the
+# watcher dies mid-cycle and takes its EXIT-trap cleanup down with it.
+test_fast_repair_timer_sweep_survives_an_empty_generation() {
+  local dir state probe out legacy
+  dir=$(make_case fast-repair-empty-sweep); state="$dir/state"; probe="$dir/probe.sh"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  cat > "$probe" <<'SH'
+set -eu
+. "$1"
+FAST_REPAIR_ACTIVE=1
+fast_repair_progress_timer_tasks_finish 9
+printf 'cycle-continued\n'
+SH
+  # A marker whose recorded pid is unreadable is discarded before the sweep
+  # collects anything, so the sweep still reaches its reap phase with an empty
+  # set - the ordinary shape, not a contrived one.
+  : > "$state/.fast-repair-progress-child-fast-9"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" bash "$probe" "$WATCH" > "$out" 2>&1 \
+    || fail "the empty Fast Repair retirement sweep aborted the supervision cycle: $(cat "$out")"
+  grep -Fx cycle-continued "$out" >/dev/null \
+    || fail "the empty Fast Repair retirement sweep never returned to its caller: $(cat "$out")"
+  [ ! -e "$state/.fast-repair-progress-child-fast-9" ] \
+    || fail "the retirement sweep left a pidless progress-child marker behind"
+
+  if legacy=$(legacy_empty_array_bash); then
+    : > "$state/.fast-repair-progress-child-fast-9"
+    FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" "$legacy" "$probe" "$WATCH" > "$out" 2>&1 \
+      || fail "the empty Fast Repair retirement sweep aborted under $legacy: $(cat "$out")"
+    grep -Fx cycle-continued "$out" >/dev/null \
+      || fail "the empty Fast Repair retirement sweep never returned under $legacy: $(cat "$out")"
+  fi
+  pass "the Fast Repair retirement sweep completes a generation with no live progress child"
+}
+
+# The parent announces retirement by writing a `.closing` handshake file that only
+# the timer child's own EXIT trap removes. A child that already retired itself -
+# the watcher lock moved on, the beat was retired, or the schedule went invalid -
+# leaves that file with no owner, and its mkstemp name carries no task id, so
+# teardown's per-task globs can never reclaim it.
+test_fast_repair_retirement_reaps_a_dead_childs_closing_marker() {
+  local dir state out leftover
+  dir=$(make_case fast-repair-closing-orphan); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -eu
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      # A watcher lock owned by somebody else is one of the ways the timer child
+      # retires itself long before the parent asks it to.
+      printf "%s\n" "$((WATCHER_PID + 1))" > "$WATCH_LOCK/pid"
+      FAST_REPAIR_ACTIVE=1
+      POLL=10
+      FAST_REPAIR_PROGRESS_INTERVAL=1
+      fast_repair_progress_timer_start
+      [ -n "$FAST_REPAIR_TIMER_PID" ] || { echo "the Fast Repair timer never armed"; exit 1; }
+      # Reap the child first, so the parent provably retires an already-dead one.
+      wait "$FAST_REPAIR_TIMER_PID" 2>/dev/null || true
+      fast_repair_progress_timer_finish
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "Fast Repair timer retirement failed: $(cat "$out")"
+  leftover=$(find "$state" -maxdepth 1 -name '.fast-repair-progress-timer.*' -print | tr '\n' ' ')
+  [ -z "$leftover" ] \
+    || fail "Fast Repair timer retirement orphaned an unreclaimable artifact: $leftover"
+  pass "Fast Repair timer retirement reaps the closing handshake of an already-exited child"
+}
+
 test_signal_reason_is_actionable_classifier
+test_fast_repair_timer_sweep_survives_an_empty_generation
+test_fast_repair_retirement_reaps_a_dead_childs_closing_marker
 test_fast_repair_undrainable_handoff_stops_shortening_waits
 test_fast_repair_local_followup_retires_after_the_broader_result
 test_fast_repair_local_followup_retires_on_a_broader_pass

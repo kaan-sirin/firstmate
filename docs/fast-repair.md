@@ -64,6 +64,8 @@ Missing or failed evidence blocks direct PR publication.
 At dispatch the task worktree holds no repair yet, so the spawn gate proves only that it is a clean worktree of the task's own repository whose history already carries the recorded reproduction commit.
 That worktree is still at a detached HEAD then, because the crewmate creates its `fm/<id>` branch as its first action.
 The branch binding and the requirement that the reproduction commit be strictly older than the tested commit are proofs about the tested head, so every gate after dispatch enforces them.
+A relaunch replaces a wedged crewmate in a worktree that already holds unlanded repair work, so it skips that dispatch-time clean-worktree proof; the typed eligibility gate that runs on every Fast Repair spawn still refuses a relaunch whose authorization record is gone or no longer valid.
+The recorded reproduction revision is a lowercase commit id of 40 or 64 characters, so both git object formats are supported.
 
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
 The worker then starts one supported broader runner family while the new PR's checks run concurrently.
