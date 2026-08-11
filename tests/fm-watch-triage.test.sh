@@ -2569,8 +2569,15 @@ legacy_empty_array_bash() {
 # marker, and a cycle shorter than the Fast Repair interval never starts one. The
 # sweep must therefore finish on an empty set and hand control back, or the
 # watcher dies mid-cycle and takes its EXIT-trap cleanup down with it.
+# The reproducing half needs a pre-4.4 interpreter: no modern Bash can be made to
+# fail this way (an empty AND an entirely unset array both expand to nothing under
+# `set -u` from 4.4 on, and BASH_COMPAT does not restore the old error), so the
+# ambient leg proves the sweep's behavior while the cross-version enforcement is
+# the stock-Bash interpreter itself. Whichever half ran is named in the result
+# line, and FM_TEST_REQUIRE_LEGACY_BASH=1 turns a missing interpreter into a
+# failure so a job can demand the reproduction rather than hope for it.
 test_fast_repair_timer_sweep_survives_an_empty_generation() {
-  local dir state probe out legacy
+  local dir state probe out legacy coverage
   dir=$(make_case fast-repair-empty-sweep); state="$dir/state"; probe="$dir/probe.sh"; out="$dir/result"
   printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
   record_fast_repair_eligibility "$dir" fast
@@ -2598,8 +2605,13 @@ SH
       || fail "the empty Fast Repair retirement sweep aborted under $legacy: $(cat "$out")"
     grep -Fx cycle-continued "$out" >/dev/null \
       || fail "the empty Fast Repair retirement sweep never returned under $legacy: $(cat "$out")"
+    coverage="unbound-array reproduction proven on $legacy"
+  elif [ "${FM_TEST_REQUIRE_LEGACY_BASH:-0}" = 1 ]; then
+    fail "FM_TEST_REQUIRE_LEGACY_BASH=1 requires a pre-4.4 Bash to reproduce the empty-array abort, but none of FM_TEST_LEGACY_BASH, /bin/bash, /usr/bin/bash, /usr/local/bin/bash, or /opt/homebrew/bin/bash is one"
+  else
+    coverage="unbound-array reproduction NOT exercised: no pre-4.4 Bash reachable (ambient $BASH_VERSION cannot fail this way; set FM_TEST_LEGACY_BASH, or FM_TEST_REQUIRE_LEGACY_BASH=1 to demand it)"
   fi
-  pass "the Fast Repair retirement sweep completes a generation with no live progress child"
+  pass "the Fast Repair retirement sweep completes a generation with no live progress child - $coverage"
 }
 
 # The parent announces retirement by writing a `.closing` handshake file that only
@@ -2637,9 +2649,38 @@ test_fast_repair_retirement_reaps_a_dead_childs_closing_marker() {
   pass "Fast Repair timer retirement reaps the closing handshake of an already-exited child"
 }
 
+# The retirement sweep hands a starting reservation its `.closing` flag and then
+# drops the reservation, so a beat that reaches the same reservation afterwards
+# must decline to fork AND clear the flag it just consumed. Only the forked child
+# has an EXIT trap for it, so a decline that never forks is the one path where
+# nobody else can: the flag would otherwise survive one per retired generation.
+test_fast_repair_retiring_generation_reaps_its_reservation_flag() {
+  local dir state out marker
+  dir=$(make_case fast-repair-reservation-closing); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  marker="$state/.fast-repair-progress-child-fast-3"
+  : > "$marker.starting.closing"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -eu
+      . "$1"
+      FAST_REPAIR_ACTIVE=1
+      fast_repair_progress_task_start fast 3
+      [ -z "$(jobs -p)" ] || { echo "a retiring generation still forked a progress child"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the retiring Fast Repair beat failed: $(cat "$out")"
+  [ ! -e "$marker" ] || fail "a retiring Fast Repair beat published a progress child marker"
+  [ ! -e "$marker.starting" ] || fail "a retiring Fast Repair beat left its reservation behind"
+  [ ! -e "$marker.starting.closing" ] \
+    || fail "a retiring Fast Repair beat left an orphan reservation closing marker behind"
+  pass "a Fast Repair beat that declines a retiring generation clears its reservation and closing marker"
+}
+
 test_signal_reason_is_actionable_classifier
 test_fast_repair_timer_sweep_survives_an_empty_generation
 test_fast_repair_retirement_reaps_a_dead_childs_closing_marker
+test_fast_repair_retiring_generation_reaps_its_reservation_flag
 test_fast_repair_undrainable_handoff_stops_shortening_waits
 test_fast_repair_local_followup_retires_after_the_broader_result
 test_fast_repair_local_followup_retires_on_a_broader_pass

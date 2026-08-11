@@ -818,7 +818,7 @@ fast_repair_progress_task_start() { # <task-id> <generation>
     return 1
   fi
   if [ -e "$reservation.closing" ] || { [ -n "$closing" ] && [ -e "$closing" ]; }; then
-    rm -f "$reservation"
+    rm -f "$reservation" "$reservation.closing"
     return 0
   fi
   touch "$STATE/.last-fast-repair-progress-$id"
