@@ -865,6 +865,41 @@ test_skipped_selector_run_cannot_satisfy_evidence() {
   pass "Fast Repair applies one skip rule to family and selector runner invocations alike"
 }
 
+# Once the watcher has stopped polling the forge for a task it still needs the
+# local half of the progress check, so --local-only must keep the broader-test
+# branch and must reach no forge command at all.
+test_local_only_progress_reads_no_forge() {
+  local home id=local-only out status fakebin
+  home=$(make_home local-only-progress)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
+  write_fake_gh "$home"
+  fakebin="$FAKE_GH_BIN"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
+  set_rollup "$FAKE_GH_DIR" '4 passed, 0 failed, 4 total'
+
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
+  assert_contains "$out" "fast-repair $id pr-checks-green" "the ordinary progress check did not read the PR rollup"
+  assert_grep 'pr checks' "$FAKE_GH_DIR/gh-axi.args" "the ordinary progress check did not reach the forge"
+
+  : > "$FAKE_GH_DIR/gh-axi.args"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id" --local-only)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the local-only progress check refused: $out"
+  [ -z "$out" ] || fail "the local-only progress check reported a forge state: $out"
+  [ ! -s "$FAKE_GH_DIR/gh-axi.args" ] || fail "the local-only progress check reached the forge: $(cat "$FAKE_GH_DIR/gh-axi.args")"
+
+  printf 'broader=failed\n' > "$home/state/$id.fast-repair-broader"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id" --local-only)
+  assert_contains "$out" "fast-repair $id broader-tests-failed" "the local-only progress check hid a broader failure"
+  [ ! -s "$FAKE_GH_DIR/gh-axi.args" ] || fail "the local-only broader branch reached the forge: $(cat "$FAKE_GH_DIR/gh-axi.args")"
+
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id" --unknown-flag)
+  status=$?
+  [ "$status" -ne 0 ] || fail "progress accepted an unknown flag"
+  pass "the local-only Fast Repair progress check keeps broader follow-up without reading the forge"
+}
+
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
 test_spawn_eligibility_accepts_the_detached_task_worktree
@@ -882,4 +917,5 @@ test_regression_witness_requires_a_failing_reproduction
 test_regression_witness_uses_the_tested_runner
 test_evidence_requires_clean_bound_artifacts
 test_pr_check_rollup_states
+test_local_only_progress_reads_no_forge
 echo "# all fm-fast-repair tests passed"
