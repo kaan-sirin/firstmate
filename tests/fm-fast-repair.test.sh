@@ -583,7 +583,7 @@ test_later_gates_revalidate_typed_eligibility() {
 # command is extracted from it and executed in the environment a crewmate pane
 # actually has: no FM_HOME and no state or data override.
 test_brief_commands_reach_the_scaffolding_home() {
-  local home id=brief-home brief line cmd prefix out status
+  local home id=brief-home brief line cmd prefix broader_cmd out status fakebin body
   home=$(make_home brief-home)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
@@ -607,6 +607,29 @@ test_brief_commands_reach_the_scaffolding_home() {
   [ "$status" -eq 0 ] || fail "the brief's own evidence command could not reach the task record: $out"
   assert_grep 'regression=passed' "$home/state/$id.fast-repair-tests" \
     "the brief's evidence command recorded its result outside the scaffolding home"
+
+  write_fake_gh "$home"
+  fakebin=$FAKE_GH_BIN
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
+  set_rollup "$FAKE_GH_DIR" '4 passed, 0 failed, 4 total'
+  body="$TMP_ROOT/brief-body.md"
+  printf 'Fast Repair brief body.\n' > "$body"
+  out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$fakebin:$PATH" bash -c "$prefix publish-pr $id --title 'Brief Fast Repair' --body-file $body" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the brief's own publish command could not open the tested PR: $out"
+
+  line=$(grep -F " broader $id " "$brief" | head -n 1)
+  [ -n "$line" ] || fail "the Fast Repair brief mandates no broader-test command"
+  cmd=${line#*\`}
+  cmd=${cmd%\`*}
+  broader_cmd=${cmd/"'<runner family>'"/"$FOCUSED_TEST"}
+  out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
+    PATH="$fakebin:$PATH" bash -c "$broader_cmd" 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the brief's own broader-test command could not run: $out"
+  assert_contains "$out" "fast-repair broader tests passed: $id" \
+    "the brief's broader-test command did not use the typed test interface"
   pass "the Fast Repair brief's commands run against the home that scaffolded them"
 }
 
