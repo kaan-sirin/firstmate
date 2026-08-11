@@ -75,6 +75,7 @@ write_focused_test() {
 write_test_runner() {
   local home=$1
   mkdir -p "$home/bin"
+  # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
     'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused; exit 0; fi' \
     'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
@@ -165,7 +166,7 @@ test_exact_prefix_only() {
 }
 
 test_eligibility_requires_every_typed_fact() {
-  local home out status field id=eligible-all invalid
+  local home out status field id=eligible-all
   home=$(make_home eligibility)
   out=$(intake "$home" "$id")
   assert_contains "$out" "fast-repair eligible: $id" "complete typed eligibility did not pass"
@@ -305,9 +306,11 @@ test_evidence_and_ready_gates() {
   write_focused_test "$home"
   printf 'task worktree\n' > "$home/cwd-proof"
   commit_test_file "$home" cwd-proof
+  # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
   printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/$REGRESSION_TEST"
   chmod +x "$home/$REGRESSION_TEST"
   commit_test_file "$home" "$REGRESSION_TEST"
+  # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
   printf '#!/usr/bin/env bash\n[ "$(cat cwd-proof)" = "task worktree" ]\n' > "$home/$FOCUSED_TEST"
   chmod +x "$home/$FOCUSED_TEST"
   commit_test_file "$home" "$FOCUSED_TEST"
@@ -403,6 +406,7 @@ test_regression_witness_requires_a_failing_reproduction() {
   sed -i 's/fixture-regression fixture-focused/fixture-regression fixture-focused fixture-unrelated/' "$home/bin/fm-test-run.sh"
   sed -i 's/fixture-focused) printf "%s\\n" tests\/fixture-focused.test.sh ;;/fixture-focused) printf "%s\\n" tests\/fixture-focused.test.sh ;; fixture-unrelated) printf "%s\\n" tests\/fixture-unrelated.test.sh ;;/' "$home/bin/fm-test-run.sh"
   sed -i 's/tests\/fixture-focused.test.sh) family=fixture-focused ;;/tests\/fixture-focused.test.sh) family=fixture-focused ;; tests\/fixture-unrelated.test.sh) family=fixture-unrelated ;;/' "$home/bin/fm-test-run.sh"
+  # shellcheck disable=SC2016 # Literal fixture text must keep its generated command substitution.
   sed -i 's/fixture-focused) \[ "$(cat fixture-focused-state)" = passed \] ;;/fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; fixture-unrelated) true ;;/' "$home/bin/fm-test-run.sh"
   commit_test_file "$home" bin/fm-test-run.sh
   write_focused_test "$home"
@@ -673,11 +677,10 @@ $(cat "$home/state/$id.fast-repair-tests.log" 2>/dev/null)"
 # The private records stay owner-only, while files the test suites create keep the
 # permissions the caller's umask asks for.
 test_private_records_do_not_impose_their_umask_on_tests() {
-  local home id=umask-scope artifact
+  local home id=umask-scope
   home=$(make_home umask-scope)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
-  artifact="$home/suite-artifact"
   write_regression_test "$home"
   write_focused_test "$home"
 

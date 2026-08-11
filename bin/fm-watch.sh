@@ -1020,7 +1020,7 @@ fast_repair_progress_timer_sleep() { # <seconds>
 }
 
 fast_repair_progress_timer_wake() {
-  local file lifecycle current_lifecycle generation id result extra status reasons=
+  local file lifecycle current_lifecycle generation id result status reasons=
   for file in "$STATE"/.fast-repair-progress-handoff-*; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     exec 9< "$file" || continue
@@ -1033,7 +1033,7 @@ fast_repair_progress_timer_wake() {
     fi
     IFS= read -r id <&9 || { exec 9<&-; continue; }
     IFS= read -r result <&9 || { exec 9<&-; continue; }
-    if IFS= read -r extra <&9; then
+    if IFS= read -r <&9; then
       exec 9<&-
       continue
     fi
