@@ -551,8 +551,13 @@ fast_repair_progress_task_marker() { # <task-id> <generation>
 }
 
 fast_repair_progress_timer_tasks_finish() { # <generation>
-  local generation=$1 marker ready pid i=0 live
+  local generation=$1 marker ready reservation pid i=0 live
   local markers=() pids=()
+  for reservation in "$STATE"/.fast-repair-progress-child-*"-$generation".starting; do
+    [ -f "$reservation" ] && [ ! -L "$reservation" ] || continue
+    : > "$reservation.closing" || continue
+    rm -f "$reservation"
+  done
   for marker in "$STATE"/.fast-repair-progress-child-*"-$generation"; do
     [ -f "$marker" ] && [ ! -L "$marker" ] || continue
     ready="$marker.ready"
@@ -582,17 +587,29 @@ fast_repair_progress_timer_tasks_finish() { # <generation>
 }
 
 fast_repair_progress_task_start() { # <task-id> <generation>
-  local id=$1 generation=$2 marker ready result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} pid tmp
+  local id=$1 generation=$2 marker ready reservation result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} pid tmp
+  [ -z "$closing" ] || [ ! -e "$closing" ] || return 0
   marker=$(fast_repair_progress_task_marker "$id" "$generation") || return 1
   ready="$marker.ready"
+  reservation="$marker.starting"
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
     return 0
   fi
+  [ ! -e "$reservation" ] || return 0
+  tmp=$(mktemp "$reservation.XXXXXX") || return 1
+  if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$reservation"; then
+    rm -f "$tmp"
+    return 1
+  fi
   touch "$STATE/.last-fast-repair-progress-$id"
   (
-    trap 'rm -f "$marker" "$ready"' EXIT
+    trap 'rm -f "$marker" "$ready" "$reservation" "$reservation.closing"' EXIT
     trap 'fm_active_check_stop || true; exit 0' HUP INT TERM
-    while [ ! -f "$ready" ]; do sleep 0.01; done
+    while [ ! -f "$ready" ]; do
+      [ ! -e "$reservation.closing" ] || exit 0
+      sleep 0.01
+    done
+    [ ! -e "$reservation.closing" ] || exit 0
     [ -z "$closing" ] || [ ! -e "$closing" ] || exit 0
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       run_check_capture --stop-active-check-on-signal "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
@@ -600,12 +617,24 @@ fast_repair_progress_task_start() { # <task-id> <generation>
     [ -z "$result" ] || fast_repair_progress_timer_publish "$id" "$result"
   ) &
   pid=$!
+  if [ -e "$reservation.closing" ]; then
+    kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$reservation"
+    return 0
+  fi
   tmp=$(mktemp "$marker.XXXXXX") || { kill -TERM "$pid" 2>/dev/null || true; return 1; }
+  if [ -e "$reservation.closing" ] || { [ -n "$closing" ] && [ -e "$closing" ]; }; then
+    rm -f "$tmp" "$reservation"
+    kill -TERM "$pid" 2>/dev/null || true
+    return 0
+  fi
   if ! printf '%s\n' "$pid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$marker"; then
     rm -f "$tmp"
     kill -TERM "$pid" 2>/dev/null || true
+    rm -f "$reservation" "$reservation.closing"
     return 1
   fi
+  rm -f "$reservation"
   touch "$ready"
 }
 

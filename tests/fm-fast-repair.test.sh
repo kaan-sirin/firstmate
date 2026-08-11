@@ -10,6 +10,8 @@ FAST="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fast-repair)
 REGRESSION_TEST=fixture-regression
 FOCUSED_TEST=fixture-focused
+FAKE_GH_BIN=
+FAKE_GH_DIR=
 
 file_mode() {
   stat -c %a "$1" 2>/dev/null || stat -f %Lp "$1" 2>/dev/null
@@ -98,11 +100,13 @@ intake() {
 # no-checks-configured shape that carries no summary field at all. Every argv is
 # recorded so the repository the checks were read from is observable.
 write_fake_gh() {
-  local home=$1 fakebin="$1/fakebin"
-  mkdir -p "$fakebin"
+  local fakebin
+  fakebin=$(mktemp -d "$TMP_ROOT/fake-gh-bin.XXXXXX")
+  FAKE_GH_DIR=$(mktemp -d "$TMP_ROOT/fake-gh-data.XXXXXX")
+  FAKE_GH_BIN=$fakebin
   cat > "$fakebin/gh-axi" <<EOF
 #!/usr/bin/env bash
-FAKE_HOME='$home'
+FAKE_HOME='$FAKE_GH_DIR'
 EOF
   cat >> "$fakebin/gh-axi" <<'SH'
 printf '%s\n' "$*" >> "$FAKE_HOME/gh-axi.args"
@@ -118,7 +122,7 @@ esac
 SH
   cat > "$fakebin/gh" <<EOF
 #!/usr/bin/env bash
-FAKE_HOME='$home'
+FAKE_HOME='$FAKE_GH_DIR'
 EOF
   cat >> "$fakebin/gh" <<'SH'
 case "${1:-} ${2:-}" in
@@ -129,11 +133,11 @@ SH
   chmod +x "$fakebin/gh-axi" "$fakebin/gh"
 }
 
-set_rollup() { # <home> <summary text>
+set_rollup() { # <fake-gh-dir> <summary text>
   printf 'summary: "%s"\n' "$2" > "$1/checks-output"
 }
 
-set_no_checks_rollup() { # <home>
+set_no_checks_rollup() { # <fake-gh-dir>
   printf 'checks: "0 passed, 0 failed — this PR has no CI checks configured"\n' > "$1/checks-output"
 }
 
@@ -270,12 +274,15 @@ test_evidence_and_ready_gates() {
   [ "$status" -ne 0 ] || fail "a staged-only regression test was accepted"
   [ ! -e "$home/untracked-test-ran" ] || fail "a staged-only regression test was executed"
   git -C "$home" rm --cached --quiet -- tests/fm-untracked-regression.test.sh
+  rm -f "$home/tests/fm-untracked-regression.test.sh"
   printf '#!/usr/bin/env bash\ntouch %q\n' "$home/modified-test-ran" > "$home/$REGRESSION_TEST"
   chmod +x "$home/$REGRESSION_TEST"
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -ne 0 ] || fail "a modified tracked regression test was accepted"
   [ ! -e "$home/modified-test-ran" ] || fail "a modified tracked regression test was executed"
+  rm -f "$home/$REGRESSION_TEST"
+  git -C "$home" checkout -- tests/fixture-regression.test.sh
   write_regression_test "$home"
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-command true)
   status=$?
@@ -289,6 +296,7 @@ test_evidence_and_ready_gates() {
   status=$?
   [ "$status" -ne 0 ] || fail "a parent symlink escaped the Fast Repair worktree"
   [ ! -e "$home/escaped-test-ran" ] || fail "an escaped test path was executed"
+  rm -f "$home/tests/link"
   write_focused_test "$home" 1
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
@@ -310,49 +318,54 @@ test_evidence_and_ready_gates() {
   [ "$status" -eq 0 ] || fail "evidence tests did not run from the task worktree: $out"
   run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null || fail "passing focused evidence was rejected"
   git -C "$home" commit --quiet --allow-empty -m 'advance repair fixture'
-  printf 'Fast Repair fixture body.\n' > "$home/body.md"
-  out=$(run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
+  body="$TMP_ROOT/gates-body.md"
+  printf 'Fast Repair fixture body.\n' > "$body"
+  out=$(run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$body")
   status=$?
   [ "$status" -ne 0 ] || fail "Fast Repair published a commit that its evidence did not test"
   assert_contains "$out" 'focused evidence is absent or failed' "untested commit refusal was not actionable"
   run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null || fail "updated task HEAD evidence was rejected"
   write_fake_gh "$home"
-  fakebin="$home/fakebin"
-  printf '%040d\n' 0 > "$home/pr-head"
+  fakebin="$FAKE_GH_BIN"
+  printf '%040d\n' 0 > "$FAKE_GH_DIR/pr-head"
   # The real green rollup omits the pending segment when nothing is pending.
-  set_rollup "$home" '4 passed, 0 failed, 4 total'
-  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md" --head unrelated)
+  set_rollup "$FAKE_GH_DIR" '4 passed, 0 failed, 4 total'
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$body" --head unrelated)
   status=$?
   [ "$status" -ne 0 ] || fail "Fast Repair published an untested head branch"
   assert_contains "$out" '--head must equal the tested task branch' "untested head refusal was not actionable"
   assert_no_grep 'pr=' "$home/state/$id.meta" "untested head publication wrote a PR record"
-  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$home/body.md")
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file "$body")
   status=$?
   [ "$status" -ne 0 ] || fail "Fast Repair accepted a PR with an untested remote head"
   assert_contains "$out" 'registered PR head does not match' "remote-head refusal was not actionable"
-  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
   other=$(make_home other-caller)
   printf 'Fast Repair caller body.\n' > "$other/body.md"
   out=$(PATH="$fakebin:$PATH" run_fast_from "$other" "$home" publish-pr "$id" --title 'Fast Repair fixture' --body-file body.md)
   assert_contains "$out" 'fast-repair PR opened: https://github.com/acme/repo/pull/42' "passing evidence did not open the direct PR"
   assert_grep 'pr=https://github.com/acme/repo/pull/42' "$home/state/$id.meta" "direct PR was not registered"
   branch=$(git -C "$home" symbolic-ref --short HEAD)
-  assert_grep "pr create --title Fast Repair fixture --body-file $other/body.md --head $branch" "$home/gh-axi.args" \
+  assert_grep "pr create --title Fast Repair fixture --body-file $other/body.md --head $branch" "$FAKE_GH_DIR/gh-axi.args" \
     "direct PR did not use the tested task branch"
-  [ "$(tail -n 1 "$home/gh-axi.cwd")" = "$home" ] \
+  [ "$(tail -n 1 "$FAKE_GH_DIR/gh-axi.cwd")" = "$home" ] \
     || fail "direct PR creation ran outside the task worktree"
-  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null || fail "broader tests could not start after direct PR publication"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an arbitrary successful broader command was accepted"
+  assert_contains "$out" 'broader requires exactly --test' "broader command refusal was not actionable"
+  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$FOCUSED_TEST" >/dev/null || fail "broader tests could not start after direct PR publication"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
-  printf '%040d\n' 0 > "$home/pr-head"
+  printf '%040d\n' 0 > "$FAKE_GH_DIR/pr-head"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "Fast Repair accepted a PR whose remote head changed after publication"
   assert_contains "$out" 'registered PR head does not match' "changed remote-head refusal was not actionable"
-  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
   assert_contains "$out" 'pr-checks-green' "green PR checks were not available to the Fast Repair progress cadence"
-  assert_grep '--repo acme/repo' "$home/gh-axi.args" "PR checks were not read from the registered PR's own repository"
+  assert_grep '--repo acme/repo' "$FAKE_GH_DIR/gh-axi.args" "PR checks were not read from the registered PR's own repository"
   git -C "$home" commit --quiet --allow-empty -m 'advance broader fixture'
   run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null \
     || fail "updated focused evidence was rejected after a new commit"
@@ -419,6 +432,44 @@ test_regression_witness_uses_the_tested_runner() {
   pass "Fast Repair uses one tested runner for both regression witness halves"
 }
 
+test_evidence_requires_clean_bound_artifacts() {
+  local home id=dirty-source out status outside
+  home=$(make_home dirty-source)
+  intake "$home" "$id" >/dev/null
+  write_regression_test "$home"
+  write_focused_test "$home"
+  printf 'broken\n' > "$home/fixture-regression-state"
+  commit_test_file "$home" fixture-regression-state
+  write_fast_meta "$home" "$id"
+  printf 'fixed\n' > "$home/fixture-regression-state"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "dirty repair source satisfied evidence for an older HEAD"
+  assert_contains "$out" 'no safe git worktree' "dirty source refusal was not actionable"
+  git -C "$home" checkout -- fixture-regression-state
+
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/fixture-focused.test.sh"
+  chmod +x "$home/tests/fixture-focused.test.sh"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a modified focused artifact satisfied evidence"
+  git -C "$home" checkout -- tests/fixture-focused.test.sh
+
+  outside="$TMP_ROOT/focused-artifact-outside"
+  mkdir -p "$outside"
+  printf '#!/usr/bin/env bash\nexit 0\n' > "$outside/fixture-focused.test.sh"
+  chmod +x "$outside/fixture-focused.test.sh"
+  rm -f "$home/tests/fixture-focused.test.sh"
+  ln -s "$outside/fixture-focused.test.sh" "$home/tests/fixture-focused.test.sh"
+  git -C "$home" add -- tests/fixture-focused.test.sh
+  git -C "$home" commit --quiet -m 'replace focused artifact with symlink'
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a symlinked focused artifact satisfied evidence"
+  assert_contains "$out" 'focused-test must name a supported' "symlinked focused artifact refusal was not actionable"
+  pass "Fast Repair binds evidence to clean tracked focused artifacts"
+}
+
 test_pr_check_rollup_states() {
   local home id=rollup-fixture fakebin out status
   home=$(make_home rollup)
@@ -427,16 +478,16 @@ test_pr_check_rollup_states() {
   write_focused_test "$home"
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_fake_gh "$home"
-  fakebin="$home/fakebin"
-  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$home/pr-head"
+  fakebin="$FAKE_GH_BIN"
+  printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
   run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null \
     || fail "focused evidence fixture was rejected"
-  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --command true >/dev/null \
+  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$FOCUSED_TEST" >/dev/null \
     || fail "broader fixture was rejected"
 
   # A skipped check alongside real passes is ordinary CI, so the rollup is green,
   # but the counts stay visible in the ready line for the approving captain.
-  set_rollup "$home" '3 passed, 1 skipped, 0 failed, 4 total'
+  set_rollup "$FAKE_GH_DIR" '3 passed, 1 skipped, 0 failed, 4 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id") \
     || fail "a rollup with only passed and skipped checks was refused: $out"
   assert_contains "$out" 'fast-repair ready:' "skipped-but-green rollup did not report ready"
@@ -444,7 +495,7 @@ test_pr_check_rollup_states() {
 
   # gh-axi folds CANCELLED into the same skipped count, so a rollup where nothing
   # passed has proven nothing and is never green.
-  set_rollup "$home" '0 passed, 0 failed, 1 skipped, 1 total'
+  set_rollup "$FAKE_GH_DIR" '0 passed, 0 failed, 1 skipped, 1 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "a rollup whose only check was skipped or cancelled was reported ready"
@@ -453,7 +504,7 @@ test_pr_check_rollup_states() {
   [ -z "$out" ] || fail "an all-skipped rollup produced an actionable progress result: $out"
 
   # "10 failed, 0 pending" contains "0 failed, 0 pending" as a substring.
-  set_rollup "$home" '3 passed, 10 failed, 0 pending, 13 total'
+  set_rollup "$FAKE_GH_DIR" '3 passed, 10 failed, 0 pending, 13 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "a rollup with 10 failed checks was reported ready"
@@ -461,14 +512,14 @@ test_pr_check_rollup_states() {
   out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
   assert_contains "$out" 'pr-checks-failed' "failed rollup was not surfaced to the progress cadence"
 
-  set_rollup "$home" '2 passed, 0 failed, 2 pending, 4 total'
+  set_rollup "$FAKE_GH_DIR" '2 passed, 0 failed, 2 pending, 4 total'
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "a pending rollup was reported ready"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" progress "$id")
   [ -z "$out" ] || fail "a pending rollup produced an actionable progress result: $out"
 
-  set_no_checks_rollup "$home"
+  set_no_checks_rollup "$FAKE_GH_DIR"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   status=$?
   [ "$status" -ne 0 ] || fail "a PR with no configured checks was reported ready"
@@ -517,7 +568,7 @@ test_later_gates_revalidate_typed_eligibility() {
   for gate in publish-pr broader progress ready; do
     case "$gate" in
       publish-pr) out=$(run_fast "$home" publish-pr "$id" --title fixture --body-file "$home/body.md") ;;
-      broader) out=$(run_fast "$home" broader "$id" --command true) ;;
+      broader) out=$(run_fast "$home" broader "$id" --test "$FOCUSED_TEST") ;;
       progress) out=$(run_fast "$home" progress "$id") ;;
       ready) out=$(run_fast "$home" ready "$id") ;;
     esac
@@ -567,8 +618,8 @@ test_evidence_commands_ignore_a_login_profile() {
   home=$(make_home login-profile)
   intake "$home" "$id" >/dev/null
   write_fast_meta "$home" "$id"
-  loginhome="$home/loginhome"
-  toolbin="$home/toolbin"
+  loginhome="$TMP_ROOT/login-profile-home"
+  toolbin="$TMP_ROOT/login-profile-bin"
   mkdir -p "$loginhome" "$toolbin"
   printf 'PATH=/nonexistent\nexport PATH\n' > "$loginhome/.bash_profile"
   cat > "$toolbin/fm-fixture-tool" <<'SH'
@@ -577,6 +628,7 @@ exit 0
 SH
   chmod +x "$toolbin/fm-fixture-tool"
   write_regression_test "$home"
+  write_focused_test "$home"
   printf '#!/usr/bin/env bash\nfm-fixture-tool\n' > "$home/$FOCUSED_TEST"
   chmod +x "$home/$FOCUSED_TEST"
   commit_test_file "$home" "$FOCUSED_TEST"
@@ -629,5 +681,6 @@ test_evidence_and_ready_gates
 test_regression_selector_must_be_new_since_reproduction
 test_regression_witness_requires_a_failing_reproduction
 test_regression_witness_uses_the_tested_runner
+test_evidence_requires_clean_bound_artifacts
 test_pr_check_rollup_states
 echo "# all fm-fast-repair tests passed"

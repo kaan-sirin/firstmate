@@ -62,7 +62,9 @@ Projects without this runner, its selector overlay support, or this proof refuse
 Missing or failed evidence blocks direct PR publication.
 
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
-The worker then starts the broader test command while the new PR's checks run concurrently.
+The worker then starts one supported broader runner family while the new PR's checks run concurrently.
+The task worktree must be clean and exactly at its tested revision before focused, regression, or broader evidence can run.
+Every selected focused and broader artifact must be tracked, regular, inside that worktree, and unchanged at the tested revision.
 Broader-test failures are recorded and surfaced as an open PR that is not green.
 The Fast Repair progress check also surfaces failed PR checks.
 A PR is not called ready or green until the broader test and all required PR checks pass.
