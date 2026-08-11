@@ -169,7 +169,6 @@ test_answer_close_is_self_announced() {
   fi
   pass "fm-send --resolve-key: the close never re-wakes its own home, later lines still do"
 }
-
 # The reported failure behind issue #2109: a worker that put the colon first
 # (needs-decision: [key=X] ...) had its key silently folded to "default", so
 # the answer's --resolve-key X refused with "no open decision or blocker with

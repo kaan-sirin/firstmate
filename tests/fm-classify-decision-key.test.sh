@@ -235,7 +235,6 @@ test_blocked_and_resolved_are_tag_order_independent() {
   assert_fold "$dir/c.status" "" "blocked/resolved corr+key close together regardless of tag order"
   pass "blocked/resolved parse their bare verb with any bracket-tag order preceding the colon"
 }
-
 test_incremental_agrees_with_full_fold_across_appends() {
   local dir f expected
   dir=$(case_dir incremental)
