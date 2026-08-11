@@ -303,7 +303,7 @@ rm -f "$STATE_DIR/tk13.meta"
 fast_repair_progress_timer_wake
 [ ! -e "$STATE_DIR/.wake-queue" ] \
   || fail "a torn-down Fast Repair task surfaced a queued progress result"
-[ ! -e "$STATE_DIR/.fast-repair-progress-handoff-tk13-8" ] \
+[ -z "$(compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk13-8-*" || true)" ] \
   || fail "a torn-down Fast Repair handoff was not discarded after lifecycle revalidation"
 pass "fast_repair_progress_timer_wake: torn-down tasks discard pending handoffs"
 
@@ -326,6 +326,40 @@ done
 pass "fast_repair_progress_tick: short waits retain the task progress cadence"
 
 reset_state
+fm_write_meta "$STATE_DIR/tk14a.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+POLL=15
+FAST_REPAIR_PROGRESS_INTERVAL=20
+FAST_REPAIR_NOW=100
+date() {
+  [ "${1:-}" = +%s ] && { printf '%s\n' "$FAST_REPAIR_NOW"; return 0; }
+  command date "$@"
+}
+run_check_capture() {
+  printf 'check\n' >> "$TMP/default-poll-checks"
+  FM_CHECK_RESULT=
+}
+fast_repair_progress_schedule_missing
+[ "$(cat "$STATE_DIR/.fast-repair-progress-next-due-tk14a")" = 120 ] \
+  || fail "the default poll did not persist a 20-second Fast Repair due time"
+FAST_REPAIR_NOW=115
+FM_FAST_REPAIR_TIMER_GENERATION=10 fast_repair_progress_tick
+[ ! -e "$TMP/default-poll-checks" ] \
+  || fail "the first 15-second normal wait ran Fast Repair progress too early"
+[ "$(fast_repair_progress_timer_delay)" = 5 ] \
+  || fail "the second default-poll timer did not retain the remaining due delay"
+FAST_REPAIR_NOW=120
+FM_FAST_REPAIR_TIMER_GENERATION=11 fast_repair_progress_tick
+for progress_wait in $(seq 1 50); do
+  [ -s "$TMP/default-poll-checks" ] && break
+  command sleep 0.01
+done
+[ -s "$TMP/default-poll-checks" ] \
+  || fail "the second default-poll wait did not run the due Fast Repair check"
+fast_repair_progress_timer_tasks_finish 11
+unset -f date
+pass "fast_repair_progress_tick: default polls retain Fast Repair due time across waits"
+
+reset_state
 fm_write_meta "$STATE_DIR/tk9a.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 fm_write_meta "$STATE_DIR/tk9b.meta" "window=default:wG:pR" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 WATCHER_PID=${BASHPID:-$$}
@@ -341,8 +375,8 @@ FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
   FM_FAST_REPAIR_TIMER_GENERATION=3 \
   fast_repair_progress_tick
 for progress_wait in $(seq 1 50); do
-  compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9a-3" >/dev/null \
-    && compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9b-3" >/dev/null \
+  compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9a-3-*" >/dev/null \
+    && compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9b-3-*" >/dev/null \
     && break
   command sleep 0.01
 done
@@ -379,14 +413,30 @@ fm_wake_append() {
   printf 'retry\t%s\t%s\n' "$2" "$3" >> "$STATE_DIR/.wake-queue"
 }
 fast_repair_progress_timer_wake
-compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk11-6" >/dev/null \
+compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk11-6-*" >/dev/null \
   || fail "a failed durable append discarded its Fast Repair handoff"
 fast_repair_progress_timer_wake
-[ ! -e "$STATE_DIR/.fast-repair-progress-handoff-tk11-6" ] \
+[ -z "$(compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk11-6-*" || true)" ] \
   || fail "a successfully queued Fast Repair handoff was not retired"
 grep -q 'fast-repair:tk11' "$STATE_DIR/.wake-queue" \
   || fail "a retained Fast Repair handoff did not retry its append"
 pass "fast_repair_progress_timer_wake: append failure retains the handoff for retry"
+
+reset_state
+fm_write_meta "$STATE_DIR/tk15.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+WATCHER_PID=${BASHPID:-$$}
+FM_FAST_REPAIR_TIMER_GENERATION=12 \
+  fast_repair_progress_timer_publish tk15 'fast-repair tk15 broader-tests-failed'
+FM_FAST_REPAIR_TIMER_GENERATION=12 \
+  fast_repair_progress_timer_publish tk15 'fast-repair tk15 pr-checks-failed'
+handoff_count=$(compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk15-12-*" | wc -l | tr -d '[:space:]')
+[ "$handoff_count" = 2 ] || fail "two Fast Repair ticks did not retain two task handoffs"
+fast_repair_progress_timer_wake
+grep -q 'check: fast-repair tk15 broader-tests-failed' "$WAKE_LOG" \
+  || fail "the first retained Fast Repair handoff was not surfaced"
+grep -q 'fast-repair tk15 pr-checks-failed' "$WAKE_LOG" \
+  || fail "the later retained Fast Repair handoff was not surfaced"
+pass "fast_repair_progress_timer_wake: multiple task handoffs remain distinct until drain"
 
 reset_state
 retirement_pids=()
