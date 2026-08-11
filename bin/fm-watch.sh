@@ -908,7 +908,16 @@ run_check_capture() {
     fm_check_output_cleanup
     return 1
   fi
-  [ -z "$FM_CHECK_SIGNAL_PENDING" ] || exit 1
+  # A signal delivered between installing the pending-flag trap and swapping in
+  # the real one lands here instead of in a handler, so this exit owes the same
+  # guarantee the swapped-in trap gives: under --stop-active-check-on-signal the
+  # forked check's whole process group is stopped first, or it would outlive the
+  # caller with only its recorded child pid known to any later reaper.
+  if [ -n "$FM_CHECK_SIGNAL_PENDING" ]; then
+    [ "$stop_active_check" -eq 0 ] || fm_active_check_stop || true
+    fm_check_output_cleanup
+    exit 1
+  fi
   wait "$FM_ACTIVE_CHECK_PID" 2>/dev/null || true
   FM_ACTIVE_CHECK_PID=
   fm_active_check_stop || return 1

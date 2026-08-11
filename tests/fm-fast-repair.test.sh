@@ -10,6 +10,7 @@ FAST="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-fast-repair)
 REGRESSION_TEST=fixture-regression
 FOCUSED_TEST=fixture-focused
+BROADER_TEST=fixture-broader
 FAKE_GH_BIN=
 FAKE_GH_DIR=
 
@@ -25,8 +26,10 @@ make_home() {
   write_test_runner "$home"
   printf 'broken\n' > "$home/fixture-regression-state"
   printf 'passed\n' > "$home/fixture-focused-state"
+  printf 'passed\n' > "$home/fixture-broader-state"
   commit_test_file "$home" fixture-regression-state
   commit_test_file "$home" fixture-focused-state
+  commit_test_file "$home" fixture-broader-state
   printf '%s\n' "$home"
 }
 
@@ -77,14 +80,26 @@ write_test_runner() {
   mkdir -p "$home/bin"
   # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
-    'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused; exit 0; fi' \
-    'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
-    'if [ "${1:-}" = --family ] && [ "$#" = 2 ]; then family=$2; elif [ "$#" = 1 ]; then case "$1" in tests/fixture-regression.test.sh) family=fixture-regression ;; tests/fixture-focused.test.sh) family=fixture-focused ;; *) exit 2 ;; esac; else exit 2; fi' \
+    'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused fixture-broader; exit 0; fi' \
+    'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; fixture-broader) printf "%s\n" tests/fixture-broader.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
+    'if [ "${1:-}" = --family ] && [ "$#" = 2 ]; then family=$2; elif [ "$#" = 1 ]; then case "$1" in tests/fixture-regression.test.sh) family=fixture-regression ;; tests/fixture-focused.test.sh) family=fixture-focused ;; tests/fixture-broader.test.sh) family=fixture-broader ;; *) exit 2 ;; esac; else exit 2; fi' \
     'printf "FM_TEST_BEGIN fixture %s family=%s\n" "$family" "$family"' \
-    'if case "$family" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
+    'if case "$family" in fixture-regression) [ "$(cat fixture-regression-state)" = fixed ] ;; fixture-focused) [ "$(cat fixture-focused-state)" = passed ] ;; fixture-broader) [ "$(cat fixture-broader-state)" = passed ] ;; *) false ;; esac; then status=0; else status=1; fi' \
     'printf "FM_TEST_END fixture %s exit=%s duration_ms=0 gate_skip=false\n" "$family" "$status"; exit "$status"' > "$home/bin/fm-test-run.sh"
   chmod +x "$home/bin/fm-test-run.sh"
   commit_test_file "$home" bin/fm-test-run.sh
+}
+
+write_broader_test() {
+  local home=$1 code=${2:-0}
+  mkdir -p "$home/tests"
+  if ! git -C "$home" cat-file -e HEAD:tests/fixture-broader.test.sh 2>/dev/null; then
+    printf '#!/usr/bin/env bash\nexit 0\n' > "$home/tests/fixture-broader.test.sh"
+    chmod +x "$home/tests/fixture-broader.test.sh"
+    commit_test_file "$home" tests/fixture-broader.test.sh
+  fi
+  if [ "$code" = 0 ]; then printf 'passed\n' > "$home/fixture-broader-state"; else printf 'failed\n' > "$home/fixture-broader-state"; fi
+  git -C "$home" diff --quiet -- fixture-broader-state || commit_test_file "$home" fixture-broader-state
 }
 
 intake() {
@@ -143,10 +158,10 @@ set_no_checks_rollup() { # <fake-gh-dir>
 }
 
 write_fast_meta() {
-  local home=$1 id=$2 pr=${3:-}
+  local home=$1 id=$2 pr=${3:-} wt=${4:-$1}
   {
     printf 'window=firstmate:fm-%s\n' "$id"
-    printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nworktree=%s\n' "$home"
+    printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\nworktree=%s\n' "$wt"
     if [ -n "$pr" ]; then
       printf 'pr=%s\n' "$pr"
       printf 'pr_head=%s\n' "$(git -C "$home" rev-parse HEAD)"
@@ -246,6 +261,7 @@ test_evidence_and_ready_gates() {
   write_fast_meta "$home" "$id"
   write_regression_test "$home" 1
   write_focused_test "$home"
+  write_broader_test "$home"
 
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
@@ -357,7 +373,12 @@ test_evidence_and_ready_gates() {
   status=$?
   [ "$status" -ne 0 ] || fail "an arbitrary successful broader command was accepted"
   assert_contains "$out" 'broader requires exactly --test' "broader command refusal was not actionable"
-  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$FOCUSED_TEST" >/dev/null || fail "broader tests could not start after direct PR publication"
+  out=$(PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "re-running the focused family satisfied the broader gate"
+  assert_contains "$out" 'not the focused family' "the same-family broader refusal was not actionable"
+  [ ! -e "$home/state/$id.fast-repair-broader" ] || fail "a refused broader family still wrote a broader record"
+  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$BROADER_TEST" >/dev/null || fail "broader tests could not start after direct PR publication"
   out=$(PATH="$fakebin:$PATH" run_fast "$home" ready "$id")
   assert_contains "$out" 'fast-repair ready: https://github.com/acme/repo/pull/42' "green broader and PR evidence did not make the PR ready"
   printf '%040d\n' 0 > "$FAKE_GH_DIR/pr-head"
@@ -480,13 +501,14 @@ test_pr_check_rollup_states() {
   intake "$home" "$id" >/dev/null
   write_regression_test "$home"
   write_focused_test "$home"
+  write_broader_test "$home"
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_fake_gh "$home"
   fakebin="$FAKE_GH_BIN"
   printf '%s\n' "$(git -C "$home" rev-parse HEAD)" > "$FAKE_GH_DIR/pr-head"
   run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" >/dev/null \
     || fail "focused evidence fixture was rejected"
-  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$FOCUSED_TEST" >/dev/null \
+  PATH="$fakebin:$PATH" run_fast "$home" broader "$id" --test "$BROADER_TEST" >/dev/null \
     || fail "broader fixture was rejected"
 
   # A skipped check alongside real passes is ordinary CI, so the rollup is green,
@@ -563,6 +585,7 @@ test_later_gates_revalidate_typed_eligibility() {
   write_fast_meta "$home" "$id" https://github.com/acme/repo/pull/42
   write_regression_test "$home"
   write_focused_test "$home"
+  write_broader_test "$home"
   out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
   status=$?
   [ "$status" -eq 0 ] || fail "the later-gate fixture could not record focused evidence: $out"
@@ -572,7 +595,7 @@ test_later_gates_revalidate_typed_eligibility() {
   for gate in publish-pr broader progress ready; do
     case "$gate" in
       publish-pr) out=$(run_fast "$home" publish-pr "$id" --title fixture --body-file "$home/body.md") ;;
-      broader) out=$(run_fast "$home" broader "$id" --test "$FOCUSED_TEST") ;;
+      broader) out=$(run_fast "$home" broader "$id" --test "$BROADER_TEST") ;;
       progress) out=$(run_fast "$home" progress "$id") ;;
       ready) out=$(run_fast "$home" ready "$id") ;;
     esac
@@ -593,6 +616,7 @@ test_brief_commands_reach_the_scaffolding_home() {
   write_fast_meta "$home" "$id"
   write_regression_test "$home"
   write_focused_test "$home"
+  write_broader_test "$home"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     "$ROOT/bin/fm-brief.sh" "$id" fixtureproj --mode fast-repair >/dev/null \
     || fail "the Fast Repair brief could not be scaffolded"
@@ -627,7 +651,8 @@ test_brief_commands_reach_the_scaffolding_home() {
   [ -n "$line" ] || fail "the Fast Repair brief mandates no broader-test command"
   cmd=${line#*\`}
   cmd=${cmd%\`*}
-  broader_cmd=${cmd/"'<runner family>'"/"$FOCUSED_TEST"}
+  broader_cmd=${cmd/"'<runner family broader than the focused one>'"/"$BROADER_TEST"}
+  [ "$broader_cmd" != "$cmd" ] || fail "the brief's broader command carries no runner-family placeholder"
   out=$(cd "$home" && env -u FM_HOME -u FM_STATE_OVERRIDE -u FM_DATA_OVERRIDE -u FM_ROOT_OVERRIDE \
     PATH="$fakebin:$PATH" bash -c "$broader_cmd" 2>&1)
   status=$?
@@ -713,8 +738,138 @@ test_skipped_runner_family_cannot_satisfy_evidence() {
   pass "Fast Repair evidence rejects skipped selected tests"
 }
 
+# Dispatch hands the crewmate a freshly pooled worktree at a detached HEAD sitting
+# exactly on the commit the defect was reproduced at; the branch and the repair
+# commit only exist later. The spawn gate must therefore accept that state while
+# still refusing a worktree that is dirty, is not the task's repository root, or
+# whose history does not carry the recorded reproduction commit.
+test_spawn_eligibility_accepts_the_detached_task_worktree() {
+  local home id=detached-spawn ahead=detached-ahead unknown=detached-unknown wt out status first second
+  home=$(make_home detached-spawn)
+  intake "$home" "$id" >/dev/null
+  first=$(git -C "$home" rev-parse HEAD)
+  wt="$TMP_ROOT/detached-spawn-worktree"
+  git -C "$home" worktree add --quiet --detach "$wt" "$first" \
+    || fail "the detached task worktree fixture could not be created"
+  git -C "$wt" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 \
+    && fail "the fixture worktree is not at a detached HEAD"
+
+  out=$(run_fast "$home" eligible "$id" --worktree "$wt")
+  status=$?
+  [ "$status" -eq 0 ] || fail "the real detached task worktree was refused at dispatch: $out"
+
+  printf 'uncommitted\n' > "$wt/spawn-dirt"
+  out=$(run_fast "$home" eligible "$id" --worktree "$wt")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a dirty task worktree passed the dispatch eligibility proof"
+  assert_contains "$out" 'no safe git worktree' "the dirty-worktree refusal was not actionable"
+  rm -f "$wt/spawn-dirt"
+
+  out=$(run_fast "$home" eligible "$id" --worktree "$wt/bin")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a path below the worktree root passed the dispatch eligibility proof"
+  assert_contains "$out" 'no safe git worktree' "the non-root refusal was not actionable"
+
+  # A reproduction commit the worktree's own history does not carry yet is still
+  # refused, so the spawn gate keeps binding the record to this task's history.
+  git -C "$home" commit --quiet --allow-empty -m 'advance past the pooled worktree'
+  second=$(git -C "$home" rev-parse HEAD)
+  run_fast "$home" intake "$ahead" --request 'fast-repair: repair fixture' \
+    --reproduction reproduced --reproduction-revision "$second" --root-cause confirmed \
+    --isolation isolated --schema none --authentication none --authorization none \
+    --secrets none --financial none --legal none --side-effects none >/dev/null \
+    || fail "the ahead-revision fixture could not be recorded"
+  out=$(run_fast "$home" eligible "$ahead" --worktree "$wt")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a reproduction revision absent from the worktree history was accepted"
+  assert_contains "$out" 'not an ancestor' "the non-ancestor refusal was not actionable"
+
+  git -C "$wt" checkout --quiet --detach "$second"
+  run_fast "$home" eligible "$ahead" --worktree "$wt" >/dev/null \
+    || fail "a detached worktree sitting on the reproduction commit was refused"
+
+  run_fast "$home" intake "$unknown" --request 'fast-repair: repair fixture' \
+    --reproduction reproduced --reproduction-revision "$(printf '%040d' 0)" --root-cause confirmed \
+    --isolation isolated --schema none --authentication none --authorization none \
+    --secrets none --financial none --legal none --side-effects none >/dev/null \
+    || fail "the unknown-revision fixture could not be recorded"
+  out=$(run_fast "$home" eligible "$unknown" --worktree "$wt")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a reproduction revision that is not a commit was accepted"
+  pass "the Fast Repair dispatch gate proves the real detached task worktree without weakening its bindings"
+}
+
+# The proofs the dispatch gate cannot make yet are still mandatory once the
+# tested head exists: evidence binds a named branch and requires the repair to
+# sit strictly above the reproduction commit.
+test_tested_head_proofs_stay_strict_after_dispatch() {
+  local home id=head-proofs wt out status
+  home=$(make_home head-proofs)
+  intake "$home" "$id" >/dev/null
+  write_regression_test "$home"
+  write_focused_test "$home"
+
+  wt="$TMP_ROOT/head-proofs-worktree"
+  git -C "$home" worktree add --quiet --detach "$wt" HEAD \
+    || fail "the detached evidence worktree fixture could not be created"
+  write_fast_meta "$home" "$id" '' "$wt"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "evidence accepted a detached task worktree with no branch to bind"
+  assert_contains "$out" 'no safe git worktree' "the detached-evidence refusal was not actionable"
+  [ ! -e "$home/state/$id.fast-repair-tests" ] || fail "a branchless evidence run still wrote an evidence record"
+  git -C "$home" worktree remove --force "$wt"
+
+  # Re-record the reproduction at the branch tip: the repair commit no longer
+  # sits above it, so the tested-head gate must refuse even though the same
+  # record would satisfy the dispatch gate.
+  write_fast_meta "$home" "$id"
+  intake "$home" "$id" >/dev/null
+  run_fast "$home" eligible "$id" --worktree "$home" >/dev/null \
+    || fail "the dispatch gate refused a worktree sitting on its reproduction commit"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "evidence accepted a reproduction revision equal to the tested head"
+  assert_contains "$out" 'reproduction revision is unknown, current, or not an ancestor' \
+    "the current-reproduction refusal was not actionable"
+  pass "Fast Repair still requires a bound branch and a strictly older reproduction commit at the tested head"
+}
+
+# Both halves of the regression proof reach the runner through a bare selector
+# rather than --family, so the skip rule must be enforced on that argv shape too;
+# a runner that reports the selector run as skipped can never prove a repair.
+test_skipped_selector_run_cannot_satisfy_evidence() {
+  local home id=skipped-selector out status
+  home=$(make_home skipped-selector)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  write_regression_test "$home"
+  write_focused_test "$home"
+  # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
+  sed 's/gate_skip=false/gate_skip=$skip/' "$home/bin/fm-test-run.sh" > "$home/bin/fm-test-run.sh.tmp" \
+    && mv -f "$home/bin/fm-test-run.sh.tmp" "$home/bin/fm-test-run.sh"
+  # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
+  sed 's/^printf "FM_TEST_BEGIN/if [ "${1:-}" = --family ]; then skip=false; else skip=true; fi\nprintf "FM_TEST_BEGIN/' \
+    "$home/bin/fm-test-run.sh" > "$home/bin/fm-test-run.sh.tmp" \
+    && mv -f "$home/bin/fm-test-run.sh.tmp" "$home/bin/fm-test-run.sh"
+  chmod +x "$home/bin/fm-test-run.sh"
+  commit_test_file "$home" bin/fm-test-run.sh
+  ( cd "$home" && ./bin/fm-test-run.sh --family "$FOCUSED_TEST" | grep -q 'gate_skip=false' ) \
+    || fail "the fixture runner no longer reports an unskipped family run"
+  ( cd "$home" && ./bin/fm-test-run.sh "tests/$REGRESSION_TEST.test.sh" | grep -q 'gate_skip=true' ) \
+    || fail "the fixture runner no longer reports a skipped selector run"
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a skipped selector run satisfied Fast Repair evidence: $out"
+  assert_contains "$out" 'PR publication remains blocked' "a skipped selector run did not block publication"
+  pass "Fast Repair applies one skip rule to family and selector runner invocations alike"
+}
+
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
+test_spawn_eligibility_accepts_the_detached_task_worktree
+test_tested_head_proofs_stay_strict_after_dispatch
+test_skipped_selector_run_cannot_satisfy_evidence
 test_stored_eligibility_uses_the_intake_rule
 test_later_gates_revalidate_typed_eligibility
 test_brief_commands_reach_the_scaffolding_home

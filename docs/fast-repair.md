@@ -54,15 +54,21 @@ Fast Repair never enables auto-merge.
 
 The repair must add a regression test that reproduces the defect and must pass focused module tests.
 `bin/fm-fast-repair.sh evidence` executes and records both gates.
-The only supported interface is the tracked `bin/fm-test-run.sh` runner and two distinct families from its `--list-families` output.
+The only supported interface is the tracked `bin/fm-test-run.sh` runner and distinct families from its `--list-families` output: the regression family, the focused family, and later a third broader family.
 The recorded pre-fix reproduction commit must be an ancestor of the tested head.
 Fast Repair identifies exactly one new test artifact from the regression family's runner-owned selector, overlays that artifact onto an isolated reproduction checkout, and requires that selected artifact to fail there and pass at the tested head.
 The evidence record binds the selector, test artifact identity, reproduction revision, tested revision, and both results.
 Projects without this runner, its selector overlay support, or this proof refuse Fast Repair evidence.
 Missing or failed evidence blocks direct PR publication.
 
+At dispatch the task worktree holds no repair yet, so the spawn gate proves only that it is a clean worktree of the task's own repository whose history already carries the recorded reproduction commit.
+That worktree is still at a detached HEAD then, because the crewmate creates its `fm/<id>` branch as its first action.
+The branch binding and the requirement that the reproduction commit be strictly older than the tested commit are proofs about the tested head, so every gate after dispatch enforces them.
+
 After those gates pass, `bin/fm-fast-repair.sh publish-pr` opens and registers the direct PR immediately.
 The worker then starts one supported broader runner family while the new PR's checks run concurrently.
+The broader family must differ from the focused family, because the focused module was already proven before the PR opened.
+Re-running the focused family as the broader gate is refused, and `ready` re-applies that same rule to the stored broader record.
 The task worktree must be clean and exactly at its tested revision before focused, regression, or broader evidence can run.
 Every selected focused and broader artifact must be tracked, regular, inside that worktree, and unchanged at the tested revision.
 Broader-test failures are recorded and surfaced as an open PR that is not green.

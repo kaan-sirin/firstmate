@@ -25,9 +25,16 @@
 # focused-module runner families through the supported test runner and records
 # their result. `publish-pr` refuses
 # until both passed, then opens and registers a direct PR. `broader` is run
-# after publication while PR checks run concurrently. `ready` refuses until the
+# after publication while PR checks run concurrently, and its family must differ
+# from the focused family already proven before the PR. `ready` refuses until the
 # broader test family and all PR checks are green. `progress` prints only a changed
 # actionable state for the watcher's Fast-Repair-only cadence.
+#
+# `eligible --worktree` is the dispatch-time gate, so it proves only what exists
+# before the crewmate branches and commits: a clean worktree of the task's own
+# repository whose history already holds the recorded reproduction commit. The
+# `fm/<id>` branch binding and the strictly-older reproduction revision are
+# proofs about the tested head and are enforced by every gate after dispatch.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -97,16 +104,29 @@ task_worktree_clean() { # <worktree>
   [ -z "$output" ]
 }
 
-task_revision_at_worktree() {
+# The identity every Fast Repair gate needs: the path is a real git worktree
+# root, its HEAD resolves, and nothing outside this home's own state and data is
+# modified. TASK_BRANCH is left empty on a detached HEAD, which is exactly the
+# state firstmate hands a freshly pooled task worktree before the crewmate has
+# created its `fm/<id>` branch.
+task_head_at_worktree() {
   local worktree=$1 root
   [ -d "$worktree" ] || return 1
   root=$(git -C "$worktree" rev-parse --show-toplevel 2>/dev/null) || return 1
   root=$(cd "$root" && pwd -P) || return 1
   [ "$root" = "$(cd "$worktree" && pwd -P)" ] || return 1
   TASK_WORKTREE=$root
-  TASK_BRANCH=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
+  TASK_BRANCH=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null || true)
   TASK_HEAD=$(git -C "$TASK_WORKTREE" rev-parse --verify HEAD 2>/dev/null) || return 1
   task_worktree_clean "$TASK_WORKTREE"
+}
+
+# The tested-head identity: everything above plus the named branch every
+# evidence, publication, broader, and readiness record binds itself to. A
+# detached HEAD carries no branch to bind, so it is refused here.
+task_revision_at_worktree() {
+  task_head_at_worktree "$1" || return 1
+  [ -n "$TASK_BRANCH" ] || return 1
 }
 
 # Evidence logs and records are private to this home. The umask is scoped to the
@@ -177,14 +197,25 @@ reproduction_revision_valid() {
   case "$1" in *[!0-9a-f]*) return 1 ;; esac
 }
 
-reproduction_revision_for() {
+# What is knowable before the repair commit exists: the recorded revision is a
+# real commit in this worktree's own history at or below its HEAD. A task
+# worktree that has just been pooled sits exactly at the reproduction commit, so
+# the ancestry here is inclusive.
+reproduction_revision_recorded() {
   local id=$1 revision
   revision=$(field_get "$(eligibility_file "$id")" reproduction_revision)
   reproduction_revision_valid "$revision" || return 1
   git -C "$TASK_WORKTREE" cat-file -e "$revision^{commit}" 2>/dev/null || return 1
-  [ "$revision" != "$TASK_HEAD" ] || return 1
   git -C "$TASK_WORKTREE" merge-base --is-ancestor "$revision" "$TASK_HEAD" || return 1
   REPRODUCTION_REVISION=$revision
+}
+
+# The tested-head proof: the repair itself must sit above the reproduction, so
+# the recorded revision can no longer be the commit being tested. Only gates
+# that run after the repair commit exists may require this.
+reproduction_revision_for() {
+  reproduction_revision_recorded "$1" || return 1
+  [ "$REPRODUCTION_REVISION" != "$TASK_HEAD" ] || return 1
 }
 
 runner_selected_tests() { # <family>
@@ -240,13 +271,36 @@ EOF
 }
 
 focused_test_valid() { runner_family_artifacts_valid "$1"; }
-broader_test_valid() { runner_family_artifacts_valid "$1"; }
 
-run_typed_test() { # <worktree> <family> <pass|fail> <log>
-  local worktree=$1 family=$2 expected=$3 log=$4 output status
+recorded_focused_test() { # <task-id>
+  local f
+  f=$(tests_file "$1")
+  regular_file "$f" || return 1
+  field_get "$f" focused_test
+}
+
+# "Broader" is a coverage claim, not a second run of the module the early PR was
+# already published on. The family must be supported with bound artifacts AND
+# different from the focused family recorded in the evidence record, and every
+# later consumer of the broader record re-checks that same rule.
+broader_test_valid() { # <task-id> <family>
+  local id=$1 family=$2 focused
+  runner_family_artifacts_valid "$family" || return 1
+  focused=$(recorded_focused_test "$id") || return 1
+  [ -n "$focused" ] || return 1
+  [ "$family" != "$focused" ]
+}
+
+# The one owner of how a runner invocation is classified. Every Fast Repair
+# gate - the reproduction witness, the regression run at the tested head, the
+# focused family, and the broader family - differs only in the argv it hands the
+# tracked runner, so the typed begin/end, skip, and exit rules live here once.
+run_typed() { # <worktree> <pass|fail> <log> <runner-arg>...
+  local worktree=$1 expected=$2 log=$3 output status
+  shift 3
   output=$(mktemp "$STATE/.fast-repair-test-output.XXXXXX") || return 1
   chmod 600 "$output" || { rm -f "$output"; return 1; }
-  if ( cd "$worktree" && "$worktree/bin/fm-test-run.sh" --family "$family" ) >"$output" 2>&1; then
+  if ( cd "$worktree" && "$worktree/bin/fm-test-run.sh" "$@" ) >"$output" 2>&1; then
     status=0
   else
     status=1
@@ -269,31 +323,12 @@ run_typed_test() { # <worktree> <family> <pass|fail> <log>
   return 1
 }
 
+run_typed_test() { # <worktree> <family> <pass|fail> <log>
+  run_typed "$1" "$3" "$4" --family "$2"
+}
+
 run_typed_selector() { # <worktree> <selector> <pass|fail> <log>
-  local worktree=$1 selector=$2 expected=$3 log=$4 output status
-  output=$(mktemp "$STATE/.fast-repair-test-output.XXXXXX") || return 1
-  chmod 600 "$output" || { rm -f "$output"; return 1; }
-  if ( cd "$worktree" && "$worktree/bin/fm-test-run.sh" "$selector" ) >"$output" 2>&1; then
-    status=0
-  else
-    status=1
-  fi
-  cat "$output" >> "$log" || status=1
-  if awk -v expected="$expected" -v status="$status" '
-      $1 == "FM_TEST_BEGIN" { began = 1 }
-      $1 == "FM_TEST_END" && $0 ~ /(^|[[:space:]])gate_skip=true([[:space:]]|$)/ { skipped = 1 }
-      $1 == "FM_TEST_END" && $4 == "exit=0" { passed = 1 }
-      $1 == "FM_TEST_END" && $4 != "exit=0" { failed = 1 }
-      END {
-        if (expected == "pass") exit !(status == 0 && began && passed && !skipped)
-        exit !(status != 0 && began && failed && !skipped)
-      }
-    ' "$output"; then
-    rm -f "$output"
-    return 0
-  fi
-  rm -f "$output"
-  return 1
+  run_typed "$1" "$3" "$4" "$2"
 }
 
 regression_witness_valid() { # <family> <selector> <artifact> <log>
@@ -441,7 +476,7 @@ broader_passed() {
   worktree=$(field_get "$f" worktree)
   branch=$(field_get "$f" branch)
   head=$(field_get "$f" head)
-  broader_test_valid "$broader_test" || return 1
+  broader_test_valid "$id" "$broader_test" || return 1
   [ "$broader_runner" = "$TEST_RUNNER_ARTIFACT" ] || return 1
   [ "$worktree" = "$TASK_WORKTREE" ] || return 1
   [ "$branch" = "$TASK_BRANCH" ] || return 1
@@ -641,11 +676,17 @@ case "$command" in
     if ! eligibility_valid "$id"; then
       fail "eligibility evidence is absent, incomplete, or no longer valid for $id"
     fi
-    if [ -n "$worktree" ] && ! task_revision_at_worktree "$worktree"; then
+    # This runs at dispatch, before the crewmate has created its branch or made
+    # the repair commit, so it proves only what exists then: a clean worktree of
+    # this task's own repository whose history already carries the recorded
+    # reproduction commit. The branch and the strictly-older reproduction
+    # revision are proofs about the tested head, and stay in evidence,
+    # publish-pr, broader, and ready where that head is real.
+    if [ -n "$worktree" ] && ! task_head_at_worktree "$worktree"; then
       fail "task $id has no safe git worktree for reproduction proof"
     fi
-    if [ -n "$worktree" ] && ! reproduction_revision_for "$id"; then
-      fail "reproduction revision is unknown, current, or not an ancestor of the task head"
+    if [ -n "$worktree" ] && ! reproduction_revision_recorded "$id"; then
+      fail "reproduction revision is unknown or not an ancestor of the task worktree head"
     fi
     printf 'fast-repair eligible: %s\n' "$id"
     ;;
@@ -759,7 +800,8 @@ case "$command" in
     tests_passed "$id" || fail "focused evidence is absent or failed"
     task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     pr_identity_for "$id" || fail "broader tests start only after the direct PR is registered"
-    broader_test_valid "$broader_test" || fail "broader-test must name a supported runner family with bound artifacts"
+    broader_test_valid "$id" "$broader_test" \
+      || fail "broader-test must name a supported runner family with bound artifacts that is not the focused family already proven before the PR"
     log="$STATE/$id.fast-repair-broader.log"
     record="$STATE/.$id.fast-repair-broader.$$"
     private_truncate "$log" || fail "the broader-test log could not be created"

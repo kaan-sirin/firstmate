@@ -734,8 +734,14 @@ test_fast_repair_requires_and_records_its_builtin_profile() {
   nonancestor_id=fast-repair-nonancestor-z24
   rec=$(make_spawn_case fast-repair-profile codex "$id" "$conflict_id" "$raw_id" "$unknown_id" "$nonancestor_id")
   read_case_record "$rec"
-  git -C "$WT_DIR" commit --quiet --allow-empty -m 'repair fixture head'
-  reproduction=$(git -C "$WT_DIR" rev-parse HEAD~1)
+  # The dispatch state firstmate actually creates: a pooled worktree at a
+  # detached HEAD sitting exactly on the commit the defect was reproduced at.
+  # The crewmate creates fm/<id> and the repair commit only after it launches,
+  # so the spawn gate sees no branch and no commit above the reproduction.
+  reproduction=$(git -C "$WT_DIR" rev-parse HEAD)
+  git -C "$WT_DIR" checkout --quiet --detach "$reproduction"
+  git -C "$WT_DIR" symbolic-ref --quiet --short HEAD >/dev/null 2>&1 \
+    && fail "the dispatch worktree fixture is not at a detached HEAD"
   git -C "$PROJ_DIR" commit --quiet --allow-empty -m 'unrelated fixture revision'
   nonancestor=$(git -C "$PROJ_DIR" rev-parse HEAD)
   for task in "$id" "$conflict_id" "$raw_id"; do

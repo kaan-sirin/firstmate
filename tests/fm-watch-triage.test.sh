@@ -2030,7 +2030,54 @@ SH
   pass "Fast Repair timer retirement stops its active Forge check group"
 }
 
+# A retirement signal can land in the window between arming the pending-flag trap
+# and swapping in the trap that stops the check, which is exactly when
+# fast_repair_progress_timer_tasks_finish signals the progress child. The capture
+# must then stop the whole forked check group itself; only the child pid is
+# recorded anywhere, so a group left running outlives watcher retirement.
+test_fast_repair_check_signal_race_stops_the_check_group() {
+  local dir state check out pid i
+  dir=$(make_case fast-repair-check-signal-race); state="$dir/state"; check="$dir/check.sh"; out="$dir/result"
+  cat > "$check" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$$" > "$FM_TEST_CHECK_PID"
+trap '' TERM
+while :; do sleep 1; done
+SH
+  chmod +x "$check"
+  # run_check_capture exits its own shell on a pending signal, so it runs as the
+  # whole bash -c process and the surviving-group assertion is made from here.
+  FM_STATE_OVERRIDE="$state" FM_TEST_CHECK_PID="$dir/check.pid" FM_CHECK_TIMEOUT=600 \
+    bash -c '
+      set -u
+      . "$1"
+      pidfile=$3
+      # ps is the only command run inside the unguarded window, so shimming it
+      # delivers the signal there deterministically instead of racing a timer.
+      ps() {
+        local i=0
+        while [ ! -s "$pidfile" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
+        command ps "$@"
+        kill -TERM $$ 2>/dev/null || true
+      }
+      run_check_capture --stop-active-check-on-signal "$2"
+    ' _ "$WATCH" "$check" "$dir/check.pid" > "$out" 2>&1
+  [ -s "$dir/check.pid" ] || fail "the signalled capture never started its check: $(cat "$out")"
+  pid=$(cat "$dir/check.pid")
+  i=0
+  while kill -0 "$pid" 2>/dev/null && [ "$i" -lt 100 ]; do
+    sleep 0.05
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    kill -KILL "$pid" 2>/dev/null || true
+    fail "a signal in the pre-group window orphaned the active check group: pid $pid survived"
+  fi
+  pass "a signal racing the active-check group handoff still stops that check group"
+}
+
 test_signal_reason_is_actionable_classifier
+test_fast_repair_check_signal_race_stops_the_check_group
 test_fast_repair_progress_cadence_is_task_scoped
 test_fast_repair_marker_waits_for_the_durable_wake
 test_fast_repair_cadence_runs_inside_a_long_ordinary_poll
