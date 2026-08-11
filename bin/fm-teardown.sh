@@ -2542,7 +2542,11 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
   "$STATE/$ID.fast-repair-tests" "$STATE/$ID.fast-repair-tests.log" \
   "$STATE/$ID.fast-repair-broader" "$STATE/$ID.fast-repair-broader.log" \
-  "$STATE/.fast-repair-progress-$ID"
+  "$STATE/.fast-repair-progress-$ID" "$STATE/.fast-repair-progress-generation-$ID" \
+  "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID"
+rm -rf "$STATE/.fast-repair-progress-handoff-$ID-"* \
+  "$STATE/.fast-repair-progress-sequence-$ID-"* \
+  "$STATE/.fast-repair-progress-child-$ID-"*
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

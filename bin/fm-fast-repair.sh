@@ -254,11 +254,12 @@ run_typed_test() { # <worktree> <family> <pass|fail> <log>
   cat "$output" >> "$log" || status=1
   if awk -v expected="$expected" -v status="$status" '
       $1 == "FM_TEST_BEGIN" { began = 1 }
+      $1 == "FM_TEST_END" && $0 ~ /(^|[[:space:]])gate_skip=true([[:space:]]|$)/ { skipped = 1 }
       $1 == "FM_TEST_END" && $4 == "exit=0" { passed = 1 }
       $1 == "FM_TEST_END" && $4 != "exit=0" { failed = 1 }
       END {
-        if (expected == "pass") exit !(status == 0 && began && passed)
-        exit !(status != 0 && began && failed)
+        if (expected == "pass") exit !(status == 0 && began && passed && !skipped)
+        exit !(status != 0 && began && failed && !skipped)
       }
     ' "$output"; then
     rm -f "$output"
@@ -280,11 +281,12 @@ run_typed_selector() { # <worktree> <selector> <pass|fail> <log>
   cat "$output" >> "$log" || status=1
   if awk -v expected="$expected" -v status="$status" '
       $1 == "FM_TEST_BEGIN" { began = 1 }
+      $1 == "FM_TEST_END" && $0 ~ /(^|[[:space:]])gate_skip=true([[:space:]]|$)/ { skipped = 1 }
       $1 == "FM_TEST_END" && $4 == "exit=0" { passed = 1 }
       $1 == "FM_TEST_END" && $4 != "exit=0" { failed = 1 }
       END {
-        if (expected == "pass") exit !(status == 0 && began && passed)
-        exit !(status != 0 && began && failed)
+        if (expected == "pass") exit !(status == 0 && began && passed && !skipped)
+        exit !(status != 0 && began && failed && !skipped)
       }
     ' "$output"; then
     rm -f "$output"
@@ -367,12 +369,14 @@ eligibility_valid() {
   local id=$1 f request positive risk
   f=$(eligibility_file "$id")
   regular_file "$f" || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 12 ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 13 ] || return 1
   request=$(field_get "$f" request)
   request_valid "$request" || return 1
   [ "$(grep -c '^request=' "$f")" = 1 ] || return 1
   reproduction_revision_valid "$(field_get "$f" reproduction_revision)" || return 1
   [ "$(grep -c '^reproduction_revision=' "$f")" = 1 ] || return 1
+  case "$(field_get "$f" lifecycle)" in ?*[!A-Za-z0-9._-]*|'') return 1 ;; esac
+  [ "$(grep -c '^lifecycle=' "$f")" = 1 ] || return 1
   for positive in reproduction root_cause isolation; do
     positive_fact_valid "$positive" "$(field_get "$f" "$positive")" || return 1
     [ "$(grep -c "^$positive=" "$f")" = 1 ] || return 1
@@ -601,6 +605,7 @@ case "$command" in
       eval "value=\${$field}"
       risk_excluded "$value" || fail "$field is not explicitly proven none"
     done
+    lifecycle="$(date +%s)-$$-$RANDOM"
     dir="$DATA/$id"
     mkdir -p "$dir"
     tmp="$dir/.fast-repair-eligibility.$$"
@@ -609,6 +614,7 @@ case "$command" in
       printf 'request=%s\n' "$request"
       printf 'reproduction=%s\n' "$reproduction"
       printf 'reproduction_revision=%s\n' "$reproduction_revision"
+      printf 'lifecycle=%s\n' "$lifecycle"
       printf 'root_cause=%s\n' "$root_cause"
       printf 'isolation=%s\n' "$isolation"
       printf 'schema=%s\n' "$schema"

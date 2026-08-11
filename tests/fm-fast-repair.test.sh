@@ -693,6 +693,23 @@ test_private_records_do_not_impose_their_umask_on_tests() {
   pass "Fast Repair keeps its evidence records private without changing what the test commands create"
 }
 
+test_skipped_runner_family_cannot_satisfy_evidence() {
+  local home id=skipped-family out status
+  home=$(make_home skipped-family)
+  intake "$home" "$id" >/dev/null
+  write_fast_meta "$home" "$id"
+  write_regression_test "$home"
+  write_focused_test "$home"
+  sed 's/gate_skip=false/gate_skip=true/' "$home/bin/fm-test-run.sh" > "$home/bin/fm-test-run.sh.tmp" \
+    && mv -f "$home/bin/fm-test-run.sh.tmp" "$home/bin/fm-test-run.sh"
+  chmod +x "$home/bin/fm-test-run.sh"
+  commit_test_file "$home" bin/fm-test-run.sh
+  out=$(run_fast "$home" evidence "$id" --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST")
+  status=$?
+  [ "$status" -ne 0 ] || fail "a skipped runner family satisfied Fast Repair evidence: $out"
+  pass "Fast Repair evidence rejects skipped selected tests"
+}
+
 test_exact_prefix_only
 test_eligibility_requires_every_typed_fact
 test_stored_eligibility_uses_the_intake_rule
@@ -700,6 +717,7 @@ test_later_gates_revalidate_typed_eligibility
 test_brief_commands_reach_the_scaffolding_home
 test_evidence_commands_ignore_a_login_profile
 test_private_records_do_not_impose_their_umask_on_tests
+test_skipped_runner_family_cannot_satisfy_evidence
 test_evidence_and_ready_gates
 test_regression_selector_must_be_new_since_reproduction
 test_regression_witness_requires_a_failing_reproduction

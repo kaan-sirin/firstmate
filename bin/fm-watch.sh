@@ -526,6 +526,17 @@ fast_repair_eligible_task() {
   [ -f "$meta" ] && [ ! -L "$meta" ] && fast_repair_eligible_meta "$meta"
 }
 
+fast_repair_progress_lifecycle() {
+  local f="$DATA/$1/fast-repair-eligibility" lifecycle
+  if [ -f "$f" ] && [ ! -L "$f" ]; then
+    lifecycle=$(sed -n 's/^lifecycle=//p' "$f" | head -n 1)
+    case "$lifecycle" in ?*[!A-Za-z0-9._-]*|'') return 1 ;; esac
+    printf '%s\n' "$lifecycle"
+    return 0
+  fi
+  printf '%s\n' legacy
+}
+
 fast_repair_progress_due_path() {
   printf '%s/.fast-repair-progress-next-due-%s' "$STATE" "$1"
 }
@@ -644,9 +655,10 @@ fast_repair_progress_timer_tasks_finish() { # <generation>
 }
 
 fast_repair_progress_task_start() { # <task-id> <generation>
-  local id=$1 generation=$2 marker ready reservation result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} pid tmp
+  local id=$1 generation=$2 marker ready reservation result closing=${FM_FAST_REPAIR_TIMER_CLOSING:-} lifecycle pid tmp
   [ -z "$closing" ] || [ ! -e "$closing" ] || return 0
   marker=$(fast_repair_progress_task_marker "$id" "$generation") || return 1
+  lifecycle=$(fast_repair_progress_lifecycle "$id") || return 1
   ready="$marker.ready"
   reservation="$marker.starting"
   if [ -f "$marker" ] && [ ! -L "$marker" ]; then
@@ -657,6 +669,10 @@ fast_repair_progress_task_start() { # <task-id> <generation>
   if ! chmod 600 "$tmp" || ! mv -f "$tmp" "$reservation"; then
     rm -f "$tmp"
     return 1
+  fi
+  if [ -e "$reservation.closing" ] || { [ -n "$closing" ] && [ -e "$closing" ]; }; then
+    rm -f "$reservation"
+    return 0
   fi
   touch "$STATE/.last-fast-repair-progress-$id"
   (
@@ -671,7 +687,7 @@ fast_repair_progress_task_start() { # <task-id> <generation>
     FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_DATA_OVERRIDE="$DATA" \
       run_check_capture --stop-active-check-on-signal "$SCRIPT_DIR/fm-fast-repair.sh" progress "$id" || exit 1
     result=$FM_CHECK_RESULT
-    [ -z "$result" ] || fast_repair_progress_timer_publish "$id" "$result"
+    [ -z "$result" ] || FM_FAST_REPAIR_TASK_LIFECYCLE="$lifecycle" fast_repair_progress_timer_publish "$id" "$result"
   ) &
   pid=$!
   if [ -e "$reservation.closing" ]; then
@@ -722,10 +738,12 @@ fast_repair_progress_tick() {
 
 fast_repair_progress_timer_publish() {
   local id=$1 result=$2 generation=${FM_FAST_REPAIR_TIMER_GENERATION:-}
-  local file tmp lock counter current next
+  local file tmp lock counter current next lifecycle
   case "$generation" in *[!0-9]*|'') return 1 ;; esac
   case "$id:$result" in *$'\n'*|*$'\r'*) return 1 ;; esac
   fm_pr_task_id_valid "$id" || return 1
+  lifecycle=${FM_FAST_REPAIR_TASK_LIFECYCLE:-$(fast_repair_progress_lifecycle "$id")} || return 1
+  case "$lifecycle" in ?*[!A-Za-z0-9._-]*|'') return 1 ;; esac
   lock="$STATE/.fast-repair-progress-sequence-$id-$generation.lock"
   counter="$STATE/.fast-repair-progress-sequence-$id-$generation"
   fm_lock_acquire_wait "$lock" || return 1
@@ -735,6 +753,7 @@ fast_repair_progress_timer_publish() {
   tmp=$(mktemp "$STATE/.fast-repair-progress-pending.XXXXXX") || { fm_lock_release "$lock"; return 1; }
   file=$(printf '%s/.fast-repair-progress-handoff-%s-%s-%020d' "$STATE" "$id" "$generation" "$next")
   if ! {
+    printf '%s\n' "$lifecycle"
     printf '%s\n' "$generation"
     printf '%s\n' "$id"
     printf '%s\n' "$result"
@@ -972,11 +991,17 @@ fast_repair_progress_timer_finish() {
 }
 
 fast_repair_progress_timer_wake() {
-  local file generation id result extra status reasons=
+  local file lifecycle current_lifecycle generation id result extra status reasons=
   for file in "$STATE"/.fast-repair-progress-handoff-*; do
     [ -f "$file" ] && [ ! -L "$file" ] || continue
     exec 9< "$file" || continue
-    IFS= read -r generation <&9 || { exec 9<&-; continue; }
+    IFS= read -r lifecycle <&9 || { exec 9<&-; continue; }
+    if [[ "$lifecycle" =~ ^[0-9]+$ ]]; then
+      generation=$lifecycle
+      lifecycle=legacy
+    else
+      IFS= read -r generation <&9 || { exec 9<&-; continue; }
+    fi
     IFS= read -r id <&9 || { exec 9<&-; continue; }
     IFS= read -r result <&9 || { exec 9<&-; continue; }
     if IFS= read -r extra <&9; then
@@ -988,6 +1013,11 @@ fast_repair_progress_timer_wake() {
     case "$result" in ''|*$'\n'*|*$'\r'*) continue ;; esac
     fm_pr_task_id_valid "$id" || continue
     if ! fast_repair_eligible_task "$id"; then
+      rm -f "$file" || continue
+      continue
+    fi
+    current_lifecycle=$(fast_repair_progress_lifecycle "$id" 2>/dev/null || true)
+    if [ "$lifecycle" != "$current_lifecycle" ]; then
       rm -f "$file" || continue
       continue
     fi
