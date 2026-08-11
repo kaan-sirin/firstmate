@@ -469,6 +469,7 @@ FAST_REPAIR_ACTIVE=0
 FAST_REPAIR_TIMER_PID=
 FAST_REPAIR_TIMER_MARKER=
 FAST_REPAIR_TIMER_GENERATION=0
+FAST_REPAIR_TIMER_WAIT_FILE=
 
 # The one place that decides whether durable task metadata opts a task into Fast
 # Repair. One tick collects the eligible ids with it once and reuses that list
@@ -763,10 +764,18 @@ fast_repair_progress_timer_publish() {
     return 1
   fi
   fm_lock_release "$lock"
+  fast_repair_progress_timer_notify
 }
 
 fast_repair_progress_timer_notify() {
-  return 0
+  local parent=${FM_FAST_REPAIR_TIMER_PARENT:-} wait_file=${FM_FAST_REPAIR_TIMER_WAIT_FILE:-} wait_pid wait_parent
+  case "$parent" in *[!0-9]*|'') return 0 ;; esac
+  [ -f "$wait_file" ] && [ ! -L "$wait_file" ] || return 0
+  wait_pid=$(cat "$wait_file" 2>/dev/null || true)
+  case "$wait_pid" in *[!0-9]*|'') return 0 ;; esac
+  wait_parent=$(ps -o ppid= -p "$wait_pid" 2>/dev/null | tr -d '[:space:]')
+  [ "$wait_parent" = "$parent" ] || return 0
+  kill -TERM "$wait_pid" 2>/dev/null || true
 }
 
 # Deliver a durably queued process-event result to firstmate. Publication is
@@ -940,7 +949,7 @@ heartbeat_scan_finds_actionable() {
 }
 
 fast_repair_progress_timer_start() {
-  local marker parent closing generation delay
+  local marker parent closing generation delay wait_file
   [ "$FAST_REPAIR_ACTIVE" = 1 ] || return 0
   case "$POLL:$FAST_REPAIR_PROGRESS_INTERVAL" in *[!0-9:]*|:*|*:) return 0 ;; esac
   fast_repair_progress_schedule_missing || return 0
@@ -948,7 +957,9 @@ fast_repair_progress_timer_start() {
   FAST_REPAIR_TIMER_GENERATION=$generation
   marker=$(mktemp "$STATE/.fast-repair-progress-timer.XXXXXX") || return 0
   closing="$marker.closing"
+  wait_file="$marker.wait-pid"
   FAST_REPAIR_TIMER_MARKER=$marker
+  FAST_REPAIR_TIMER_WAIT_FILE=$wait_file
   parent=$WATCHER_PID
   (
     trap 'rm -f "$closing"' EXIT
@@ -958,6 +969,7 @@ fast_repair_progress_timer_start() {
       FM_FAST_REPAIR_TIMER_PARENT="$parent" \
         FM_FAST_REPAIR_TIMER_CLOSING="$closing" \
         FM_FAST_REPAIR_TIMER_GENERATION="$generation" \
+        FM_FAST_REPAIR_TIMER_WAIT_FILE="$wait_file" \
         fast_repair_progress_tick
       [ "$FAST_REPAIR_ACTIVE" = 1 ] || rm -f "$marker"
       [ -f "$marker" ] || exit 0
@@ -972,7 +984,7 @@ fast_repair_progress_timer_start() {
 }
 
 fast_repair_progress_timer_finish() {
-  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} generation=${FAST_REPAIR_TIMER_GENERATION:-} i=0
+  local marker=${FAST_REPAIR_TIMER_MARKER:-} pid=${FAST_REPAIR_TIMER_PID:-} generation=${FAST_REPAIR_TIMER_GENERATION:-} wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-} i=0
   [ -n "$marker" ] || return 0
   : > "$marker.closing" || return 0
   rm -f "$marker"
@@ -988,6 +1000,23 @@ fast_repair_progress_timer_finish() {
   fi
   [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
   FAST_REPAIR_TIMER_PID=
+  rm -f "$wait_file"
+  FAST_REPAIR_TIMER_WAIT_FILE=
+}
+
+fast_repair_progress_timer_sleep() { # <seconds>
+  local seconds=$1 wait_file=${FAST_REPAIR_TIMER_WAIT_FILE:-} pid tmp
+  [ -n "$wait_file" ] || { sleep "$seconds"; return; }
+  sleep "$seconds" &
+  pid=$!
+  tmp=$(mktemp "$wait_file.XXXXXX") || { wait "$pid" || true; return; }
+  if ! printf '%s\n' "$pid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f "$tmp" "$wait_file"; then
+    rm -f "$tmp"
+    wait "$pid" || true
+    return
+  fi
+  wait "$pid" || true
+  rm -f "$wait_file"
 }
 
 fast_repair_progress_timer_wake() {
@@ -1067,7 +1096,7 @@ event_wait_or_sleep() {
   done < <(recorded_windows)
 
   if [ "${#windows[@]}" -eq 0 ]; then
-    sleep "$POLL"
+    fast_repair_progress_timer_sleep "$POLL"
     fast_repair_progress_timer_finish
     fast_repair_progress_timer_wake
     return

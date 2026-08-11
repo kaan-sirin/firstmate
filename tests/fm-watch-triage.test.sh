@@ -1875,7 +1875,7 @@ test_fast_repair_progress_cadence_is_task_scoped() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$normal_out" &
   normal_pid=$!
   sleep 2
-  [ ! -e "$normal_state/.last-fast-repair-progress" ] \
+  [ ! -e "$normal_state/.last-fast-repair-progress-normal" ] \
     || fail "ordinary task watcher wrote Fast Repair cadence state"
   reap "$normal_pid"
   pass "Fast Repair uses a 20-second-class task-only progress cadence without changing ordinary watcher state"
@@ -1930,7 +1930,7 @@ test_fast_repair_cadence_runs_inside_a_long_ordinary_poll() {
   printf 'window=firstmate:fm-fast\nkind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
   record_fast_repair_eligibility "$dir" fast
   printf 'broader=failed\n' > "$state/fast.fast-repair-broader"
-  touch "$state/.last-fast-repair-progress"
+  touch "$state/.last-fast-repair-progress-fast"
   PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
     FM_POLL=60 FM_SIGNAL_GRACE=1 FM_FAST_REPAIR_PROGRESS_INTERVAL=2 \
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
@@ -1953,11 +1953,11 @@ test_fast_repair_timer_keeps_mixed_fleet_normal_polling() {
     FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$WATCH" > "$out" &
   pid=$!
   i=0
-  while [ ! -e "$state/.last-fast-repair-progress" ] && [ "$i" -lt 50 ]; do
+  while [ ! -e "$state/.last-fast-repair-progress-fast" ] && [ "$i" -lt 50 ]; do
     sleep 0.1
     i=$((i + 1))
   done
-  [ -e "$state/.last-fast-repair-progress" ] \
+  [ -e "$state/.last-fast-repair-progress-fast" ] \
     || fail "the mixed-fleet watcher never started its Fast Repair cadence"
   sleep 1
   printf 'blocked: normal task needs captain\n' > "$state/normal.status"
@@ -1979,7 +1979,7 @@ test_fast_repair_progress_tasks_are_independent() {
     FAST_REPAIR_ACTIVE=1
     FAST_REPAIR_PROGRESS_INTERVAL=1
     run_check_capture() {
-      case "$3" in
+      case "$4" in
         slow) sleep 3; FM_CHECK_RESULT= ;;
         timely) FM_CHECK_RESULT="fast-repair timely broader-tests-failed" ;;
       esac
@@ -2016,7 +2016,8 @@ SH
       FAST_REPAIR_ACTIVE=1
       POLL=10
       FAST_REPAIR_PROGRESS_INTERVAL=1
-      fast_repair_progress_tick() { run_check_capture "$2"; }
+      check=$2
+      fast_repair_progress_tick() { run_check_capture --stop-active-check-on-signal "$check"; }
       fast_repair_progress_timer_start
       i=0
       while [ ! -s "$3" ] && [ "$i" -lt 60 ]; do sleep 0.1; i=$((i + 1)); done
