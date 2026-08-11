@@ -46,6 +46,7 @@ The two parallel lanes use longest-processing-time assignment from those measure
 | imbalance | | 318 ms |
 
 `bin/fm-test-run.sh` contains the exact ordered memberships in `list_portable_parallel_1` and `list_portable_parallel_2`.
+Each estimate is the sum of that lane's durations in [fm-test-isolation-proof.json](fm-test-isolation-proof.json), and `tests/fm-test-run.test.sh` asserts the rows against that artifact.
 
 ## Portable serial remainder
 
@@ -68,7 +69,13 @@ The hints came from that run's `fm-test-timing-portable-serial` artifact on 2026
 A script with no hint gets the conservative `PORTABLE_SERIAL_DEFAULT_WEIGHT_MS` default.
 Hints only affect balance: the coverage guard keeps the partition complete and disjoint whatever they say, so a stale hint costs a slower shard rather than lost coverage.
 
-The table below is derived from the current lane membership and those hints, not measured directly.
+`bin/fm-test-run.sh --list-shard-plan` prints that assignment, one line per shard:
+
+```
+portable-serial-1of4 count=24 estimated_ms=455937
+```
+
+The table below renders that output, so it is derived from the current lane membership and those hints rather than measured directly.
 The lane has grown well past the 69 measured scripts, so a large part of each estimate is the default weight rather than an observed duration.
 Treat the estimates as balance evidence and shard-count sanity only; the measured lane total still comes from a CI timing artifact.
 
@@ -82,13 +89,13 @@ Treat the estimates as balance evidence and shard-count sanity only; the measure
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 199573 ms, is the floor for any shard count.
 
-Rederive the table above from the current branch with no CI artifact, whenever a test is added or removed:
+Adding or removing a test changes this table, because shard membership is derived.
+`tests/fm-test-run.test.sh` asserts the rows against `--list-shard-plan`, so a stale count fails the suite instead of quietly misstating the timeout basis.
+Rerun the plan and paste the counts and estimates back into the table:
 
 ```sh
 bin/fm-test-run.sh --check-coverage
-bin/fm-test-run.sh --list-lanes | grep '^portable-serial-[0-9]' | while read -r lane; do
-  printf '%s\t%s\n' "$lane" "$(bin/fm-test-run.sh --list --lane "$lane" | wc -l)"
-done
+bin/fm-test-run.sh --list-shard-plan
 ```
 
 Refresh the hints themselves by downloading the per-shard timing artifacts from a green CI run, replacing the `portable_serial_weight_hints` table in `bin/fm-test-run.sh` with the measured `path`/`duration_ms` pairs, and rederiving the table above:
