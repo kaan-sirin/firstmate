@@ -217,6 +217,12 @@ fm_lock_acquire_wait "$FM_WAKE_QUEUE_LOCK"
 DRAIN_LOCK_HELD=true
 
 if [ -n "$ACK_THROUGH" ]; then
+  fm_recovery_marker_snapshot "$RECOVERY_MARKER" || exit 1
+  RECOVERY_MARKER_TOKEN=$FM_RECOVERY_MARKER_TOKEN
+  if [ "${RECOVERY_MARKER_TOKEN##*:}" != "$ACK_GENERATION" ]; then
+    echo "wake drain: recovery generation is stale or could not be acknowledged safely" >&2
+    exit 1
+  fi
   ACK_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-outcome:') || exit 1
   ACK_NOTICE_FINGERPRINTS=$(inactive_outcome_fingerprints "$ACK_THROUGH" 'inactive-reconcile:') || exit 1
   fm_lock_release "$FM_WAKE_QUEUE_LOCK"
