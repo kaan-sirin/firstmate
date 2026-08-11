@@ -12,6 +12,9 @@
 # read the scout's report (AGENTS.md section 7); data/projects.md holds the
 # captain's standing posture as context, and this script never looks it up.
 # no-mistakes-prod-only is a registry policy rather than a task mode and is refused.
+# fast-repair is refused too: it is a per-task exception that needs a known
+# end-user reproduction and its typed eligibility record at normal intake
+# (docs/fast-repair.md), so a scout is never promoted into it.
 # Usage: fm-promote.sh <task-id> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off>
 set -eu
 

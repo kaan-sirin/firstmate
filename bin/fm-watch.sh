@@ -51,6 +51,13 @@
 #   check: rejected unauthenticated PR poll retirement receipts: <paths>
 #                          invalid pending retirements were preserved without
 #                          running a check or removing poll artifacts
+#   check: fast-repair <id> <state>
+#                          the Fast-Repair-only progress cadence found a CHANGED
+#                          actionable state for a task whose meta records an
+#                          eligible fast-repair delivery: broader tests failed,
+#                          or its PR checks failed or turned green. A result
+#                          identical to the one already surfaced is never
+#                          re-surfaced (docs/fast-repair.md)
 #   heartbeat              fleet-scan backstop found an unsurfaced captain-relevant
 #                          status, unless afk is active
 # For normal supervision, resume the session-start primary-harness protocol
