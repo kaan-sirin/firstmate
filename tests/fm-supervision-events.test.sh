@@ -29,7 +29,9 @@ FAST_REPAIR_PROGRESS_TICK_PRODUCTION=$(declare -f fast_repair_progress_tick)
 # Overrides: capture wake reasons and neutralize real sleeps (POLL is 15s).
 WAKE_LOG="$TMP/wakes"
 SLEEP_LOG="$TMP/sleeps"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 wake() { printf '%s\n' "$1" >> "$WAKE_LOG"; return 0; }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 sleep() { printf 'SLEEP\n' >> "$SLEEP_LOG"; }
 
 reset_state() {
@@ -46,6 +48,7 @@ reset_state() {
   _event_cap_key=""
   _event_cap_ok=0
   _event_cap_fails=0
+  # shellcheck disable=SC2034 # Reset global consumed by the sourced watcher.
   FAST_REPAIR_TIMER_MARKER=
   FAST_REPAIR_TIMER_GENERATION=0
 }
@@ -152,6 +155,7 @@ reset_state
 fm_write_meta "$STATE_DIR/tk6.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 FAST_REPAIR_ACTIVE=0
 : > "$TMP/forge-called"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 fast_repair_progress_tick() { printf 'called\n' >> "$TMP/forge-called"; }
 fast_repair_progress_discover
 [ "$FAST_REPAIR_ACTIVE" = 1 ] || fail "Fast Repair metadata was not discovered for its wait-time timer"
@@ -190,6 +194,7 @@ FAST_REPAIR_TIMER_GENERATION=1
 WATCHER_PID=${BASHPID:-$$}
 mkdir -p "$WATCH_LOCK"
 printf '%s\n' "$WATCHER_PID" > "$WATCH_LOCK/pid"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 fast_repair_progress_timer_start() {
   (
     command sleep 0.05
@@ -197,7 +202,9 @@ fast_repair_progress_timer_start() {
       > "$STATE_DIR/.fast-repair-progress-handoff-tk6-1"
   ) &
 }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 fm_backend_events_capable() { return 0; }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 fm_backend_wait_transition() {
   command sleep 0.15
   printf 'complete\n' > "$TMP/fast-repair-transition-complete"
@@ -225,6 +232,7 @@ fast_repair_progress_timer_start() {
   generation=$FAST_REPAIR_TIMER_GENERATION
   marker=$(mktemp "$STATE_DIR/.fast-repair-progress-timer.XXXXXX")
   closing="$marker.closing"
+  # shellcheck disable=SC2034 # Timer cleanup in the sourced watcher reads this global.
   FAST_REPAIR_TIMER_MARKER=$marker
   (
     command sleep 0.5
@@ -311,13 +319,15 @@ reset_state
 fm_write_meta "$STATE_DIR/tk14.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 FAST_REPAIR_PROGRESS_INTERVAL=20
 : > "$TMP/progress-checks"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 run_check_capture() {
   printf 'check\n' >> "$TMP/progress-checks"
+  # shellcheck disable=SC2034 # Result contract consumed by the sourced watcher.
   FM_CHECK_RESULT=
 }
 FM_FAST_REPAIR_TIMER_GENERATION=9 fast_repair_progress_tick
 FM_FAST_REPAIR_TIMER_GENERATION=10 fast_repair_progress_tick
-for progress_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   [ -s "$TMP/progress-checks" ] && break
   command sleep 0.01
 done
@@ -327,15 +337,20 @@ pass "fast_repair_progress_tick: short waits retain the task progress cadence"
 
 reset_state
 fm_write_meta "$STATE_DIR/tk14a.meta" "window=default:wG:pQ" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
+# shellcheck disable=SC2034 # Poll cadence consumed by the sourced watcher.
 POLL=15
+# shellcheck disable=SC2034 # Progress cadence consumed by the sourced watcher.
 FAST_REPAIR_PROGRESS_INTERVAL=20
 FAST_REPAIR_NOW=100
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 date() {
   [ "${1:-}" = +%s ] && { printf '%s\n' "$FAST_REPAIR_NOW"; return 0; }
   command date "$@"
 }
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 run_check_capture() {
   printf 'check\n' >> "$TMP/default-poll-checks"
+  # shellcheck disable=SC2034 # Result contract consumed by the sourced watcher.
   FM_CHECK_RESULT=
 }
 fast_repair_progress_schedule_missing
@@ -349,7 +364,7 @@ FM_FAST_REPAIR_TIMER_GENERATION=10 fast_repair_progress_tick
   || fail "the second default-poll timer did not retain the remaining due delay"
 FAST_REPAIR_NOW=120
 FM_FAST_REPAIR_TIMER_GENERATION=11 fast_repair_progress_tick
-for progress_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   [ -s "$TMP/default-poll-checks" ] && break
   command sleep 0.01
 done
@@ -364,6 +379,7 @@ fm_write_meta "$STATE_DIR/tk9a.meta" "window=default:wG:pQ" "kind=ship" "mode=fa
 fm_write_meta "$STATE_DIR/tk9b.meta" "window=default:wG:pR" "kind=ship" "mode=fast-repair" "fast_repair=eligible"
 WATCHER_PID=${BASHPID:-$$}
 FAST_REPAIR_TIMER_GENERATION=3
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 run_check_capture() {
   case "${!#}" in
     tk9a) FM_CHECK_RESULT='fast-repair tk9a pr-checks-green' ;;
@@ -374,7 +390,7 @@ run_check_capture() {
 FM_FAST_REPAIR_TIMER_PARENT="$WATCHER_PID" \
   FM_FAST_REPAIR_TIMER_GENERATION=3 \
   fast_repair_progress_tick
-for progress_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9a-3-*" >/dev/null \
     && compgen -G "$STATE_DIR/.fast-repair-progress-handoff-tk9b-3-*" >/dev/null \
     && break
@@ -447,7 +463,7 @@ for retirement_id in a b; do
     bash -c 'trap '\''printf term > "$FM_RETIREMENT_TERM"; sleep 0.15; exit 0'\'' TERM; : > "$FM_RETIREMENT_READY"; while :; do :; done' &
   retirement_pid=$!
   retirement_pids+=("$retirement_pid")
-  for retirement_wait in $(seq 1 50); do
+  for _ in $(seq 1 50); do
     [ -e "$retirement_ready" ] && break
     command sleep 0.01
   done
@@ -493,15 +509,17 @@ esac
 exec "$FM_REAL_MKTEMP" "$@"
 SH
 chmod +x "$reservation_fakebin/mktemp"
+# shellcheck disable=SC2329 # Runtime override called by the isolated watcher.
 run_check_capture() {
   : > "$reservation_check"
+  # shellcheck disable=SC2034 # Result contract consumed by the sourced watcher.
   FM_CHECK_RESULT=
 }
 FM_RESERVATION_STARTED="$reservation_started" FM_REAL_MKTEMP="$(command -v mktemp)" \
   FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/reservation.closing" \
   PATH="$reservation_fakebin:$PATH" fast_repair_progress_task_start tk-reservation 21 &
 reservation_starter=$!
-for reservation_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   [ -e "$reservation_started" ] && break
   command sleep 0.01
 done
@@ -509,7 +527,7 @@ done
 : > "$STATE_DIR/reservation.closing"
 fast_repair_progress_timer_tasks_finish 21
 wait "$reservation_starter" || fail "the Fast Repair task starter did not finish"
-for reservation_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   [ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21" ] \
     && [ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21.ready" ] \
     && break
@@ -603,7 +621,7 @@ FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$normal_home" FM_STATE_OVERRIDE="$normal_state
   FM_CHECK_INTERVAL=999999 FM_HEARTBEAT=999999 "$ROOT/bin/fm-watch.sh" > "$normal_out" 2>&1 &
 normal_pid=$!
 normal_ready=0
-for normal_wait in $(seq 1 50); do
+for _ in $(seq 1 50); do
   if [ -s "$normal_state/.watch.lock/pid" ]; then
     normal_ready=1
     break
