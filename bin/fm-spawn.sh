@@ -1748,6 +1748,16 @@ if [ "$KIND" = ship ]; then
     echo "error: ship preflight verification returned an invalid fingerprint" >&2
     exit 1
   }
+  if [ "$MODE" = fast-repair ]; then
+    "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" >/dev/null || {
+      echo "error: Fast Repair spawn refused because its typed eligibility evidence is absent or incomplete; use the normal delivery path" >&2
+      exit 1
+    }
+    if [ "${RAW_LAUNCH:-0}" = 1 ] || [ "$HARNESS" != codex ] || [ "$MODEL" != gpt-5.6-luna ] || [ "$EFFORT" != medium ]; then
+      echo "error: Fast Repair requires the built-in profile --harness codex --model gpt-5.6-luna --effort medium; an explicit conflicting per-task profile is not overridden" >&2
+      exit 1
+    fi
+  fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
@@ -2775,6 +2785,7 @@ preserve_relaunch_meta() {
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ "$MODE" != fast-repair ] || echo "fast_repair=eligible"
   [ -z "${PREFLIGHT_FINGERPRINT:-}" ] || echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
+  [ "$MODE" != fast-repair ] || echo "fast_repair=eligible"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

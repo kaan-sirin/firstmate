@@ -13,6 +13,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
 BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
+FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 publish_approved_preflight() {  # <home> <task-id>
@@ -946,6 +947,7 @@ test_fast_repair_requires_and_records_its_builtin_profile() {
 test_no_profile_keeps_claude_profile_defaults
 test_fast_repair_requires_and_records_its_builtin_profile
 test_non_cursor_launch_clears_inherited_cursor_markers
+test_fast_repair_requires_and_records_its_builtin_profile
 test_relative_home_overrides_launch_with_absolute_cross_process_paths
 test_home_defaults_preserve_absolute_or_resolve_relative_paths
 test_absolute_override_spelling_is_preserved_in_launch_paths
