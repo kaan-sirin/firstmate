@@ -9,7 +9,7 @@
 #   fm-fast-repair.sh eligible <task-id> [--worktree <path>]
 #   fm-fast-repair.sh evidence <task-id> --regression-test <runner-family> --focused-test <runner-family>
 #   fm-fast-repair.sh publish-pr <task-id> --title <text> --body-file <path> [--base <branch>] [--head <branch>]
-#   fm-fast-repair.sh broader <task-id> --command <command>
+#   fm-fast-repair.sh broader <task-id> --test <runner-family>
 #   fm-fast-repair.sh progress <task-id>
 #   fm-fast-repair.sh ready <task-id>
 #
@@ -26,7 +26,7 @@
 # their result. `publish-pr` refuses
 # until both passed, then opens and registers a direct PR. `broader` is run
 # after publication while PR checks run concurrently. `ready` refuses until the
-# broader command and all PR checks are green. `progress` prints only a changed
+# broader test family and all PR checks are green. `progress` prints only a changed
 # actionable state for the watcher's Fast-Repair-only cadence.
 set -eu
 
@@ -82,6 +82,21 @@ task_revision_for() {
   task_revision_at_worktree "$TASK_WORKTREE"
 }
 
+task_worktree_clean() { # <worktree>
+  local worktree=$1 path rel output
+  local paths=(.)
+  for path in "$STATE" "$DATA"; do
+    case "$path" in
+      "$worktree"/*)
+        rel=${path#"$worktree"/}
+        paths+=(":(exclude,top)$rel")
+        ;;
+    esac
+  done
+  output=$(git -C "$worktree" status --porcelain=v1 --untracked-files=all -- "${paths[@]}" 2>/dev/null) || return 1
+  [ -z "$output" ]
+}
+
 task_revision_at_worktree() {
   local worktree=$1 root
   [ -d "$worktree" ] || return 1
@@ -91,6 +106,7 @@ task_revision_at_worktree() {
   TASK_WORKTREE=$root
   TASK_BRANCH=$(git -C "$TASK_WORKTREE" symbolic-ref --quiet --short HEAD 2>/dev/null) || return 1
   TASK_HEAD=$(git -C "$TASK_WORKTREE" rev-parse --verify HEAD 2>/dev/null) || return 1
+  task_worktree_clean "$TASK_WORKTREE"
 }
 
 # Evidence logs and records are private to this home. The umask is scoped to the
@@ -114,7 +130,10 @@ request_valid() {
     *) return 1 ;;
   esac
   case "$1" in *$'\n'*|*$'\r'*) return 1 ;; esac
-  case "${1#fast-repair: }" in *[![:space:]]*) ;; *) return 1 ;; esac
+  case "${1#fast-repair: }" in
+    *[![:space:]]*) ;;
+    *) return 1 ;;
+  esac
 }
 
 # The one rule for a proven positive fact and for an excluded risk. intake
@@ -207,7 +226,21 @@ EOF
   [ "$new_count" -eq 1 ]
 }
 
-focused_test_valid() { runner_family_valid "$1"; }
+runner_family_artifacts_valid() { # <family>
+  local selected path
+  runner_family_valid "$1" || return 1
+  selected=$(runner_selected_tests "$1") || return 1
+  [ -n "$selected" ] || return 1
+  while IFS= read -r path; do
+    [ -n "$path" ] || return 1
+    runner_selected_test_valid "$path" || return 1
+  done <<EOF
+$selected
+EOF
+}
+
+focused_test_valid() { runner_family_artifacts_valid "$1"; }
+broader_test_valid() { runner_family_artifacts_valid "$1"; }
 
 run_typed_test() { # <worktree> <family> <pass|fail> <log>
   local worktree=$1 family=$2 expected=$3 log=$4 output status
@@ -395,18 +428,24 @@ tests_passed() {
 }
 
 broader_passed() {
-  local id=$1 f worktree branch head
+  local id=$1 f broader_test broader_runner worktree branch head
   f="$STATE/$id.fast-repair-broader"
   regular_file "$f" || return 1
   task_revision_for "$id" || return 1
+  broader_test=$(field_get "$f" broader_test)
+  broader_runner=$(field_get "$f" broader_runner)
   worktree=$(field_get "$f" worktree)
   branch=$(field_get "$f" branch)
   head=$(field_get "$f" head)
+  broader_test_valid "$broader_test" || return 1
+  [ "$broader_runner" = "$TEST_RUNNER_ARTIFACT" ] || return 1
   [ "$worktree" = "$TASK_WORKTREE" ] || return 1
   [ "$branch" = "$TASK_BRANCH" ] || return 1
   [ "$head" = "$TASK_HEAD" ] || return 1
-  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 4 ] || return 1
+  [ "$(wc -l < "$f" | tr -d '[:space:]')" = 6 ] || return 1
   [ "$(grep -c '^broader=passed$' "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "broader_test=$broader_test" "$f")" = 1 ] || return 1
+  [ "$(grep -Fxc "broader_runner=$broader_runner" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "worktree=$worktree" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "branch=$branch" "$f")" = 1 ] || return 1
   [ "$(grep -Fxc "head=$head" "$f")" = 1 ]
@@ -707,20 +746,22 @@ case "$command" in
     id=${1:-}
     shift || true
     task_id_valid "$id" || fail "task id is missing or invalid"
-    [ "${1:-}" = --command ] && [ "$#" -eq 2 ] || fail "broader requires exactly --command <command>"
-    broader_command=$2
+    [ "${1:-}" = --test ] && [ "$#" -eq 2 ] || fail "broader requires exactly --test <runner-family>"
+    broader_test=$2
     require_fast_repair_meta "$id"
     eligibility_valid "$id" || fail "eligibility evidence is absent or invalid"
     tests_passed "$id" || fail "focused evidence is absent or failed"
     task_revision_for "$id" || fail "task $id has no safe git worktree at its metadata path"
     pr_identity_for "$id" || fail "broader tests start only after the direct PR is registered"
-    [ -n "$broader_command" ] || fail "broader command is empty"
+    broader_test_valid "$broader_test" || fail "broader-test must name a supported runner family with bound artifacts"
     log="$STATE/$id.fast-repair-broader.log"
     record="$STATE/.$id.fast-repair-broader.$$"
     private_truncate "$log" || fail "the broader-test log could not be created"
-    if ( cd "$TASK_WORKTREE" && bash -c "$broader_command" ) >>"$log" 2>&1; then result=passed; else result=failed; fi
+    if run_typed_test "$TASK_WORKTREE" "$broader_test" pass "$log"; then result=passed; else result=failed; fi
     {
       printf 'broader=%s\n' "$result"
+      printf 'broader_test=%s\n' "$broader_test"
+      printf 'broader_runner=%s\n' "$TEST_RUNNER_ARTIFACT"
       printf 'worktree=%s\n' "$TASK_WORKTREE"
       printf 'branch=%s\n' "$TASK_BRANCH"
       printf 'head=%s\n' "$TASK_HEAD"

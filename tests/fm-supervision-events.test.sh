@@ -426,6 +426,51 @@ for retirement_id in a b; do
 done
 pass "fast_repair_progress_timer_tasks_finish: task retirement signals children concurrently"
 
+reset_state
+reservation_fakebin="$TMP/reservation-fakebin"
+reservation_started="$TMP/reservation-started"
+reservation_check="$TMP/reservation-check-ran"
+mkdir -p "$reservation_fakebin"
+cat > "$reservation_fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  *.starting.XXXXXX) ;;
+  *.fast-repair-progress-child-*.XXXXXX)
+    : > "$FM_RESERVATION_STARTED"
+    sleep 0.2
+    ;;
+esac
+exec "$FM_REAL_MKTEMP" "$@"
+SH
+chmod +x "$reservation_fakebin/mktemp"
+run_check_capture() {
+  : > "$reservation_check"
+  FM_CHECK_RESULT=
+}
+FM_RESERVATION_STARTED="$reservation_started" FM_REAL_MKTEMP="$(command -v mktemp)" \
+  FM_FAST_REPAIR_TIMER_CLOSING="$STATE_DIR/reservation.closing" \
+  PATH="$reservation_fakebin:$PATH" fast_repair_progress_task_start tk-reservation 21 &
+reservation_starter=$!
+for reservation_wait in $(seq 1 50); do
+  [ -e "$reservation_started" ] && break
+  command sleep 0.01
+done
+[ -e "$reservation_started" ] || fail "the Fast Repair task did not enter the pre-registration window"
+: > "$STATE_DIR/reservation.closing"
+fast_repair_progress_timer_tasks_finish 21
+wait "$reservation_starter" || fail "the Fast Repair task starter did not finish"
+for reservation_wait in $(seq 1 50); do
+  [ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21" ] \
+    && [ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21.ready" ] \
+    && break
+  command sleep 0.01
+done
+[ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21" ] \
+  && [ ! -e "$STATE_DIR/.fast-repair-progress-child-tk-reservation-21.ready" ] \
+  || fail "wait shutdown retained a pre-registration Fast Repair child"
+[ ! -e "$reservation_check" ] || fail "a pre-registration Fast Repair child ran after shutdown"
+pass "fast_repair_progress_timer_tasks_finish: reservations retire pre-registration children"
+
 ordinary_check_state="$TMP/ordinary-check-state"
 ordinary_check="$TMP/ordinary-check.sh"
 ordinary_check_pid="$TMP/ordinary-check.pid"
