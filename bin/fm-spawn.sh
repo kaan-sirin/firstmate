@@ -2255,7 +2255,15 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ]; then
+# The --worktree proof is a DISPATCH-time gate: it asserts a pristine worktree
+# still sitting on the recorded reproduction commit, which is only true before a
+# crewmate branches, edits, or commits. A relaunch replaces a wedged crewmate in a
+# worktree that already holds unlanded repair work, so re-running that proof would
+# refuse the documented stuck-crewmate recovery purely for being dirty. The typed
+# eligibility gate above already re-proves the task's Fast Repair authorization on
+# every spawn, relaunch included, and the branch and tested-head proofs belong to
+# evidence, publish-pr, broader, and ready, which run once the repair commit exists.
+if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ] && [ "$RELAUNCH" -eq 0 ]; then
   "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" --worktree "$WT" >/dev/null || {
     echo "error: Fast Repair spawn refused because its reproduction revision is not proven for the task worktree; use the normal delivery path" >&2
     exit 1

@@ -80,6 +80,7 @@ write_test_runner() {
   mkdir -p "$home/bin"
   # shellcheck disable=SC2016 # Literal fixture code expands only when its generated script runs.
   printf '%s\n' '#!/usr/bin/env bash' 'set -eu' \
+    'if [ -n "${FM_FIXTURE_RUN_BLOCK:-}" ] && [ "${1:-}" != --list-families ] && [ "${1:-}" != --list ]; then : > "$FM_FIXTURE_RUN_BLOCK.started"; while [ -e "$FM_FIXTURE_RUN_BLOCK" ]; do sleep 0.05; done; fi' \
     'if [ "${1:-}" = --list-families ]; then printf "%s\n" fixture-regression fixture-focused fixture-broader; exit 0; fi' \
     'if [ "${1:-}" = --list ] && [ "${2:-}" = --family ]; then case "$3" in fixture-regression) printf "%s\n" tests/fixture-regression.test.sh ;; fixture-focused) printf "%s\n" tests/fixture-focused.test.sh ;; fixture-broader) printf "%s\n" tests/fixture-broader.test.sh ;; *) exit 2 ;; esac; exit 0; fi' \
     'if [ "${1:-}" = --family ] && [ "$#" = 2 ]; then family=$2; elif [ "$#" = 1 ]; then case "$1" in tests/fixture-regression.test.sh) family=fixture-regression ;; tests/fixture-focused.test.sh) family=fixture-focused ;; tests/fixture-broader.test.sh) family=fixture-broader ;; *) exit 2 ;; esac; else exit 2; fi' \
@@ -865,6 +866,85 @@ test_skipped_selector_run_cannot_satisfy_evidence() {
   pass "Fast Repair applies one skip rule to family and selector runner invocations alike"
 }
 
+# The reproduction witness fills a private sandbox with a full object copy of the
+# task repository, and every typed run writes a private output capture. Neither
+# name carries a task id, so nothing else can ever reclaim them: a crewmate whose
+# pane is killed mid-evidence would otherwise accumulate whole repository clones
+# under firstmate's state directory.
+test_interrupted_evidence_removes_its_temporary_artifacts() {
+  local home id=interrupted-evidence block out pid status i live leftover
+  home=$(make_home interrupted-evidence)
+  intake "$home" "$id" >/dev/null
+  write_regression_test "$home"
+  write_focused_test "$home"
+  write_fast_meta "$home" "$id"
+  block="$TMP_ROOT/interrupted-evidence.block"
+  out="$TMP_ROOT/interrupted-evidence.out"
+  : > "$block"
+  rm -f "$block.started"
+
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_FIXTURE_RUN_BLOCK="$block" "$FAST" evidence "$id" \
+    --regression-test "$REGRESSION_TEST" --focused-test "$FOCUSED_TEST" > "$out" 2>&1 &
+  pid=$!
+  i=0
+  while [ ! -e "$block.started" ] && [ "$i" -lt 400 ]; do sleep 0.05; i=$((i + 1)); done
+  if [ ! -e "$block.started" ]; then
+    rm -f "$block"; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail "the evidence run never reached a tracked runner invocation: $(cat "$out")"
+  fi
+  live=$(find "$home/state" -maxdepth 1 -name '.fast-repair-reproduction.*' -print -quit)
+  if [ -z "$live" ]; then
+    rm -f "$block"; kill -KILL "$pid" 2>/dev/null || true; wait "$pid" 2>/dev/null || true
+    fail "the interrupted run was not holding a reproduction sandbox, so the fixture proves nothing"
+  fi
+
+  # The runner is a child of its own, so it never sees this signal; releasing the
+  # block lets the interrupted script reach its handler exactly as a real one does.
+  kill -TERM "$pid" 2>/dev/null || true
+  rm -f "$block"
+  wait "$pid" 2>/dev/null
+  status=$?
+  [ "$status" -ne 0 ] || fail "an interrupted evidence run reported success"
+  leftover=$(find "$home/state" -maxdepth 1 \
+    \( -name '.fast-repair-reproduction.*' -o -name '.fast-repair-test-output.*' \) -print | tr '\n' ' ')
+  [ -z "$leftover" ] \
+    || fail "an interrupted Fast Repair evidence run leaked unreclaimable temporaries: $leftover"
+  [ ! -e "$home/state/$id.fast-repair-tests" ] \
+    || fail "an interrupted evidence run still published an evidence record"
+  rm -f "$block.started"
+  pass "an interrupted Fast Repair evidence run removes its sandbox clone and output capture"
+}
+
+# A commit id is one concept with one shape, shared with the forge validator, so
+# both object formats git can produce are accepted and anything else is refused
+# before a task can enter the Fast Repair path.
+test_reproduction_revision_accepts_every_commit_id_width() {
+  local home id=revision-width out status bad
+  home=$(make_home revision-width)
+  run_fast "$home" intake "$id" --request 'fast-repair: repair fixture' \
+    --reproduction reproduced --reproduction-revision "$(printf '%064d' 0)" --root-cause confirmed \
+    --isolation isolated --schema none --authentication none --authorization none \
+    --secrets none --financial none --legal none --side-effects none >/dev/null \
+    || fail "a SHA-256 object-format commit id was refused at intake"
+  run_fast "$home" eligible "$id" >/dev/null \
+    || fail "a recorded SHA-256 commit id did not survive re-validation"
+
+  for bad in "$(printf '%039d' 0)" "$(printf '%041d' 0)" "$(printf '%063d' 0)" \
+    "$(printf '%065d' 0)" ABCDEF0123456789ABCDEF0123456789ABCDEF01 ''; do
+    out=$(run_fast "$home" intake "$id-bad" --request 'fast-repair: repair fixture' \
+      --reproduction reproduced --reproduction-revision "$bad" --root-cause confirmed \
+      --isolation isolated --schema none --authentication none --authorization none \
+      --secrets none --financial none --legal none --side-effects none)
+    status=$?
+    [ "$status" -ne 0 ] || fail "intake accepted '$bad' as a commit id"
+    assert_contains "$out" 'reproduction-revision must be' "the malformed-revision refusal was not actionable"
+  done
+  [ ! -e "$home/data/$id-bad/fast-repair-eligibility" ] \
+    || fail "a refused intake still recorded eligibility"
+  pass "Fast Repair records the commit id shapes git produces and refuses everything else"
+}
+
 # Once the watcher has stopped polling the forge for a task it still needs the
 # local half of the progress check, so --local-only must keep the broader-test
 # branch and must reach no forge command at all.
@@ -901,6 +981,8 @@ test_local_only_progress_reads_no_forge() {
 }
 
 test_exact_prefix_only
+test_interrupted_evidence_removes_its_temporary_artifacts
+test_reproduction_revision_accepts_every_commit_id_width
 test_eligibility_requires_every_typed_fact
 test_spawn_eligibility_accepts_the_detached_task_worktree
 test_tested_head_proofs_stay_strict_after_dispatch

@@ -784,17 +784,17 @@ fast_repair_progress_timer_tasks_finish() { # <generation>
   done
   while [ "$i" -lt 40 ]; do
     live=0
-    for pid in "${pids[@]}"; do
+    for pid in "${pids[@]+"${pids[@]}"}"; do
       kill -0 "$pid" 2>/dev/null && { live=1; break; }
     done
     [ "$live" -eq 0 ] && break
     sleep 0.01
     i=$((i + 1))
   done
-  for pid in "${pids[@]}"; do
+  for pid in "${pids[@]+"${pids[@]}"}"; do
     kill -0 "$pid" 2>/dev/null && kill -KILL "$pid" 2>/dev/null || true
   done
-  for marker in "${markers[@]}"; do
+  for marker in "${markers[@]+"${markers[@]}"}"; do
     rm -f "$marker" "$marker.ready"
   done
 }
@@ -1191,6 +1191,7 @@ fast_repair_progress_timer_finish() {
   fi
   [ -z "$pid" ] || wait "$pid" 2>/dev/null || true
   FAST_REPAIR_TIMER_PID=
+  rm -f "$marker.closing"
   rm -f "$wait_file"
   FAST_REPAIR_TIMER_WAIT_FILE=
 }

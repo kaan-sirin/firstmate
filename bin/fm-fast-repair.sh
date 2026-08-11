@@ -54,9 +54,49 @@ REPRODUCTION_REVISION=
 REGRESSION_SELECTOR=
 REGRESSION_ARTIFACT=
 BODY_FILE=
+FAST_REPAIR_TMP_SANDBOX=
+FAST_REPAIR_TMP_OUTPUT=
 
 # shellcheck source=bin/fm-pr-lib.sh
 . "$SCRIPT_DIR/fm-pr-lib.sh"
+
+# The two temporaries this script creates are anonymous - a mkstemp suffix with
+# no task id - so teardown's per-task globs can never reclaim them, and the
+# reproduction sandbox is a full object copy of the project. Both are therefore
+# owned here for the whole life of the process: whichever one is live when the
+# run ends, however it ends, is removed.
+fast_repair_temp_cleanup() {
+  local sandbox=$FAST_REPAIR_TMP_SANDBOX output=$FAST_REPAIR_TMP_OUTPUT
+  FAST_REPAIR_TMP_SANDBOX=
+  FAST_REPAIR_TMP_OUTPUT=
+  [ -z "$output" ] || rm -f "$output" || true
+  [ -z "$sandbox" ] || rm -rf "$sandbox" || true
+  return 0
+}
+
+# The single owner of retiring the reproduction sandbox, so every exit path of
+# the witness both removes the clone and drops it from the cleanup handler.
+fast_repair_sandbox_remove() {
+  local sandbox=$FAST_REPAIR_TMP_SANDBOX
+  FAST_REPAIR_TMP_SANDBOX=
+  [ -z "$sandbox" ] || rm -rf "$sandbox" || true
+  return 0
+}
+
+# Re-raise with the default disposition so callers still read a killed-by-signal
+# wait status rather than a plain exit code.
+fast_repair_signal_cleanup() { # <signal>
+  local sig=$1
+  fast_repair_temp_cleanup
+  trap - EXIT "$sig"
+  kill -s "$sig" $$ 2>/dev/null || exit 1
+  exit 1
+}
+
+trap fast_repair_temp_cleanup EXIT
+trap 'fast_repair_signal_cleanup HUP' HUP
+trap 'fast_repair_signal_cleanup INT' INT
+trap 'fast_repair_signal_cleanup TERM' TERM
 
 usage() {
   sed -n '2,${/^#/!q;p;}' "$0" | sed 's/^# \{0,1\}//'
@@ -195,9 +235,10 @@ runner_family_valid() {
   "$TEST_RUNNER" --list-families 2>/dev/null | grep -Fx "$family" >/dev/null
 }
 
+# One shape for one concept: a commit id here is the same identity the forge
+# validator already owns, so SHA-1 and SHA-256 object formats are both accepted.
 reproduction_revision_valid() {
-  case "$1" in ????????????????????????????????????????) ;; *) return 1 ;; esac
-  case "$1" in *[!0-9a-f]*) return 1 ;; esac
+  fm_pr_head_valid "${1-}"
 }
 
 # What is knowable before the repair commit exists: the recorded revision is a
@@ -302,7 +343,8 @@ run_typed() { # <worktree> <pass|fail> <log> <runner-arg>...
   local worktree=$1 expected=$2 log=$3 output status
   shift 3
   output=$(mktemp "$STATE/.fast-repair-test-output.XXXXXX") || return 1
-  chmod 600 "$output" || { rm -f "$output"; return 1; }
+  FAST_REPAIR_TMP_OUTPUT=$output
+  chmod 600 "$output" || { rm -f "$output"; FAST_REPAIR_TMP_OUTPUT=; return 1; }
   if ( cd "$worktree" && "$worktree/bin/fm-test-run.sh" "$@" ) >"$output" 2>&1; then
     status=0
   else
@@ -320,9 +362,11 @@ run_typed() { # <worktree> <pass|fail> <log> <runner-arg>...
       }
     ' "$output"; then
     rm -f "$output"
+    FAST_REPAIR_TMP_OUTPUT=
     return 0
   fi
   rm -f "$output"
+  FAST_REPAIR_TMP_OUTPUT=
   return 1
 }
 
@@ -336,27 +380,29 @@ run_typed_selector() { # <worktree> <selector> <pass|fail> <log>
 
 regression_witness_valid() { # <family> <selector> <artifact> <log>
   local family=$1 selector=$2 artifact=$3 log=$4 sandbox sandbox_root parent resolved component target mode file_mode oid runner_oid selected
+  local components=()
   case "$artifact" in 100755:*) ;; *) return 1 ;; esac
   mode=${artifact%%:*}
   file_mode=${mode#100}
   oid=${artifact#*:}
   sandbox=$(mktemp -d "$STATE/.fast-repair-reproduction.XXXXXX") || return 1
-  rmdir "$sandbox" || return 1
+  FAST_REPAIR_TMP_SANDBOX=$sandbox
+  rmdir "$sandbox" || { fast_repair_sandbox_remove; return 1; }
   if ! git clone --quiet --no-hardlinks "$TASK_WORKTREE" "$sandbox" \
     || ! git -C "$sandbox" checkout --quiet --detach "$REPRODUCTION_REVISION"; then
-    rm -rf "$sandbox"
+    fast_repair_sandbox_remove
     return 1
   fi
-  sandbox_root=$(cd "$sandbox" && pwd -P) || { rm -rf "$sandbox"; return 1; }
+  sandbox_root=$(cd "$sandbox" && pwd -P) || { fast_repair_sandbox_remove; return 1; }
   for parent in "$(dirname "$selector")" bin; do
     target=$sandbox
     IFS=/ read -r -a components <<< "$parent"
-    for component in "${components[@]}"; do
+    for component in "${components[@]+"${components[@]}"}"; do
       [ -n "$component" ] || continue
       target="$target/$component"
-      [ -e "$target" ] || mkdir "$target" || { rm -rf "$sandbox"; return 1; }
-      resolved=$(cd "$target" && pwd -P) || { rm -rf "$sandbox"; return 1; }
-      case "$resolved" in "$sandbox_root"|"$sandbox_root"/*) ;; *) rm -rf "$sandbox"; return 1 ;; esac
+      [ -e "$target" ] || mkdir "$target" || { fast_repair_sandbox_remove; return 1; }
+      resolved=$(cd "$target" && pwd -P) || { fast_repair_sandbox_remove; return 1; }
+      case "$resolved" in "$sandbox_root"|"$sandbox_root"/*) ;; *) fast_repair_sandbox_remove; return 1 ;; esac
     done
   done
   runner_oid=${TEST_RUNNER_ARTIFACT#*:}
@@ -366,19 +412,19 @@ regression_witness_valid() { # <family> <selector> <artifact> <log>
     || ! git -C "$TASK_WORKTREE" show "$TASK_HEAD:$selector" > "$sandbox/$selector" \
     || ! chmod "$file_mode" "$sandbox/$selector" \
     || ! [ "$(git -C "$sandbox" hash-object "$selector")" = "$oid" ]; then
-    rm -rf "$sandbox"
+    fast_repair_sandbox_remove
     return 1
   fi
   selected=$(cd "$sandbox" && ./bin/fm-test-run.sh --list --family "$family" 2>/dev/null) || {
-    rm -rf "$sandbox"
+    fast_repair_sandbox_remove
     return 1
   }
   if ! printf '%s\n' "$selected" | grep -Fx "$selector" >/dev/null \
     || ! run_typed_selector "$sandbox" "$selector" fail "$log"; then
-    rm -rf "$sandbox"
+    fast_repair_sandbox_remove
     return 1
   fi
-  rm -rf "$sandbox"
+  fast_repair_sandbox_remove
 }
 
 eligibility_file() { printf '%s/%s/fast-repair-eligibility\n' "$DATA" "$1"; }

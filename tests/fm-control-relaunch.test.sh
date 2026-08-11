@@ -805,6 +805,60 @@ test_spawn_relaunch_reuses_a_fast_repair_profile() {
   pass "fm-spawn --relaunch: a Fast Repair task reuses its recorded profile with no flags"
 }
 
+# The dispatch-time reproduction proof asserts a PRISTINE worktree still sitting
+# on the reproduction commit, which is only true before the crewmate branches,
+# edits, and commits. Recovering a wedged Fast Repair crewmate always happens
+# after that, so the recovery must adopt the worktree with its unlanded repair
+# intact instead of refusing it for being dirty - while the authorization that
+# made the task a Fast Repair in the first place stays mandatory.
+test_spawn_relaunch_preserves_unlanded_fast_repair_work() {
+  local dir out status meta
+  dir=$(new_case fastrepairdirty rl41)
+  add_ship_task "$dir" rl41 codex
+  meta="$dir/home/state/rl41.meta"
+  sed -e 's/^mode=.*/mode=fast-repair/' \
+      -e 's/^model=.*/model=gpt-5.6-luna/' \
+      -e 's/^effort=.*/effort=medium/' "$meta" > "$meta.tmp"
+  printf 'fast_repair=eligible\n' >> "$meta.tmp"
+  mv -f "$meta.tmp" "$meta"
+  printf 'Delivery contract: mode=fast-repair\n' > "$dir/home/data/rl41/brief.md"
+  git -C "$dir/wt" commit --quiet --allow-empty -m 'repair fixture head'
+  FM_HOME="$dir/home" "$ROOT/bin/fm-fast-repair.sh" intake rl41 \
+    --request 'fast-repair: fixture' --reproduction reproduced --reproduction-revision "$(git -C "$dir/wt" rev-parse HEAD~1)" --root-cause confirmed \
+    --isolation isolated --schema none --authentication none --authorization none \
+    --secrets none --financial none --legal none --side-effects none >/dev/null \
+    || fail "the Fast Repair eligibility fixture could not be recorded"
+
+  # What a wedged crewmate leaves behind: its own branch, a landed repair commit,
+  # and edits it never got to commit.
+  git -C "$dir/wt" checkout --quiet -b fm/rl41
+  printf 'repaired\n' > "$dir/wt/repair.txt"
+  git -C "$dir/wt" add -- repair.txt
+  git -C "$dir/wt" commit --quiet -m 'repair the reported defect'
+  printf 'still editing\n' >> "$dir/wt/repair.txt"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl41 --relaunch)
+  status=$?
+  [ "$status" -eq 0 ] || fail "the stuck-crewmate recovery was refused for a Fast Repair worktree holding unlanded work: $out"
+  [ "$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)" = fm/rl41 ] \
+    || fail "the relaunch moved the Fast Repair task off its own branch"
+  [ "$(cat "$dir/wt/repair.txt")" = "$(printf 'repaired\nstill editing')" ] \
+    || fail "the relaunch discarded the crewmate's uncommitted repair work"
+  [ "$(meta_field "$dir" rl41 mode)" = fast-repair ] \
+    || fail "the relaunch lost the Fast Repair delivery mode"
+
+  # The dirty worktree is forgiven; a missing authorization is not.
+  rm -f "$dir/home/data/rl41/fast-repair-eligibility"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl41 --relaunch)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a relaunch launched a Fast Repair task whose eligibility evidence is gone"
+  assert_contains "$out" 'typed eligibility evidence is absent or incomplete' \
+    "the unauthorized-relaunch refusal was not actionable"
+  pass "fm-spawn --relaunch: a Fast Repair recovery keeps unlanded work but still requires its authorization"
+}
+
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
   dir=$(new_case spawnharness rl21)
@@ -1356,6 +1410,7 @@ test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_spawn_relaunch_reuses_a_fast_repair_profile
+test_spawn_relaunch_preserves_unlanded_fast_repair_work
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
