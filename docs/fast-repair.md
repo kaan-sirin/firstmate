@@ -85,6 +85,8 @@ A progress check that is stopped at a poll boundary keeps its due time, so the b
 That is a retry guarantee, not a delivery one: a forge call slower than the remaining poll window is reaped before it can publish, and the ordinary PR check poll stays the backstop.
 Once the first green rollup is queued the cadence stops polling the forge for that task, and the ordinary PR check poll owns its PR checks from then on.
 The task-scoped beat continues in a local-only form that reads only this home's own broader-test record, so a broader failure landing after the rollup turned green is still surfaced.
+That local follow-up ends once the broader family reaches its terminal result and that result is surfaced; the beat then retires entirely and the ordinary lifecycle and PR polling own the task.
+A progress result the wake queue refuses stays on disk for a later cycle to retry, but it stops shortening waits after its bounded attempt budget, so a degraded queue cannot turn every watcher wait into a zero-length one.
 A relaunch of a Fast Repair task reuses the recorded profile, so the standard recovery command needs no profile flags.
 
 ## Examples

@@ -2400,7 +2400,156 @@ test_fast_repair_backend_wait_keeps_stderr() {
   pass "the forked backend wait preserves backend stderr diagnostics"
 }
 
+# A handoff the wake queue refuses must stay on disk for a later retry, but it
+# must stop cutting waits short: otherwise every later wait returns immediately
+# and the whole supervision loop spins for as long as the queue stays broken.
+test_fast_repair_undrainable_handoff_stops_shortening_waits() {
+  local dir state out
+  dir=$(make_case fast-repair-undrainable); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  # A directory at the wake queue's sequence path makes the durable append fail
+  # the way a lock or disk error would, without touching the watcher's code.
+  mkdir -p "$state/.wake-queue.seq"
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      mkdir -p "$WATCH_LOCK"
+      printf "%s\n" "$WATCHER_PID" > "$WATCH_LOCK/pid"
+      wake() { printf "WAKE %s\n" "$*"; }
+      FAST_REPAIR_ACTIVE=1
+      POLL=8
+      FAST_REPAIR_PROGRESS_INTERVAL=600
+      fast_repair_progress_timer_start
+      FM_FAST_REPAIR_TIMER_GENERATION="$FAST_REPAIR_TIMER_GENERATION" \
+        fast_repair_progress_timer_publish fast "fast-repair fast broader-tests-failed" \
+        || { echo "the fixture handoff could not be published"; exit 1; }
+
+      start=$(date +%s)
+      fast_repair_progress_timer_sleep "$POLL"
+      first=$(( $(date +%s) - start ))
+      fast_repair_progress_timer_wake
+      [ "$first" -lt 6 ] \
+        || { echo "the undelivered handoff never shortened its own wait (${first}s)"; exit 1; }
+
+      # The record survived the refused enqueue, so a later cycle can still
+      # deliver it, but it has spent its budget and must not cut this wait.
+      fast_repair_progress_handoff_pending \
+        && { echo "a handoff that failed to drain still counts as pending"; exit 1; }
+      start=$(date +%s)
+      fast_repair_progress_timer_sleep "$POLL"
+      second=$(( $(date +%s) - start ))
+      fast_repair_progress_timer_finish
+      [ "$second" -ge 6 ] \
+        || { echo "an undrainable handoff turned the next wait into a ${second}s wait"; exit 1; }
+
+      # Durable for retry: with the queue repaired the retained record delivers.
+      rmdir "$STATE/.wake-queue.seq"
+      fast_repair_progress_timer_wake
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the undrainable-handoff contract failed: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "the retained handoff was never delivered after the queue recovered: $(cat "$out")"
+  pass "a handoff the queue refuses stays durable for retry without shortening later waits"
+}
+
+# The local follow-up exists to catch a broader failure landing after the rollup
+# turned green. Once the broader family reaches a terminal result and that result
+# is surfaced there is nothing left for the beat to find, so it must retire.
+test_fast_repair_local_followup_retires_after_the_broader_result() {
+  local dir state out
+  dir=$(make_case fast-repair-followup-retire); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      wake() { printf "WAKE %s\n" "$*"; }
+      active() { fast_repair_progress_discover; printf "%s\n" "$FAST_REPAIR_ACTIVE"; }
+
+      [ "$(active)" = 1 ] || { echo "an eligible task was not discovered"; exit 1; }
+
+      # Green retires the forge poll; the still-running broader family keeps the
+      # local beat alive.
+      : > "$(fast_repair_progress_green_marker fast)"
+      [ "$(active)" = 1 ] || { echo "green retirement stopped the local follow-up"; exit 1; }
+
+      printf "broader=failed\n" > "$STATE/fast.fast-repair-broader"
+      [ "$(active)" = 1 ] \
+        || { echo "the beat retired before the broader failure was surfaced"; exit 1; }
+
+      FM_FAST_REPAIR_TIMER_GENERATION=1 \
+        fast_repair_progress_timer_publish fast "fast-repair fast broader-tests-failed"
+      fast_repair_progress_timer_wake
+      [ "$(active)" = 0 ] \
+        || { echo "the beat kept running after its broader failure was surfaced"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the local follow-up retirement contract failed: $(cat "$out")"
+  grep -F 'WAKE check: fast-repair fast broader-tests-failed' "$out" >/dev/null \
+    || fail "the broader failure was never surfaced before retirement: $(cat "$out")"
+  pass "the local Fast Repair follow-up retires once the broader result is surfaced"
+}
+
+# A broader pass after the forge poll already retired leaves the cadence nothing
+# to report either, so it must retire on that path too.
+test_fast_repair_local_followup_retires_on_a_broader_pass() {
+  local dir state out
+  dir=$(make_case fast-repair-followup-pass); state="$dir/state"; out="$dir/result"
+  printf 'kind=ship\nmode=fast-repair\nyolo=off\nfast_repair=eligible\n' > "$state/fast.meta"
+  record_fast_repair_eligibility "$dir" fast
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" \
+    bash -c '
+      set -u
+      . "$1"
+      active() { fast_repair_progress_discover; printf "%s\n" "$FAST_REPAIR_ACTIVE"; }
+      printf "broader=passed\n" > "$STATE/fast.fast-repair-broader"
+      [ "$(active)" = 1 ] \
+        || { echo "a passing broader run retired the beat before the PR checks were green"; exit 1; }
+      : > "$(fast_repair_progress_green_marker fast)"
+      [ "$(active)" = 0 ] \
+        || { echo "the beat kept running with a green rollup and a passing broader run"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || fail "the broader-pass retirement contract failed: $(cat "$out")"
+  pass "the Fast Repair beat retires once its PR is green and its broader run passed"
+}
+
+# The recorded wait pid stays set between `wait` returning and the clear, so a
+# teardown arriving in that window must not signal a reused pid it never forked.
+test_fast_repair_wait_stop_refuses_a_foreign_pid() {
+  local dir state out foreign
+  dir=$(make_case fast-repair-wait-foreign); state="$dir/state"; out="$dir/result"
+  # Killable on purpose: a guard that refuses to signal is the only thing that
+  # can keep this alive, so the assertion cannot pass on an ignored signal.
+  bash -c 'while :; do sleep 1; done' &
+  foreign=$!
+  FM_STATE_OVERRIDE="$state" FM_DATA_OVERRIDE="$dir/data" FM_TEST_FOREIGN_PID="$foreign" \
+    bash -c '
+      set -u
+      . "$1"
+      WATCHER_PID=$$
+      # Stands in for a pid this watcher never forked, which is what a reused pid
+      # looks like from here.
+      FAST_REPAIR_WAIT_PID=$FM_TEST_FOREIGN_PID
+      fast_repair_progress_wait_stop
+      [ -z "$FAST_REPAIR_WAIT_PID" ] || { echo "the stale wait pid was not cleared"; exit 1; }
+    ' _ "$WATCH" > "$out" 2>&1 \
+    || { kill -KILL "$foreign" 2>/dev/null; fail "the wait-stop guard failed: $(cat "$out")"; }
+  if ! kill -0 "$foreign" 2>/dev/null; then
+    fail "the wait stop signalled a process this watcher never forked"
+  fi
+  kill -KILL "$foreign" 2>/dev/null || true
+  wait "$foreign" 2>/dev/null || true
+  pass "the Fast Repair wait stop refuses a pid this watcher did not fork"
+}
+
 test_signal_reason_is_actionable_classifier
+test_fast_repair_undrainable_handoff_stops_shortening_waits
+test_fast_repair_local_followup_retires_after_the_broader_result
+test_fast_repair_local_followup_retires_on_a_broader_pass
+test_fast_repair_wait_stop_refuses_a_foreign_pid
 test_fast_repair_check_signal_race_stops_the_check_group
 test_fast_repair_cadence_interrupts_the_push_transition_wait
 test_fast_repair_beat_survives_the_poll_boundary
