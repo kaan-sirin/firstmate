@@ -2543,7 +2543,8 @@ rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.fast-repair-tests" "$STATE/$ID.fast-repair-tests.log" \
   "$STATE/$ID.fast-repair-broader" "$STATE/$ID.fast-repair-broader.log" \
   "$STATE/.fast-repair-progress-$ID" "$STATE/.fast-repair-progress-generation-$ID" \
-  "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID"
+  "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID" \
+  "$STATE/.fast-repair-progress-green-$ID"
 rm -rf "$STATE/.fast-repair-progress-handoff-$ID-"* \
   "$STATE/.fast-repair-progress-sequence-$ID-"* \
   "$STATE/.fast-repair-progress-child-$ID-"*
