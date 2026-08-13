@@ -598,7 +598,7 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
+  FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" FM_FAKE_PANE_PATH="$sm" \
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate >/dev/null 2>&1 || rc=$?
 
   [ "$rc" -eq 0 ] || {
