@@ -101,7 +101,7 @@ fm_control_harness_supports_kind() {  # <harness> <kind>
   local harness=${1-} kind=${2-}
   fm_control_harness_supported "$harness" || return 1
   case "$harness" in
-    cursor|muse) [ "$kind" != secondmate ] || return 1 ;;
+    muse) [ "$kind" != secondmate ] || return 1 ;;
   esac
   return 0
 }
