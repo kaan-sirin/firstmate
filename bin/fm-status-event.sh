@@ -22,7 +22,6 @@ case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
 case "$MODE" in
   append)
     at=$(date +%s)
-    printf '%s\n' "$LINE" >> "$STATE/$ID.status"
     ;;
   record)
     at=${5:-}
@@ -34,9 +33,10 @@ case "$(status_line_verb "$LINE")" in
   working) state=working ;;
   needs-decision) state=parked ;;
   blocked) state=blocked ;;
-  "$FM_CLASSIFY_PAUSED_VERB") state=paused ;;
+  "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") state=paused ;;
   done) state=done ;;
   failed) state=failed ;;
-  *) exit 0 ;;
+  *) state= ;;
 esac
-"$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at"
+[ -z "$state" ] || "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at"
+[ "$MODE" != append ] || printf '%s\n' "$LINE" >> "$STATE/$ID.status"

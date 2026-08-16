@@ -93,7 +93,14 @@ verify_record() {
   local fingerprint=$1 require_fresh=${2:-1} bypass approved_at
   [ "$(jq -r '.state' "$RECORD")" = approved ] || die "preflight approval is missing"
   [ "$(jq -r '.fingerprint' "$RECORD")" = "$fingerprint" ] || die "preflight fingerprint does not match the approved contract"
-  jq -e '(.approval | type == "object") and (.approval.approved_at | type == "number") and (.approval.complete_plan_bypass | type == "boolean")' "$RECORD" >/dev/null || die "preflight lacks an explicit approval"
+  jq -e '
+    (.approval | type == "object") and
+    (.approval.approved_at | type == "number") and
+    (.approval.complete_plan_bypass | type == "boolean") and
+    (.approval.evidence == "bridge-submission") and
+    ((.origin == "direct" and .approval.authority == "direct-captain") or
+     (.origin == "bridge" and .approval.authority == "agent-bridge"))
+  ' "$RECORD" >/dev/null || die "preflight lacks typed approval authority evidence"
   bypass=$(jq -r 'if (.approval | has("complete_plan_bypass")) then .approval.complete_plan_bypass else "" end' "$RECORD")
   case "$bypass" in
     true) jq -e '.contract.complete_plan_approved == true' "$RECORD" >/dev/null || die "approved-complete-plan record lacks its approved plan marker" ;;
