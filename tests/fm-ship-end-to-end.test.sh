@@ -20,17 +20,18 @@ preflight_env() {
 }
 
 write_bridge_preflight_record() {
-  local home=$1 id=$2 contract=$3 contract_json fp record
+  local home=$1 id=$2 contract=$3 contract_json bound fp record
   record="$home/data/$id/ship-preflight.json"
   mkdir -p "$home/data/$id"
   contract_json=$(jq -cS . "$contract") || fail "could not canonicalize bridge contract"
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not bind bridge preflight"
   if command -v sha256sum >/dev/null 2>&1; then
-    fp=$(printf '%s' "$contract_json" | sha256sum | awk '{print $1}')
+    fp=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
   else
-    fp=$(printf '%s' "$contract_json" | shasum -a 256 | awk '{print $1}')
+    fp=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
   fi
-  jq -n --argjson contract "$contract_json" --arg fp "$fp" \
-    '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:"bridge",state:"approved",contract:$contract,approval:{authority:"trusted-bridge",evidence:"internal-submission",approved_at:100,complete_plan_bypass:false}}' > "$record" \
+  jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"bridge",state:"approved",contract:$contract,approval:{authority:"trusted-bridge",evidence:"internal-submission",approved_at:100,complete_plan_bypass:false}}' > "$record" \
     || fail "could not write bridge preflight record"
   chmod 600 "$record"
   printf '%s' "$fp"
@@ -139,7 +140,7 @@ test_preflight_rejects_tampering_and_future_approvals() {
   pass "preflight verifies its approved contract and approval clock"
 }
 
-test_preflight_rejects_cross_task_record_directories() {
+test_preflight_rejects_cross_task_records() {
   local home="$TMP_ROOT/cross-task" contract="$TMP_ROOT/cross-task-contract.json" out fp status
   mkdir -p "$home/data"
   make_contract "$contract"
@@ -152,7 +153,31 @@ test_preflight_rejects_cross_task_record_directories() {
   status=$?
   [ "$status" -ne 0 ] || fail "a task directory symlink reused another task's approved preflight"
   assert_contains "$out" "unsafe task record directory" "cross-task preflight refusal was unclear"
-  pass "preflight refuses cross-task record-directory aliases"
+
+  mkdir -p "$home/data/copied-a1"
+  cp "$home/data/approved-a1/ship-preflight.json" "$home/data/copied-a1/ship-preflight.json"
+  chmod 600 "$home/data/copied-a1/ship-preflight.json"
+  out=$(preflight_env "$home" 101 verify-current copied-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a copied preflight record authorized a different task"
+  assert_contains "$out" "malformed preflight record" "copied preflight refusal was unclear"
+
+  mkdir -p "$home/data/linked-a1"
+  ln "$home/data/approved-a1/ship-preflight.json" "$home/data/linked-a1/ship-preflight.json"
+  out=$(preflight_env "$home" 101 verify-current linked-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a hard-linked preflight record authorized a different task"
+  assert_contains "$out" "malformed preflight record" "hard-linked preflight refusal was unclear"
+
+  mkdir -p "$home/data/empty-a1"
+  jq -n --arg id empty-a1 \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:"0000000000000000000000000000000000000000000000000000000000000000",origin:"bridge",state:"approved",contract:{},approval:{authority:"trusted-bridge",evidence:"internal-submission",approved_at:100,complete_plan_bypass:false}}' > "$home/data/empty-a1/ship-preflight.json"
+  chmod 600 "$home/data/empty-a1/ship-preflight.json"
+  out=$(preflight_env "$home" 101 verify-current empty-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an empty bridge contract authorized a task"
+  assert_contains "$out" "malformed preflight contract" "empty bridge contract refusal was unclear"
+  pass "preflight refuses cross-task records and empty bridge contracts"
 }
 
 test_spawn_enforces_the_durable_preflight() {
@@ -459,7 +484,7 @@ test_direct_and_bridge_owned_preflight_authority
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
-test_preflight_rejects_cross_task_record_directories
+test_preflight_rejects_cross_task_records
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_recovers_stale_publication_lock
