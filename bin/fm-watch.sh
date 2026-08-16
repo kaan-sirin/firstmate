@@ -457,49 +457,7 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 }
 
 dashboard_transition_observe() {
-  local task=$1 state=$2 transition_at=$3 dir record meta meta_mtime prior_state prior_meta prior_at prior_active tmp
-  prior_state=
-  prior_meta=
-  prior_at=
-  prior_active=0
-  case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 1 ;; esac
-  case "$task:$state:$transition_at" in
-    *[!A-Za-z0-9._:-]*|*::*|::*) return 1 ;;
-  esac
-  meta="$STATE/$task.meta"
-  [ -f "$meta" ] && [ ! -L "$meta" ] || return 0
-  meta_mtime=$(stat_mtime "$meta")
-  case "$meta_mtime" in ''|*[!0-9]*) return 0 ;; esac
-  dir="$STATE/dashboard-transitions"
-  if [ -e "$dir" ] || [ -L "$dir" ]; then
-    [ -d "$dir" ] && [ ! -L "$dir" ] || return 1
-  else
-    (umask 077; mkdir -p "$dir") || return 1
-    chmod 700 "$dir" || return 1
-  fi
-  record="$dir/$task.json"
-  if [ -f "$record" ] && [ ! -L "$record" ]; then
-    IFS=$'\t' read -r prior_state prior_meta prior_at prior_active < <(
-      jq -r '[.state // "",(.meta_mtime // "" | tostring),(.transition_at // "" | tostring),(.active_seconds // 0 | tostring)] | @tsv' "$record" 2>/dev/null || true
-    )
-    if [ "$prior_meta" != "$meta_mtime" ]; then
-      prior_state=
-      prior_at=
-      prior_active=0
-    fi
-  fi
-  case "$prior_at:$prior_active" in *[!0-9:]*|:*) prior_at=; prior_active=0 ;; esac
-  if [ "$prior_state" = "$state" ]; then return 0; fi
-  if [ -n "$prior_at" ] && [ "$transition_at" -lt "$prior_at" ]; then return 1; fi
-  tmp=$(umask 077; mktemp "$dir/.${task}.XXXXXX") || return 1
-  if ! jq -n --arg id "$task" --arg state "$state" --argjson transition_at "$transition_at" --argjson meta_mtime "$meta_mtime" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$transition_at}" --argjson active_seconds "$prior_active" '
-    ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
-    | {schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime,active_seconds:$active_seconds}' > "$tmp" \
-    || ! chmod 600 "$tmp" \
-    || ! mv -f -- "$tmp" "$record"; then
-    rm -f -- "$tmp"
-    return 1
-  fi
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$1" "$2" "$3"
 }
 
 dashboard_transition_reconcile() {

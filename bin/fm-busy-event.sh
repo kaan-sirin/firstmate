@@ -119,11 +119,18 @@ lock_acquire() {
 lock_release() { rmdir "$LOCK" 2>/dev/null || true; }
 
 write_record() {  # <gen> <seq>
-  local tmp
+  local tmp timestamp
+  timestamp=$(date +%s)
   tmp="$REC.tmp.$$"
   printf 'v1 gen=%s seq=%s state=%s source=%s event=%s ts=%s\n' \
-    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$(date +%s)" > "$tmp" || return 1
+    "$1" "$2" "$NEW_STATE" "$SOURCE" "$EVENT" "$timestamp" > "$tmp" || return 1
   mv -f "$tmp" "$REC"
+  case "$NEW_STATE" in
+    busy) dashboard_state=working ;;
+    idle) dashboard_state=parked ;;
+    unknown) dashboard_state=unknown ;;
+  esac
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$dashboard_state" "$timestamp"
 }
 
 old_umask=$(umask)

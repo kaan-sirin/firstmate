@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -eu
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+usage() {
+  echo "usage: fm-status-event.sh append <state-dir> <task-id> <status-line>" >&2
+  echo "       fm-status-event.sh record <state-dir> <task-id> <status-line> <epoch>" >&2
+  exit 2
+}
+
+MODE=${1:-}
+STATE=${2:-}
+ID=${3:-}
+LINE=${4:-}
+[ -n "$STATE" ] && [ -n "$ID" ] && [ -n "$LINE" ] || usage
+case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
+
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
+
+case "$MODE" in
+  append)
+    at=$(date +%s)
+    printf '%s\n' "$LINE" >> "$STATE/$ID.status"
+    ;;
+  record)
+    at=${5:-}
+    case "$at" in ''|*[!0-9]*) usage ;; esac
+    ;;
+  *) usage ;;
+esac
+case "$(status_line_verb "$LINE")" in
+  working) state=working ;;
+  needs-decision) state=parked ;;
+  blocked) state=blocked ;;
+  "$FM_CLASSIFY_PAUSED_VERB") state=paused ;;
+  done) state=done ;;
+  failed) state=failed ;;
+  *) exit 0 ;;
+esac
+"$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at"
