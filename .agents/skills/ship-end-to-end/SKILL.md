@@ -25,7 +25,9 @@ Do not ask obvious questions.
 Create a JSON contract with these fields: `recommendation`, `outcome`, `scope`, `non_goals`, `delivery_boundary`, `external_boundaries`, and `questions`.
 For a complete plan that the captain explicitly approved, set `complete_plan_approved` to `true`.
 Send the complete typed record through the Agent bridge's private submission path.
-For direct work, publish an awaiting-approval record, then replace it with the captain-approved same-fingerprint record after one explicit approval or correction.
+For direct work, publish an awaiting-approval record.
+After one explicit approval, replace it with an approved record with the same fingerprint.
+If the captain corrects the contract, publish a new awaiting-approval record with its new fingerprint and wait for an explicit approval of that record.
 An explicitly approved complete plan can publish its approved record without a duplicate preflight question.
 For Slack work, the Agent bridge verifies the allowlisted same-thread approval and publishes the already-authorized typed record.
 Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
