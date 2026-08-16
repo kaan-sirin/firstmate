@@ -245,7 +245,7 @@ test_preflight_rejects_cross_task_records() {
 }
 
 test_spawn_enforces_the_durable_preflight() {
-  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq publish_out publish_status attempts
+  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
   mkdir -p "$home/data/missing-a1"
@@ -270,46 +270,89 @@ test_spawn_enforces_the_durable_preflight() {
   printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/race-a1/brief.md"
   write_bridge_handoff "$home" race-a1 "$corrected" direct awaiting_approval 101 >/dev/null || fail "race correction handoff could not be prepared"
   mkdir -p "$racebin"
-  real_jq=$(command -v jq) || fail "jq is required for the preflight race test"
-  cat > "$racebin/jq" <<'SH'
-#!/usr/bin/env bash
-set -eu
-"$FM_RACE_REAL_JQ" "$@"
-if [ "$#" -ge 2 ] && [ "$1" = -r ] && [ "$2" = '.approval.approved_at // 0' ] && [ ! -e "$FM_RACE_TRIGGERED" ]; then
-  : > "$FM_RACE_TRIGGERED"
-  (
-    if "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" > "$FM_RACE_PUBLISH_OUT" 2>&1; then
-      printf '%s\n' 0 > "$FM_RACE_PUBLISH_STATUS"
-    else
-      printf '%s\n' 1 > "$FM_RACE_PUBLISH_STATUS"
-    fi
-  ) &
-fi
-SH
   cat > "$racebin/tmux" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$FM_RACE_TMUX_LOG"
 exit 1
 SH
-  chmod +x "$racebin/jq" "$racebin/tmux"
-  publish_out="$home/race-publish.out"
-  publish_status="$home/race-publish-status"
-  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_PUBLISH_OUT="$publish_out" FM_RACE_PUBLISH_STATUS="$publish_status" FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  chmod +x "$racebin/tmux"
+  out=$(bridge_env "$home" publish race-a1 2>&1)
   status=$?
+  [ "$status" -eq 0 ] || fail "publisher-first correction did not finish"
+  assert_contains "$out" "published" "publisher-first correction did not complete"
+  out=$(PATH="$racebin:$PATH" FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a corrected preflight must refuse spawn"
+  assert_contains "$out" "preflight approval is missing" "corrected preflight refusal was unclear"
+  jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/race-a1/ship-preflight.json" >/dev/null \
+    || fail "publisher-first correction did not replace the preflight record"
+  assert_absent "$home/state/race-a1.meta" "corrected preflight spawn wrote task metadata"
+  [ ! -s "$home/race-tmux.log" ] || fail "corrected preflight created an endpoint"
+
+  git init --bare -q "$submit_remote" || fail "could not create submit test remote"
+  git -C "$project" init -q || fail "could not create submit test project"
+  git -C "$project" config user.email test@example.invalid || fail "could not configure submit test author"
+  git -C "$project" config user.name Test || fail "could not configure submit test author"
+  printf '%s\n' 'submit test' > "$project/README.md"
+  git -C "$project" add README.md || fail "could not stage submit test project"
+  git -C "$project" commit -qm initial || fail "could not commit submit test project"
+  git -C "$project" branch -M main || fail "could not name submit test branch"
+  git -C "$project" remote add origin "$submit_remote" || fail "could not configure submit test remote"
+  git -C "$project" push -qu origin main || fail "could not publish submit test base"
+  git --git-dir="$submit_remote" symbolic-ref HEAD refs/heads/main || fail "could not set submit test default branch"
+  git clone -q "$submit_remote" "$submit_worktree" || fail "could not create submit test worktree"
+  fp=$(publish_preflight_record "$home" race-submit-a1 "$contract" direct approved 100) || fail "submit race preflight create failed"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/race-submit-a1/brief.md"
+  write_bridge_handoff "$home" race-submit-a1 "$corrected" direct awaiting_approval 101 >/dev/null || fail "submit race correction handoff could not be prepared"
+  mkdir -p "$submitbin"
+  cat > "$submitbin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -eu
+printf '%s\n' "$*" >> "$FM_RACE_TMUX_LOG"
+case "$1" in
+  new-window) printf '%s\n' '@1' ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_path}'*) printf '%s\n' "$FM_RACE_WORKTREE" ;;
+      *) printf '%s\n' '%1' ;;
+    esac
+    ;;
+  send-keys)
+    case " $* " in
+      *" -l "*)
+        : > "$FM_RACE_LAUNCH_LITERAL"
+        (
+          if "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" > "$FM_RACE_PUBLISH_OUT" 2>&1; then
+            printf '%s\n' published >> "$FM_RACE_EVENTS"
+            printf '%s\n' 0 > "$FM_RACE_PUBLISH_STATUS"
+          else
+            printf '%s\n' publisher-failed >> "$FM_RACE_EVENTS"
+            printf '%s\n' 1 > "$FM_RACE_PUBLISH_STATUS"
+          fi
+        ) &
+        ;;
+      *" Enter "*)
+        [ ! -e "$FM_RACE_LAUNCH_LITERAL" ] || printf '%s\n' submitted >> "$FM_RACE_EVENTS"
+        ;;
+    esac
+    ;;
+esac
+SH
+  chmod +x "$submitbin/tmux"
+  out=$(PATH="$submitbin:$PATH" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-submit-a1 FM_RACE_WORKTREE="$submit_worktree" FM_RACE_TMUX_LOG="$home/race-submit-tmux.log" FM_RACE_LAUNCH_LITERAL="$submit_launch" FM_RACE_EVENTS="$submit_events" FM_RACE_PUBLISH_OUT="$submit_out" FM_RACE_PUBLISH_STATUS="$submit_status" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-submit-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  status=$?
+  [ "$status" -eq 0 ] || fail "spawn-first correction did not dispatch"
   attempts=0
-  while [ ! -e "$publish_status" ] && [ "$attempts" -lt 50 ]; do
+  while [ ! -e "$submit_status" ] && [ "$attempts" -lt 50 ]; do
     sleep 0.1
     attempts=$((attempts + 1))
   done
-  [ "$status" -ne 0 ] || fail "a corrected preflight must refuse its in-flight spawn"
-  assert_contains "$out" "preflight approval is missing" "corrected preflight refusal was unclear"
-  [ -e "$home/race-triggered" ] || fail "race correction did not run after initial verification"
-  [ "$(cat "$publish_status")" = 0 ] || fail "asynchronous race correction did not finish"
-  assert_contains "$(cat "$publish_out")" "published" "asynchronous race correction did not complete"
-  jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/race-a1/ship-preflight.json" >/dev/null \
-    || fail "asynchronous race correction did not replace the preflight record"
-  assert_absent "$home/state/race-a1.meta" "corrected preflight spawn wrote task metadata"
-  [ ! -s "$home/race-tmux.log" ] || fail "corrected preflight created an endpoint"
+  [ "$(cat "$submit_status")" = 0 ] || fail "spawn-first correction did not finish"
+  assert_contains "$(cat "$submit_out")" "published" "spawn-first correction did not complete"
+  submitted_line=$(grep -n '^submitted$' "$submit_events" | head -n 1 | cut -d: -f1)
+  published_line=$(grep -n '^published$' "$submit_events" | head -n 1 | cut -d: -f1)
+  [ -n "$submitted_line" ] && [ -n "$published_line" ] && [ "$submitted_line" -lt "$published_line" ] \
+    || fail "spawn-first correction published before launch submission"
   pass "spawn verifies the durable preflight without a brief marker"
 }
 

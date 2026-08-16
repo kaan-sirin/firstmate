@@ -2207,13 +2207,6 @@ EOF
     ;;
 esac
 fi
-if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
-  SPAWN_PREFLIGHT_LOCK_HELD=0
-  fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
-    echo "error: could not release ship preflight lock for $ID" >&2
-    exit 1
-  }
-fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
     propagate_inheritable_config "$CONFIG" "$PROJ_ABS/config" \
@@ -3008,6 +3001,13 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
+  SPAWN_PREFLIGHT_LOCK_HELD=0
+  fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
+    echo "error: could not release ship preflight lock for $ID" >&2
+    exit 1
+  }
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"
