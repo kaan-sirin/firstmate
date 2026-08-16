@@ -5,6 +5,7 @@
 #   fm-ship-end-to-end.sh verify <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-current <task-id>
 #   fm-ship-end-to-end.sh verify-dispatched <task-id> --fingerprint <sha256>
+#   fm-ship-end-to-end.sh verify-recovery <task-id> --fingerprint <sha256>
 #
 # The record is data/<task-id>/ship-preflight.json, mode 0600. Its schema is
 # `{schema_version,workflow,fingerprint,origin,state,contract,created_at|approval}`.
@@ -17,7 +18,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
 
-usage() { sed -n '2,7p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
+usage() { sed -n '2,8p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
 sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | awk '{print $1}'; else printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; fi; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
@@ -39,7 +40,7 @@ valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac
 valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s' "$1" | grep -q '[^0-9a-f]' ;; *) return 1;; esac; }
 
 COMMAND=${1:-}
-case "$COMMAND" in verify|verify-current|verify-dispatched) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
+case "$COMMAND" in verify|verify-current|verify-dispatched|verify-recovery) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
 ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
@@ -145,6 +146,16 @@ case "$COMMAND" in
   verify-dispatched)
     valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
     read_record
+    verify_record "$FINGERPRINT" 0
+    printf 'fingerprint=%s\n' "$FINGERPRINT"
+    ;;
+  verify-recovery)
+    valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
+    read_record
+    if [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ]; then
+      exit 4
+    fi
+    FINGERPRINT=$(jq -r '.fingerprint' "$RECORD")
     verify_record "$FINGERPRINT" 0
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;

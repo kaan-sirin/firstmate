@@ -51,10 +51,29 @@ cleanup() { fm_lock_release "$LOCK" || true; }
 trap cleanup EXIT HUP INT TERM
 RECORD="$DIR/$ID.json"
 attempts=0
+prior_state=
+reason=
 if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
-  IFS=$'\t' read -r prior_state attempts < <(jq -r '[.state // "",(.attempts // 0 | tostring)] | @tsv' "$RECORD" 2>/dev/null || true)
+  IFS=$'\t' read -r prior_state attempts reason < <(jq -r '[.state // "",(.attempts // 0 | tostring),(.reason // "")] | @tsv' "$RECORD" 2>/dev/null || true)
   case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
-  [ "$prior_state" != unrecoverable ] || exit 0
+  if [ "$prior_state" = unrecoverable ]; then
+    case "$reason" in
+      *'preflight approval is missing'*|*'preflight is awaiting approval'*)
+        attempts=0
+        prior_state=pending
+        ;;
+      *) exit 0 ;;
+    esac
+  fi
+fi
+if [ "$prior_state" = pending ] && [ "$attempts" -eq 0 ] && [ -n "$reason" ]; then
+  tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
+  if ! jq -n --arg id "$ID" --arg state pending --arg reason "$reason" --argjson attempts 0 --argjson confirmed_at "$(date +%s)" \
+    '{schema_version:1,id:$id,state:$state,attempts:$attempts,confirmed_at:$confirmed_at,reason:$reason}' > "$tmp" \
+    || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
+    rm -f -- "$tmp"
+    exit 1
+  fi
 fi
 RECOVERY_BIN=${FM_DASHBOARD_RECOVERY_SPAWN_BIN:-$SCRIPT_DIR/fm-spawn.sh}
 case "$agent_state" in
