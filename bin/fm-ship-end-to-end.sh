@@ -2,7 +2,7 @@
 # Own the durable two-phase approval record for a material software ship task.
 #
 # Usage:
-#   fm-ship-end-to-end.sh preflight <task-id> --origin <direct|slack> --contract <json-file> [--slack-thread <thread-id>]
+#   fm-ship-end-to-end.sh preflight <task-id> --origin <direct|slack> --contract <json-file>
 #   fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <json-file> --approved-authority direct-captain --approval-evidence <text>
 #   fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256> [--authority direct-captain --evidence <text>]
 #   fm-ship-end-to-end.sh correct <task-id> --contract <json-file>
@@ -17,7 +17,6 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
-STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
 MAX_CONTRACT_BYTES=${FM_SHIP_PREFLIGHT_MAX_CONTRACT_BYTES:-32768}
@@ -28,11 +27,9 @@ die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
 sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | awk '{print $1}'; else printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; fi; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 valid_private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ]; }
-valid_private_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 700 ]; }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
 valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s' "$1" | grep -q '[^0-9a-f]' ;; *) return 1;; esac; }
 valid_direct_authority() { [ "$1" = direct-captain ]; }
-valid_thread() { case "$1" in ''|*[$'\r\n']*|*[[:space:]]*) return 1;; *) [ "${#1}" -le 512 ];; esac; }
 
 COMMAND=${1:-}
 case "$COMMAND" in preflight|approve|correct|verify|verify-current) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
@@ -48,15 +45,13 @@ CONTRACT=''
 FINGERPRINT=''
 AUTHORITY=''
 EVIDENCE=''
-SLACK_THREAD=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --origin|--contract|--fingerprint|--authority|--evidence|--approved-authority|--approval-evidence|--slack-thread)
+    --origin|--contract|--fingerprint|--authority|--evidence|--approved-authority|--approval-evidence)
       key=${1#--}; shift; [ "$#" -gt 0 ] || die "--$key needs a value"
       case "$key" in
         origin) ORIGIN=$1;; contract) CONTRACT=$1;; fingerprint) FINGERPRINT=$1;;
         authority|approved-authority) AUTHORITY=$1;; evidence|approval-evidence) EVIDENCE=$1;;
-        slack-thread) SLACK_THREAD=$1;;
       esac
       ;;
     *) usage >&2; exit 2;;
@@ -66,8 +61,6 @@ done
 
 REC_DIR="$DATA/$ID"
 RECORD="$REC_DIR/ship-preflight.json"
-BRIDGE_DIR="$STATE/ship-approval-bridge"
-BRIDGE_RECORD="$BRIDGE_DIR/$ID.json"
 
 prepare_dir() {
   if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
@@ -98,38 +91,16 @@ validate_direct_approval() {
   [ -n "$evidence" ] || die "approval evidence is required"
   [ "$(printf '%s' "$evidence" | wc -c | tr -d ' ')" -le "$MAX_EVIDENCE_BYTES" ] || die "approval evidence exceeds the bounded size"
 }
-validate_slack_bridge_approval() {
-  local fingerprint=$1 thread=$2 bridge_json
-  valid_private_dir "$BRIDGE_DIR" || die "no valid private Slack approval bridge directory"
-  valid_private "$BRIDGE_RECORD" || die "no verified Slack approval bridge record"
-  jq -e --arg id "$ID" --arg fingerprint "$fingerprint" --arg thread "$thread" '
-    .schema_version == 1 and
-    .bridge == "firstmate-slack-approval-bridge" and
-    .bridge_allowlisted == true and
-    .verified_owner == true and
-    .task_id == $id and
-    .fingerprint == $fingerprint and
-    .thread_id == $thread and
-    .decision == "approved"
-  ' "$BRIDGE_RECORD" >/dev/null || die "Slack approval bridge record is not trusted for this task, thread, and contract"
-  bridge_json=$(jq -cS '{bridge,task_id,fingerprint,thread_id,decision}' "$BRIDGE_RECORD") || die "malformed Slack approval bridge record"
-  BRIDGE_EVIDENCE="bridge-record-sha256:$(sha256_text "$bridge_json")"
-  BRIDGE_APPROVAL=$(jq -cn --arg evidence "$BRIDGE_EVIDENCE" --argjson bridge "$bridge_json" \
-    '{authority:"verified-slack-bridge",evidence:$evidence,bridge:$bridge,complete_plan_bypass:false}')
-}
-validate_stored_slack_approval() {
-  local fingerprint=$1 thread=$2
-  jq -e --arg id "$ID" --arg fingerprint "$fingerprint" --arg thread "$thread" '
-    .approval.authority == "verified-slack-bridge" and
-    (.approval.evidence | type == "string" and test("^bridge-record-sha256:[0-9a-f]{64}$")) and
-    .approval.bridge == {
-      bridge:"firstmate-slack-approval-bridge",
-      task_id:$id,
-      fingerprint:$fingerprint,
-      thread_id:$thread,
-      decision:"approved"
-    }
-  ' "$RECORD" >/dev/null || die "preflight lacks verified Slack bridge approval"
+validate_bridge_dispatched_approval() {
+  jq -e '
+    .approval == {
+      authority:"agent-bridge",
+      evidence:"bridge-dispatched",
+      approved_at:.approval.approved_at,
+      complete_plan_bypass:false
+    } and
+    (.approval.approved_at | type == "number")
+  ' "$RECORD" >/dev/null || die "preflight lacks bridge-dispatched authorization"
 }
 read_record() {
   local record_contract
@@ -139,7 +110,6 @@ read_record() {
     .workflow == "ship-end-to-end" and
     (.fingerprint | type == "string" and test("^[0-9a-f]{64}$")) and
     (.origin == "direct" or .origin == "slack") and
-    (if .origin == "slack" then (.slack_thread | type == "string" and length > 0) else (.slack_thread? == null) end) and
     (.state == "awaiting_approval" or .state == "approved") and
     (.contract | type == "object")
   ' "$RECORD" >/dev/null || die "malformed preflight record"
@@ -161,7 +131,7 @@ lock_transition() {
   trap 'fm_lock_release "$PREFLIGHT_LOCK" || true' EXIT
 }
 verify_record() {
-  local fingerprint=$1 origin authority evidence bypass approved_at thread
+  local fingerprint=$1 origin authority evidence bypass approved_at
   [ "$(jq -r '.state' "$RECORD")" = approved ] || die "preflight approval is missing"
   [ "$(jq -r '.fingerprint' "$RECORD")" = "$fingerprint" ] || die "preflight fingerprint does not match the approved contract"
   origin=$(jq -r '.origin' "$RECORD")
@@ -170,8 +140,7 @@ verify_record() {
     evidence=$(jq -r '.approval.evidence // ""' "$RECORD")
     validate_direct_approval "$authority" "$evidence"
   else
-    thread=$(jq -r '.slack_thread' "$RECORD")
-    validate_stored_slack_approval "$fingerprint" "$thread"
+    validate_bridge_dispatched_approval
   fi
   bypass=$(jq -r 'if (.approval | has("complete_plan_bypass")) then .approval.complete_plan_bypass else "" end' "$RECORD")
   case "$bypass" in
@@ -188,43 +157,42 @@ verify_record() {
 case "$COMMAND" in
   preflight)
     case "$ORIGIN" in direct|slack) ;; *) die "--origin must be direct or slack";; esac
-    case "$ORIGIN" in
-      direct) [ -z "$SLACK_THREAD" ] || die "--slack-thread applies only to Slack preflight" ;;
-      slack) valid_thread "$SLACK_THREAD" || die "Slack preflight requires a safe --slack-thread" ;;
-    esac
     validate_contract
     prepare_dir
     lock_transition
     [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ] || die "preflight already exists; use correct to replace an unapproved contract"
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
     FP=$(sha256_text "$CANONICAL_CONTRACT")
-    if [ -n "$AUTHORITY" ] || [ -n "$EVIDENCE" ]; then
-      [ "$ORIGIN" = direct ] || die "Slack approval must come from the verified bridge record"
-      validate_direct_approval "$AUTHORITY" "$EVIDENCE"
-      jq -e '.complete_plan_approved == true' "$CONTRACT" >/dev/null || die "approved-complete-plan bypass requires complete_plan_approved=true"
-      jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:$authority,evidence:$evidence,approved_at:$now,complete_plan_bypass:true}}' | publish
-    else
-      jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg thread "$SLACK_THREAD" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now} + (if $origin == "slack" then {slack_thread:$thread} else {} end)' | publish
-    fi
+    case "$ORIGIN" in
+      direct)
+        if [ -n "$AUTHORITY" ] || [ -n "$EVIDENCE" ]; then
+          validate_direct_approval "$AUTHORITY" "$EVIDENCE"
+          jq -e '.complete_plan_approved == true' "$CONTRACT" >/dev/null || die "approved-complete-plan bypass requires complete_plan_approved=true"
+          jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" --argjson now "$NOW" \
+            '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:$authority,evidence:$evidence,approved_at:$now,complete_plan_bypass:true}}' | publish
+        else
+          jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --argjson now "$NOW" \
+            '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now}' | publish
+        fi
+        ;;
+      slack)
+        [ -z "$AUTHORITY" ] && [ -z "$EVIDENCE" ] || die "Slack preflight cannot accept caller-supplied authority or evidence"
+        jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --argjson now "$NOW" \
+          '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:"agent-bridge",evidence:"bridge-dispatched",approved_at:$now,complete_plan_bypass:false}}' | publish
+        ;;
+    esac
     printf 'fingerprint=%s\n' "$FP"
     ;;
   approve)
     valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
     lock_transition
     read_record
+    origin=$(jq -r '.origin' "$RECORD")
+    [ "$origin" != slack ] || die "Slack approval is authorized only by Agent bridge dispatch"
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "preflight is not awaiting approval"
     [ "$(jq -r '.fingerprint' "$RECORD")" = "$FINGERPRINT" ] || die "approval fingerprint does not match the current contract"
-    origin=$(jq -r '.origin' "$RECORD")
-    if [ "$origin" = direct ]; then
-      validate_direct_approval "$AUTHORITY" "$EVIDENCE"
-      APPROVAL=$(jq -cn --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" '{authority:$authority,evidence:$evidence,complete_plan_bypass:false}')
-    else
-      [ -z "$AUTHORITY" ] && [ -z "$EVIDENCE" ] || die "Slack approval cannot use caller-supplied authority or evidence"
-      validate_slack_bridge_approval "$FINGERPRINT" "$(jq -r '.slack_thread' "$RECORD")"
-      APPROVAL=$BRIDGE_APPROVAL
-    fi
+    validate_direct_approval "$AUTHORITY" "$EVIDENCE"
+    APPROVAL=$(jq -cn --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" '{authority:$authority,evidence:$evidence,complete_plan_bypass:false}')
     jq --arg fp "$FINGERPRINT" --argjson approval "$APPROVAL" --argjson now "$NOW" \
       'if .state == "awaiting_approval" and .fingerprint == $fp then .state="approved" | .approval=($approval + {approved_at:$now}) else error("preflight changed during approval") end' "$RECORD" | publish
     ;;
@@ -236,9 +204,8 @@ case "$COMMAND" in
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
     FP=$(sha256_text "$CANONICAL_CONTRACT")
     origin=$(jq -r '.origin' "$RECORD")
-    thread=$(jq -r '.slack_thread // ""' "$RECORD")
-    jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$origin" --arg thread "$thread" --argjson now "$NOW" \
-      '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now} + (if $origin == "slack" then {slack_thread:$thread} else {} end)' | publish
+    jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$origin" --argjson now "$NOW" \
+      '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now}' | publish
     printf 'fingerprint=%s\n' "$FP"
     ;;
   verify)

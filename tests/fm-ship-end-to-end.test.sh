@@ -19,14 +19,6 @@ preflight_env() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
 }
 
-write_slack_bridge_approval() {
-  local home=$1 id=$2 fingerprint=$3 thread=$4 bridge="$home/state/ship-approval-bridge"
-  mkdir -p "$bridge"
-  chmod 700 "$bridge"
-  printf '%s\n' "{\"schema_version\":1,\"bridge\":\"firstmate-slack-approval-bridge\",\"bridge_allowlisted\":true,\"verified_owner\":true,\"task_id\":\"$id\",\"fingerprint\":\"$fingerprint\",\"thread_id\":\"$thread\",\"decision\":\"approved\"}" > "$bridge/$id.json"
-  chmod 600 "$bridge/$id.json"
-}
-
 test_direct_and_slack_preflight_authority() {
   local home="$TMP_ROOT/preflight" contract fp out status
   mkdir -p "$home/data" "$home/state"
@@ -46,25 +38,22 @@ test_direct_and_slack_preflight_authority() {
   [ "$status" -ne 0 ] || fail "direct preflight must not accept Slack authority"
   assert_contains "$out" "not awaiting approval" "re-approval should not mutate an approved direct record"
 
-  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --slack-thread slack-thread-a1 --contract "$contract") || fail "slack preflight should create a record"
+  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract" --authority direct-captain --evidence 'caller supplied' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Slack preflight must reject caller-supplied authority"
+  assert_contains "$out" "caller-supplied authority" "Slack authority refusal was unclear"
+  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract") || fail "bridge-dispatched Slack preflight should create a record"
   fp=${out#fingerprint=}
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority direct-captain --evidence 'message text' 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "untrusted Slack self-approval must refuse"
-  assert_contains "$out" "caller-supplied authority" "Slack self-approval refusal was unclear"
+  [ "$status" -ne 0 ] || fail "Slack approval must remain bridge-owned"
+  assert_contains "$out" "Agent bridge dispatch" "Slack approval refusal was unclear"
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "Slack approval without a bridge record must refuse"
-  assert_contains "$out" "Slack approval bridge" "missing Slack bridge refusal was unclear"
-  write_slack_bridge_approval "$home" slack-a1 "$fp" other-thread
-  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a different Slack thread must not approve this contract"
-  assert_contains "$out" "not trusted for this task, thread, and contract" "same-thread Slack refusal was unclear"
-  write_slack_bridge_approval "$home" slack-a1 "$fp" slack-thread-a1
-  preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" >/dev/null || fail "verified same-thread Slack approval should work"
-  preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "verified Slack approval should verify"
-  pass "typed direct and bridge-verified Slack preflights preserve approval authority"
+  [ "$status" -ne 0 ] || fail "Slack approval command must remain bridge-owned"
+  assert_contains "$out" "Agent bridge dispatch" "Slack bridge-only refusal was unclear"
+  preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "bridge-dispatched Slack preflight should verify"
+  pass "typed direct and bridge-dispatched Slack preflights preserve approval authority"
 }
 
 test_grouped_questions_and_bounded_contract() {
