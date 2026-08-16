@@ -401,7 +401,7 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
   local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
@@ -433,6 +433,8 @@ task_json_lines() {
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
     pr=$(meta_value "$meta" pr)
+    x_thread_url=$(meta_value "$meta" x_thread_url)
+    x_request=$(meta_value "$meta" x_request)
     pr_source=meta
     if [ -z "$pr" ]; then
       pr_from_status=$(first_pr_url_in_file "$status_log" || true)
@@ -543,6 +545,8 @@ task_json_lines() {
       --arg remote_host "$remote_host" \
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
+      --arg x_thread_url "$x_thread_url" \
+      --arg x_request "$x_request" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
@@ -582,6 +586,8 @@ task_json_lines() {
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        x_thread_url:($x_thread_url | if . == "" then null else . end),
+        x_request:($x_request | if . == "" then null else . end),
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

@@ -11,6 +11,7 @@
 #   x_followups=<n>            follow-ups already posted against this binding
 #   x_platform=<platform>      target platform, when known
 #   x_reply_max_chars=<n>      target split budget, when known
+#   x_thread_url=<https URL>    source thread URL, when safely present
 #
 # A fresh link always starts x_followups at 0 and uses the current time for
 # x_request_ts. --carry-count <n> and --carry-ts <epoch> are a required pair for
@@ -188,6 +189,7 @@ fmx_load_config
 REQ_PLATFORM=
 REQ_EXPLICIT_MAX=
 REQ_REPLY_MAX=
+REQ_THREAD_URL=
 if [ -n "$CARRY_PLATFORM" ]; then
   REQ_PLATFORM=$CARRY_PLATFORM
 fi
@@ -203,6 +205,10 @@ if [ -z "$CARRY_TS" ]; then
   REQ_PLATFORM=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')
   REQ_EXPLICIT_MAX=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')
   REQ_REPLY_MAX=$REQ_EXPLICIT_MAX
+  INBOX="$STATE/x-inbox/$RID.json"
+  if fmx_private_artifact_file_valid "$STATE/x-inbox" "$RID.json" 600; then
+    REQ_THREAD_URL=$(jq -r '[.thread_url?,.permalink?,.url?,.thread?.url?] | map(select(type == "string" and startswith("https://"))) | .[0] // ""' "$INBOX" 2>/dev/null || true)
+  fi
 fi
 
 if [ -n "$CARRY_TS" ] && { [ -z "$REQ_PLATFORM" ] || [ -z "$REQ_REPLY_MAX" ]; }; then
@@ -226,7 +232,7 @@ else
   esac
 fi
 
-if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX"; then
+if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX" "$REQ_THREAD_URL"; then
   echo "fm-x-link: failed to record the link in state/$ID.meta" >&2
   exit 1
 fi

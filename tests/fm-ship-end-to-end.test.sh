@@ -1,0 +1,234 @@
+#!/usr/bin/env bash
+# Behavior tests for the two-phase ship preflight record and private dashboard.
+set -u
+
+. "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+
+PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
+DASHBOARD="$ROOT/bin/fm-dashboard.sh"
+TMP_ROOT=$(fm_test_tmproot fm-ship-end-to-end)
+
+make_contract() {
+  local path=$1 complete=${2:-false}
+  printf '%s\n' '{"recommendation":"Build it","outcome":"A tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[],"complete_plan_approved":'"$complete"'}' > "$path"
+}
+
+preflight_env() {
+  local home=$1 now=${2:-100}
+  shift 2
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
+}
+
+test_direct_and_slack_preflight_authority() {
+  local home="$TMP_ROOT/preflight" contract fp out status
+  mkdir -p "$home/data"
+  contract="$home/contract.json"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight direct-a1 --origin direct --contract "$contract") || fail "direct preflight should create a record"
+  fp=${out#fingerprint=}
+  assert_grep '"state": "awaiting_approval"' "$home/data/direct-a1/ship-preflight.json" "direct preflight did not await approval"
+  out=$(preflight_env "$home" 101 verify direct-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "unapproved preflight must refuse verification"
+  assert_contains "$out" "approval is missing" "unapproved refusal was unclear"
+  preflight_env "$home" 102 approve direct-a1 --fingerprint "$fp" --authority direct-captain --evidence 'captain approved' >/dev/null || fail "direct approval should work"
+  preflight_env "$home" 103 verify direct-a1 --fingerprint "$fp" >/dev/null || fail "approved direct preflight should verify"
+  out=$(preflight_env "$home" 103 approve direct-a1 --fingerprint "$fp" --authority trusted-slack-owner --evidence wrong 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "direct preflight must not accept Slack authority"
+  assert_contains "$out" "not awaiting approval" "re-approval should not mutate an approved direct record"
+
+  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract") || fail "slack preflight should create a record"
+  fp=${out#fingerprint=}
+  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority direct-captain --evidence 'message text' 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "untrusted Slack self-approval must refuse"
+  assert_contains "$out" "untrusted Slack" "Slack self-approval refusal was unclear"
+  preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority trusted-slack-owner --evidence 'verified captain approval' >/dev/null || fail "trusted Slack approval should work"
+  pass "typed direct and Slack preflights preserve approval authority"
+}
+
+test_grouped_questions_and_bounded_contract() {
+  local home="$TMP_ROOT/grouped" contract="$TMP_ROOT/grouped-contract.json" out status
+  mkdir -p "$home/data"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"A tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":["Choose A or B","Confirm rollout"]}' > "$contract"
+  out=$(preflight_env "$home" 100 preflight grouped-a1 --origin direct --contract "$contract") || fail "grouped questions must be accepted in one contract"
+  jq -e '.contract.questions == ["Choose A or B","Confirm rollout"] and .state == "awaiting_approval"' "$home/data/grouped-a1/ship-preflight.json" >/dev/null \
+    || fail "preflight did not preserve grouped questions"
+  printf '%040000d\n' 0 > "$contract"
+  out=$(FM_SHIP_PREFLIGHT_MAX_CONTRACT_BYTES=8 preflight_env "$home" 101 preflight too-large-a1 --origin direct --contract "$contract" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized contracts must fail closed"
+  assert_contains "$out" "bounded preflight size" "oversized contract refusal was unclear"
+  pass "preflight keeps one grouped question set and bounds input"
+}
+
+test_correction_bypass_and_stale_refusal() {
+  local home="$TMP_ROOT/correction" contract changed fp out status
+  mkdir -p "$home/data"
+  contract="$home/contract.json"; changed="$home/changed.json"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight correction-a1 --origin direct --contract "$contract") || fail "preflight create failed"
+  fp=${out#fingerprint=}
+  make_contract "$changed"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Changed tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$changed"
+  out=$(preflight_env "$home" 101 correct correction-a1 --contract "$changed") || fail "correction should replace unapproved contract"
+  fp2=${out#fingerprint=}
+  [ "$fp" != "$fp2" ] || fail "correction should change the fingerprint"
+  out=$(preflight_env "$home" 102 approve correction-a1 --fingerprint "$fp" --authority direct-captain --evidence approved 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mismatched approval must refuse"
+  preflight_env "$home" 102 approve correction-a1 --fingerprint "$fp2" --authority direct-captain --evidence approved >/dev/null || fail "current approval failed"
+  out=$(FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify correction-a1 --fingerprint "$fp2" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "stale approval must refuse"
+  assert_contains "$out" "stale" "stale refusal was unclear"
+
+  make_contract "$contract" true
+  out=$(preflight_env "$home" 200 preflight bypass-a1 --origin direct --contract "$contract" --approved-authority direct-captain --approval-evidence 'approved complete plan') || fail "approved complete plan should bypass duplicate preflight"
+  preflight_env "$home" 201 verify bypass-a1 --fingerprint "${out#fingerprint=}" >/dev/null || fail "approved complete plan did not verify"
+  pass "corrections, stale approvals, and approved complete plans fail closed"
+}
+
+test_preflight_rejects_tampering_and_future_approvals() {
+  local home="$TMP_ROOT/tamper" contract="$TMP_ROOT/tamper-contract.json" out fp status
+  mkdir -p "$home/data"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight tamper-a1 --origin direct --contract "$contract") || fail "tamper preflight create failed"
+  fp=${out#fingerprint=}
+  preflight_env "$home" 100 approve tamper-a1 --fingerprint "$fp" --authority direct-captain --evidence approved >/dev/null || fail "tamper approval failed"
+  out=$(preflight_env "$home" 99 verify tamper-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "future approvals must refuse verification"
+  assert_contains "$out" "in the future" "future approval refusal was unclear"
+  jq '.contract.outcome = "changed after approval"' "$home/data/tamper-a1/ship-preflight.json" > "$home/tampered.json"
+  chmod 600 "$home/tampered.json"
+  mv "$home/tampered.json" "$home/data/tamper-a1/ship-preflight.json"
+  out=$(preflight_env "$home" 101 verify tamper-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a record whose contract changed after approval must refuse"
+  assert_contains "$out" "fingerprint does not match" "tampered contract refusal was unclear"
+  pass "preflight verifies its approved contract and approval clock"
+}
+
+test_spawn_enforces_the_approved_fingerprint() {
+  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" out fp status
+  mkdir -p "$home/data" "$home/state" "$home/config" "$project"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight spawn-a1 --origin direct --contract "$contract") || fail "spawn preflight create failed"
+  fp=${out#fingerprint=}
+  preflight_env "$home" 101 approve spawn-a1 --fingerprint "$fp" --authority direct-captain --evidence approved >/dev/null || fail "spawn approval failed"
+  mkdir -p "$home/data/spawn-a1"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' 'Ship preflight: fingerprint=0000000000000000000000000000000000000000000000000000000000000000' > "$home/data/spawn-a1/brief.md"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" spawn-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "mismatched preflight fingerprint must refuse spawn"
+  assert_contains "$out" "preflight fingerprint does not match" "spawn did not report the preflight mismatch"
+  assert_absent "$home/state/spawn-a1.meta" "preflight refusal wrote task metadata"
+  pass "spawn verifies the approved preflight before creating an endpoint"
+}
+
+write_snapshot() {
+  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} json
+  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s"},"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$decision")
+  printf '%s\n' '#!/usr/bin/env bash' > "$file"
+  printf "printf '%%s\\n' '%s'\n" "$json" >> "$file"
+  chmod +x "$file"
+}
+
+test_dashboard_projection_and_active_time() {
+  local home="$TMP_ROOT/dashboard" mock="$TMP_ROOT/dashboard-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "initial dashboard refresh failed"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=130 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
+  write_snapshot "$mock" paused '[]' 'https://slack.example/thread/1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=140 "$DASHBOARD" refresh >/dev/null || fail "pause dashboard refresh failed"
+  write_snapshot "$mock" parked '[{"key":"ask","verb":"needs-decision","summary":"Choose"}]' 'https://slack.example/thread/1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=150 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  jq -e '(.projection.needs_you | length) == 1 and .projection.needs_you[0].slack_thread_url == "https://slack.example/thread/1"' "$record" >/dev/null || fail "dashboard did not preserve the Slack decision link"
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=200 "$DASHBOARD" refresh >/dev/null || fail "resume dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  [ "$(stat -c %a "$record")" = 600 ] || fail "dashboard record must be mode 0600"
+  jq -e '.schema_version == 1 and .projection.in_progress[0].phase == "Building" and .projection.in_progress[0].active_seconds == 40 and (.projection.needs_you | length) == 0 and .projection.empty_text == "Nothing needs you."' "$record" >/dev/null || fail "dashboard projection or timing was wrong"
+  find "$home/data" -maxdepth 1 -name '.dashboard.*' | grep -q . && fail "dashboard refresh left a non-atomic temporary file"
+  pass "dashboard uses one private atomic projection with paused time excluded"
+}
+
+test_dashboard_filters_and_checking_phase() {
+  local home="$TMP_ROOT/dashboard-filter" mock="$TMP_ROOT/dashboard-filter-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[{"key":"d1","verb":"needs-decision","summary":"Choose"},{"key":"b1","verb":"blocked","summary":"Ignore duplicate"}]' '' run-step 'ci running'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "checking dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Checking",active_seconds:0}] and .projection.needs_you == []' "$record" >/dev/null \
+    || fail "dashboard must not duplicate a stale decision while checking"
+  write_snapshot "$mock" parked '[{"key":"d1","verb":"needs-decision","summary":"Choose"},{"key":"b1","verb":"blocked","summary":"Ignore duplicate"}]' '' run-step 'parked at authority gate'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=105 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
+  jq -e '.projection.in_progress == [] and (.projection.needs_you | length) == 1 and .projection.needs_you[0].kind == "needs-decision"' "$record" >/dev/null \
+    || fail "dashboard must show one genuine decision"
+  write_snapshot "$mock" failed '[]' '' run-step 'run failed'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "failed dashboard refresh failed"
+  jq -e '.projection.in_progress == [] and .projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker stopped",slack_thread_url:null}]' "$record" >/dev/null \
+    || fail "dashboard must surface only unrecoverable stops after work ends: $(jq -c . "$record")"
+  pass "dashboard maps checking work and filters duplicate or stale alerts"
+}
+
+test_dashboard_keeps_only_active_tasks() {
+  local home="$TMP_ROOT/dashboard-active" mock="$TMP_ROOT/dashboard-active-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[]'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
+  write_snapshot "$mock" done '[]'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "completed dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  jq -e '.projection.in_progress == [] and .projection.needs_you == [] and .technical.tasks == []' "$record" >/dev/null \
+    || fail "dashboard must not retain completed tasks as active work"
+  pass "dashboard retains only active task records"
+}
+
+test_preflight_is_private_and_does_not_touch_lifecycle() {
+  local home="$TMP_ROOT/private" contract="$TMP_ROOT/private-contract.json" out
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight private-a1 --origin direct --contract "$contract") || fail "private preflight create failed"
+  [ -f "$home/data/private-a1/ship-preflight.json" ] || fail "preflight did not write its private record"
+  [ ! -e "$home/state/private-a1.meta" ] || fail "preflight must not create a worker lifecycle record"
+  [ ! -e "$home/projects" ] || fail "preflight must not create or modify a project copy"
+  jq -e '.state == "awaiting_approval" and .origin == "direct"' "$home/data/private-a1/ship-preflight.json" >/dev/null \
+    || fail "private preflight record did not preserve its approval boundary"
+  pass "preflight remains private and separate from worker and production lifecycle"
+}
+
+test_dashboard_rejects_unsafe_or_oversized_inputs() {
+  local home="$TMP_ROOT/dashboard-safety" mock="$TMP_ROOT/dashboard-safety-snapshot" record out status
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[]'
+  record="$home/data/dashboard.json"
+  printf '%s\n' '{"schema_version":1,"technical":{"tasks":[]}}' > "$record"
+  chmod 644 "$record"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "dashboard must reject an unsafe existing record"
+  assert_contains "$out" "existing dashboard record is unsafe" "unsafe record refusal was unclear"
+  chmod 600 "$record"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_MAX_SNAPSHOT_BYTES=8 FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "dashboard must bound its canonical snapshot input"
+  assert_contains "$out" "snapshot exceeds the bounded size" "bounded snapshot refusal was unclear"
+  pass "dashboard rejects unsafe records and bounds canonical input"
+}
+
+test_direct_and_slack_preflight_authority
+test_grouped_questions_and_bounded_contract
+test_correction_bypass_and_stale_refusal
+test_preflight_rejects_tampering_and_future_approvals
+test_spawn_enforces_the_approved_fingerprint
+test_dashboard_projection_and_active_time
+test_dashboard_filters_and_checking_phase
+test_dashboard_keeps_only_active_tasks
+test_preflight_is_private_and_does_not_touch_lifecycle
+test_dashboard_rejects_unsafe_or_oversized_inputs
+echo "# all fm-ship-end-to-end tests passed"
