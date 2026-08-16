@@ -20,6 +20,7 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
+PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -57,6 +58,18 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
     FM_PROJECTS_OVERRIDE="$TMP_ROOT/projects-unused" FM_CONFIG_OVERRIDE="$home/config" \
     FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux PATH="$fakebin:$PATH" \
     "$SPAWN" "$@" 2>&1
+}
+
+approve_preflight() {  # <home> <task-id>
+  local home=$1 id=$2 contract output fingerprint
+  contract="$home/$id-contract.json"
+  printf '%s\n' '{"recommendation":"promote","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"local","external_boundaries":"none","questions":[]}' > "$contract"
+  output=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$PREFLIGHT" preflight "$id" --origin direct --contract "$contract") || return 1
+  fingerprint=${output#fingerprint=}
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$PREFLIGHT" approve "$id" --fingerprint "$fingerprint" --authority direct-captain --evidence approved || return 1
+  printf '%s\n' "$fingerprint"
 }
 
 # A ship spawn must stop when its delivery contract was never decided or cannot be
@@ -135,11 +148,13 @@ EOF
 
   # The agreeing case clears the check and only fails later, at the refusing tmux.
   write_brief "$home" delivery-agree-b2 direct-PR
+  approve_preflight "$home" delivery-agree-b2 >/dev/null || fail "approved agreement preflight could not be created"
   out=$(run_spawn "$home" "$fakebin" delivery-agree-b2 "$proj" claude --mode direct-PR --yolo off)
   assert_not_contains "$out" "delivery mismatch" "an agreeing mode was reported as a mismatch"
 
   # A brief scaffolded before the contract line existed warns once and continues.
   write_brief "$home" delivery-legacy-b3
+  approve_preflight "$home" delivery-legacy-b3 >/dev/null || fail "approved legacy preflight could not be created"
   out=$(run_spawn "$home" "$fakebin" delivery-legacy-b3 "$proj" claude --mode local-only --yolo off)
   assert_contains "$out" "records no delivery contract line" "a legacy brief did not warn about its missing contract"
   assert_not_contains "$out" "delivery mismatch" "a legacy brief was treated as a mismatch"
@@ -161,6 +176,7 @@ test_spawn_notices_a_rigor_downgrade_against_the_registry() {
 $rec
 EOF
     write_brief "$home" "delivery-dev-$n" "$mode"
+    approve_preflight "$home" "delivery-dev-$n" >/dev/null || fail "$label: approved preflight could not be created"
     out=$(run_spawn "$home" "$fakebin" "delivery-dev-$n" "$proj" claude --mode "$mode" --yolo off)
     case "$expect" in
       notice)
@@ -201,7 +217,7 @@ EOF
 # Promotion is where a scout's ship contract is finally decided, so it requires the
 # same explicit values and writes them into the task's durable record.
 test_promote_requires_and_records_the_delivery_contract() {
-  local home meta out status
+  local home meta out status fingerprint
   home="$TMP_ROOT/promote/home"
   mkdir -p "$home/state"
   meta="$home/state/promote-d1.meta"
@@ -229,10 +245,18 @@ test_promote_requires_and_records_the_delivery_contract() {
 
   out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
   status=$?
+  [ "$status" -ne 0 ] || fail "promotion without an approved preflight should exit non-zero"
+  assert_contains "$out" "no valid private preflight record" "promotion without preflight did not fail closed"
+  assert_grep 'kind=scout' "$meta" "preflight refusal changed the task record"
+
+  fingerprint=$(approve_preflight "$home" promote-d1) || fail "approved promotion preflight could not be created"
+  out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$PROMOTE" promote-d1 --mode direct-PR --yolo on 2>&1)
+  status=$?
   expect_code 0 "$status" "a promotion carrying both flags should succeed"
   assert_grep 'kind=ship' "$meta" "promotion did not restore ship teardown protection"
   assert_grep 'mode=direct-PR' "$meta" "promotion did not record the decided delivery mode"
   assert_grep 'yolo=on' "$meta" "promotion did not record the decided approval posture"
+  assert_grep "preflight_fingerprint=$fingerprint" "$meta" "promotion did not retain its approved preflight fingerprint"
   assert_contains "$out" "ship instructions for mode=direct-PR" "promotion hint did not carry the decided mode"
   [ "$(grep -c '^mode=' "$meta")" = 1 ] || fail "promotion left more than one mode= line in the task record"
   pass "fm-promote: promotion requires the delivery contract and records it exactly once"
