@@ -404,7 +404,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at status_mtime transition_file transition_state transition_epoch transition_meta_mtime meta_mtime pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -450,6 +450,30 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    current_transition_at=null
+    if [ "$current_source" = status-log ]; then
+      status_mtime=$(stat -f '%m' "$status_log" 2>/dev/null || stat -c '%Y' "$status_log" 2>/dev/null || true)
+      case "$status_mtime" in
+        ''|*[!0-9]*) ;;
+        *) current_transition_at=$status_mtime ;;
+      esac
+    fi
+    transition_file="$STATE/dashboard-transitions/$id.json"
+    meta_mtime=$(stat -f '%m' "$meta" 2>/dev/null || stat -c '%Y' "$meta" 2>/dev/null || true)
+    if [ -f "$transition_file" ] && [ ! -L "$transition_file" ] \
+       && [ "$(stat -f %Lp "$transition_file" 2>/dev/null || stat -c %a "$transition_file" 2>/dev/null || true)" = 600 ]; then
+      IFS=$'\t' read -r transition_state transition_epoch transition_meta_mtime < <(
+        jq -r '[.state // "",(.transition_at // "" | tostring),(.meta_mtime // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
+      )
+      case "$transition_epoch:$transition_meta_mtime" in
+        *[!0-9:]*|:*) ;;
+        *)
+          if [ "$transition_state" = "$current_state" ] && [ "$transition_meta_mtime" = "$meta_mtime" ]; then
+            current_transition_at=$transition_epoch
+          fi
+          ;;
+      esac
+    fi
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -552,6 +576,7 @@ task_json_lines() {
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
+      --argjson current_transition_at "$current_transition_at" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -579,7 +604,7 @@ task_json_lines() {
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,freshness:"fresh"}),
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive

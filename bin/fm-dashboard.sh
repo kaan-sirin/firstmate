@@ -16,11 +16,10 @@
 # checkpoint, provenance, and resolved stop; `technical.reconciliation` names
 # the canonical state sources. All technical fields are private and additive.
 #
-# The active-time accumulator uses the previous successful record as its
-# checkpoint. A delta is added only when the preceding state was active
-# (`working`), so pauses and decision/blocked waits are excluded and a restart
-# does not reset elapsed work. `FM_DASHBOARD_NOW` supplies a deterministic epoch
-# for tests; production uses date +%s.
+# The active-time accumulator stores each canonical state transition. A reported
+# transition time bounds every working interval, so paused time is excluded and a
+# restart does not reset elapsed work. `FM_DASHBOARD_NOW` supplies a deterministic
+# epoch for tests; production uses date +%s.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,15 +135,25 @@ RESULT=$(jq -n \
     . as $task | (prior_for(.id)) as $old
     | ($old.observed_at // $now) as $old_at
     | ($old.active_seconds // 0) as $old_seconds
-    | (if ($old.state == "working") then (($now - $old_at) | if . > 0 then . else 0 end) else 0 end) as $delta
+    | (.current_state.transition_at? // null) as $reported_transition
+    | (if ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now
+       then $reported_transition else null end) as $transition
+    | (if $old.state == "working" then
+         if .current_state.state == "working" then (($now - $old_at) | if . > 0 then . else 0 end)
+         elif $transition != null then (($transition - $old_at) | if . > 0 then . else 0 end)
+         else 0 end
+       elif .current_state.state == "working" and $transition != null then (($now - $transition) | if . > 0 then . else 0 end)
+       else 0 end) as $delta
     | (genuine_stop) as $stop
     | {id:.id,
        name:(.backlog.title // .id | clip(160)),
        state:.current_state.state,
        phase:(if active then phase else null end),
        active_seconds:($old_seconds + $delta),
-       active_since:(if active then (if $old.state == "working" then ($old.active_since // $now) else $now end) else null end),
+       active_since:(if active then (if $old.state == "working" then ($old.active_since // $transition // $now) else ($transition // $now) end) else null end),
+       state_transition_at:(if $transition != null then $transition elif $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),
        observed_at:$now,
+       recovery:(if .current_state.state == "unknown" then "automatic-recovery-pending" else null end),
        provenance:{origin:(if (.x_request? // "") != "" then "slack" else "direct" end),
                    slack_thread_url:thread_url},
        stop:$stop};
