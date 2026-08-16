@@ -913,7 +913,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
     echo "error: another lifecycle action is already running for task $ID" >&2
-    [ "$RECOVER_MISSING" -eq 1 ] && exit 4
+    [ "$RELAUNCH" -eq 1 ] && exit 4
     exit 1
   fi
 fi
@@ -1727,7 +1727,19 @@ if [ "$KIND" = ship ]; then
     echo "error: ship preflight record for $ID is missing or unsafe" >&2
     exit 1
   }
-  PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+  if [ "$RELAUNCH" -eq 1 ]; then
+    PREFLIGHT_FINGERPRINT=$(fm_meta_get "$RELAUNCH_META" preflight_fingerprint)
+    case "$PREFLIGHT_FINGERPRINT" in
+      ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+      *) false ;;
+    esac || {
+      echo "error: task $ID has no valid recorded preflight fingerprint" >&2
+      exit 1
+    }
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
+  else
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+  fi
   PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
   case "$PREFLIGHT_FINGERPRINT" in
     ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
