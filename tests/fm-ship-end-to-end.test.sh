@@ -16,12 +16,20 @@ make_contract() {
 preflight_env() {
   local home=$1 now=${2:-100}
   shift 2
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
+}
+
+write_slack_bridge_approval() {
+  local home=$1 id=$2 fingerprint=$3 thread=$4 bridge="$home/state/ship-approval-bridge"
+  mkdir -p "$bridge"
+  chmod 700 "$bridge"
+  printf '%s\n' "{\"schema_version\":1,\"bridge\":\"firstmate-slack-approval-bridge\",\"bridge_allowlisted\":true,\"verified_owner\":true,\"task_id\":\"$id\",\"fingerprint\":\"$fingerprint\",\"thread_id\":\"$thread\",\"decision\":\"approved\"}" > "$bridge/$id.json"
+  chmod 600 "$bridge/$id.json"
 }
 
 test_direct_and_slack_preflight_authority() {
   local home="$TMP_ROOT/preflight" contract fp out status
-  mkdir -p "$home/data"
+  mkdir -p "$home/data" "$home/state"
   contract="$home/contract.json"
   make_contract "$contract"
   out=$(preflight_env "$home" 100 preflight direct-a1 --origin direct --contract "$contract") || fail "direct preflight should create a record"
@@ -38,14 +46,25 @@ test_direct_and_slack_preflight_authority() {
   [ "$status" -ne 0 ] || fail "direct preflight must not accept Slack authority"
   assert_contains "$out" "not awaiting approval" "re-approval should not mutate an approved direct record"
 
-  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract") || fail "slack preflight should create a record"
+  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --slack-thread slack-thread-a1 --contract "$contract") || fail "slack preflight should create a record"
   fp=${out#fingerprint=}
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority direct-captain --evidence 'message text' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "untrusted Slack self-approval must refuse"
-  assert_contains "$out" "untrusted Slack" "Slack self-approval refusal was unclear"
-  preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority trusted-slack-owner --evidence 'verified captain approval' >/dev/null || fail "trusted Slack approval should work"
-  pass "typed direct and Slack preflights preserve approval authority"
+  assert_contains "$out" "caller-supplied authority" "Slack self-approval refusal was unclear"
+  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "Slack approval without a bridge record must refuse"
+  assert_contains "$out" "Slack approval bridge" "missing Slack bridge refusal was unclear"
+  write_slack_bridge_approval "$home" slack-a1 "$fp" other-thread
+  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a different Slack thread must not approve this contract"
+  assert_contains "$out" "not trusted for this task, thread, and contract" "same-thread Slack refusal was unclear"
+  write_slack_bridge_approval "$home" slack-a1 "$fp" slack-thread-a1
+  preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" >/dev/null || fail "verified same-thread Slack approval should work"
+  preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "verified Slack approval should verify"
+  pass "typed direct and bridge-verified Slack preflights preserve approval authority"
 }
 
 test_grouped_questions_and_bounded_contract() {
@@ -111,21 +130,20 @@ test_preflight_rejects_tampering_and_future_approvals() {
   pass "preflight verifies its approved contract and approval clock"
 }
 
-test_spawn_enforces_the_approved_fingerprint() {
+test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" out fp status
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
   out=$(preflight_env "$home" 100 preflight spawn-a1 --origin direct --contract "$contract") || fail "spawn preflight create failed"
   fp=${out#fingerprint=}
-  preflight_env "$home" 101 approve spawn-a1 --fingerprint "$fp" --authority direct-captain --evidence approved >/dev/null || fail "spawn approval failed"
   mkdir -p "$home/data/spawn-a1"
-  printf '%s\n' 'Delivery contract: mode=no-mistakes' 'Ship preflight: fingerprint=0000000000000000000000000000000000000000000000000000000000000000' > "$home/data/spawn-a1/brief.md"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/spawn-a1/brief.md"
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" spawn-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "mismatched preflight fingerprint must refuse spawn"
-  assert_contains "$out" "preflight fingerprint does not match" "spawn did not report the preflight mismatch"
+  [ "$status" -ne 0 ] || fail "unapproved durable preflight must refuse spawn"
+  assert_contains "$out" "preflight approval is missing" "spawn did not verify the durable preflight"
   assert_absent "$home/state/spawn-a1.meta" "preflight refusal wrote task metadata"
-  pass "spawn verifies the approved preflight before creating an endpoint"
+  pass "spawn verifies the durable preflight without a brief marker"
 }
 
 write_snapshot() {
@@ -225,7 +243,7 @@ test_direct_and_slack_preflight_authority
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
-test_spawn_enforces_the_approved_fingerprint
+test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_filters_and_checking_phase
 test_dashboard_keeps_only_active_tasks
