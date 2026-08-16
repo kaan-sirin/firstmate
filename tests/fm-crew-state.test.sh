@@ -1069,6 +1069,21 @@ test_resolved_answer_uses_canonical_transition() {
   pass "resolved answers use the canonical transition timestamp"
 }
 
+test_run_step_omits_observed_duration_timestamp() {
+  reset_fakes
+  local d out
+  d=$(new_case run-duration)
+  make_repo_on_branch "$d/wt" fm/feat-run-duration
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/run-duration.meta" "window=fm:fm-run-duration" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/feat-run-duration | sed 's/review,running,0,0/review,running,0,60000/')
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" run-duration)
+  assert_contains "$out" "state: working" "run-step duration fixture did not report working"
+  assert_not_contains "$out" "transition_at:" "run-step synthesized a timestamp from observed duration"
+  pass "run-step duration does not become a producer transition timestamp"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1383,6 +1398,7 @@ test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
 test_resolved_answer_uses_canonical_transition
+test_run_step_omits_observed_duration_timestamp
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_overrides_active_run_step

@@ -417,6 +417,25 @@ test_dashboard_busy_events_preserve_hidden_transitions() {
   pass "busy events persist exact active-time transitions"
 }
 
+test_dashboard_busy_events_replay_interrupted_transitions() {
+  local home="$TMP_ROOT/dashboard-busy-replay" fake_date gen record out status
+  mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-busy-replay-bin"
+  printf '%s\n' 'kind=ship' > "$home/state/busy-replay-a1.meta"
+  fake_date="$TMP_ROOT/dashboard-busy-replay-bin/date"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  gen=$(PATH="$TMP_ROOT/dashboard-busy-replay-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-replay-a1) || fail "busy replay arm failed"
+  out=$(PATH="$TMP_ROOT/dashboard-busy-replay-bin:$PATH" FM_FAKE_NOW=110 FM_BUSY_EVENT_TESTING=1 FM_BUSY_EVENT_TEST_INTERRUPT_AFTER_TRANSITION=1 "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-replay-a1 idle --gen "$gen" --source claude-hook --event stop 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "interrupted busy transition unexpectedly completed"
+  PATH="$TMP_ROOT/dashboard-busy-replay-bin:$PATH" FM_FAKE_NOW=120 "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-replay-a1 busy --gen "$gen" --source claude-hook --event user-prompt-submit \
+    || fail "later busy event did not replay the interrupted pause"
+  record="$home/state/dashboard-transitions/busy-replay-a1.json"
+  jq -e '.state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "replayed busy transition included the interrupted pause"
+  pass "busy events replay an interrupted transition before later writes"
+}
+
 test_dashboard_replays_spawn_busy_event_across_metadata_updates() {
   local home="$TMP_ROOT/dashboard-spawn-replay" fake_date gen record
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-spawn-bin"
@@ -600,6 +619,7 @@ test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
 test_status_event_persists_transition_before_status
 test_dashboard_busy_events_preserve_hidden_transitions
+test_dashboard_busy_events_replay_interrupted_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_relaunches_dead_endpoint
