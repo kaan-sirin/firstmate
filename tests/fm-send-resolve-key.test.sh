@@ -124,6 +124,8 @@ test_answer_send_closes_open_decision() {
   assert_contains "$(cat "$log")" "go with REST" "the answer text should reach the worker"
   grep -F 'resolved [key=api-shape]: answered: go with REST' "$home/state/t1.status" >/dev/null \
     || fail "fm-send did not append the closing resolved line:"$'\n'"$(cat "$home/state/t1.status")"
+  jq -e '.state == "working" and (.transition_at | type == "number")' "$home/state/dashboard-transitions/t1.json" >/dev/null \
+    || fail "fm-send did not record the answer-time working transition"
 
   out=$(drain_out "$home")
   if printf '%s' "$out" | grep -F 'OPEN DECISIONS' >/dev/null; then

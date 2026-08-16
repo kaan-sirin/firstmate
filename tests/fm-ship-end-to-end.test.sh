@@ -347,18 +347,25 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
 }
 
 test_status_event_persists_transition_before_status() {
-  local home="$TMP_ROOT/status-event" fake_date record
+  local home="$TMP_ROOT/status-event" fake_date record terminal_record
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/status-event-bin"
   printf '%s\n' 'kind=ship' > "$home/state/status-a1.meta"
   fake_date="$TMP_ROOT/status-event-bin/date"
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'working: implementation started' || fail "working status event failed"
-  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=110 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'done: implementation finished' || fail "terminal status event failed"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=110 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'needs-decision [key=implementation]: captain input required' || fail "decision status event failed"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=120 "$ROOT/bin/fm-status-event.sh" resolve "$home/state" status-a1 'resolved [key=implementation]: captain answered' || fail "resolution status event failed"
   record="$home/state/dashboard-transitions/status-a1.json"
-  jq -e '.state == "done" and .transition_at == 110 and .active_seconds == 10' "$record" >/dev/null \
+  jq -e '.state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
     || fail "status event did not persist canonical transition timing"
-  [ "$(wc -l < "$home/state/status-a1.status")" -eq 2 ] || fail "status event did not append both status lines"
+  [ "$(wc -l < "$home/state/status-a1.status")" -eq 3 ] || fail "status event did not append all status lines"
+  printf '%s\n' 'kind=ship' > "$home/state/status-terminal-a1.meta"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=200 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-terminal-a1 'done: implementation finished' || fail "terminal status event failed"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=210 "$ROOT/bin/fm-status-event.sh" resolve "$home/state" status-terminal-a1 'resolved [key=late]: captain answered' || fail "late resolution status event failed"
+  terminal_record="$home/state/dashboard-transitions/status-terminal-a1.json"
+  jq -e '.state == "done" and .transition_at == 200' "$terminal_record" >/dev/null \
+    || fail "late resolution reactivated a terminal task"
   pass "status events persist canonical transitions with status output"
 }
 

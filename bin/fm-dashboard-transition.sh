@@ -5,6 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
+  echo "       fm-dashboard-transition.sh append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
+  echo "       fm-dashboard-transition.sh resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
   echo "       fm-dashboard-transition.sh replay-busy <state-dir> <task-id>" >&2
   exit 2
 }
@@ -29,16 +31,33 @@ if [ "$ACTION" = replay-busy ]; then
   esac
   exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
 fi
-[ "$ACTION" = record ] || usage
-CURRENT=${4:-}
-AT=${5:-}
-case "$CURRENT" in working|parked|paused|blocked|failed|done|unknown) ;; *) usage ;; esac
+[ "$ACTION" = record ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || usage
+if [ "$ACTION" = resolve ]; then
+  CURRENT=working
+  AT=${4:-}
+  LINE=${5:-}
+else
+  CURRENT=${4:-}
+  AT=${5:-}
+  LINE=${6:-}
+fi
+case "$ACTION:$CURRENT" in
+  record:working|record:parked|record:paused|record:blocked|record:failed|record:done|record:unknown) ;;
+  append:|append:working|append:parked|append:paused|append:blocked|append:failed|append:done|append:unknown) ;;
+  resolve:working) ;;
+  *) usage ;;
+esac
 case "$AT" in ''|*[!0-9]*) usage ;; esac
+[ "$ACTION" != append ] && [ "$ACTION" != resolve ] || [ -n "$LINE" ] || usage
 
 META="$STATE/$ID.meta"
-[ -f "$META" ] && [ ! -L "$META" ] || exit 0
-incarnation=$(sed -n 's/^dashboard_incarnation=//p' "$META" | tail -1)
-case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
+has_meta=0
+if [ -f "$META" ] && [ ! -L "$META" ]; then
+  has_meta=1
+  incarnation=$(sed -n 's/^dashboard_incarnation=//p' "$META" | tail -1)
+  case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
+fi
+[ "$has_meta" = 1 ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || exit 0
 
 DIR="$STATE/dashboard-transitions"
 if [ -e "$DIR" ] || [ -L "$DIR" ]; then
@@ -58,7 +77,7 @@ prior_state=
 prior_incarnation=
 prior_at=
 prior_active=0
-if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
+if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   IFS=$'\t' read -r prior_state prior_incarnation prior_at prior_active < <(
     jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at // "" | tostring),(.active_seconds // 0 | tostring)] | @tsv' "$RECORD" 2>/dev/null || true
   )
@@ -69,13 +88,18 @@ if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   fi
 fi
 case "$prior_at:$prior_active" in *[!0-9:]*|:*) prior_at=; prior_active=0 ;; esac
-[ "$prior_state" != "$CURRENT" ] || exit 0
-if [ -n "$prior_at" ] && [ "$AT" -lt "$prior_at" ]; then exit 1; fi
-tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
-if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --argjson transition_at "$AT" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
-  ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
-  | {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:$transition_at,active_seconds:$active_seconds}' > "$tmp" \
-  || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
-  rm -f -- "$tmp"
-  exit 1
+if [ "$ACTION" = resolve ]; then
+  case "$prior_state" in done|failed) CURRENT= ;; esac
 fi
+if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ "$prior_state" != "$CURRENT" ]; then
+  if [ -n "$prior_at" ] && [ "$AT" -lt "$prior_at" ]; then exit 1; fi
+  tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
+  if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --argjson transition_at "$AT" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
+    ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
+    | {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:$transition_at,active_seconds:$active_seconds}' > "$tmp" \
+    || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
+    rm -f -- "$tmp"
+    exit 1
+  fi
+fi
+[ "$ACTION" != append ] && [ "$ACTION" != resolve ] || printf '%s\n' "$LINE" >> "$STATE/$ID.status"

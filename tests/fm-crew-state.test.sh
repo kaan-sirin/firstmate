@@ -1046,6 +1046,28 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+test_resolved_answer_uses_canonical_transition() {
+  reset_fakes
+  local d out fake_date
+  d=$(new_case resolved-answer)
+  make_repo_on_branch "$d/wt" fm/feat-resolved-answer
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/datebin"
+  fake_date="$d/datebin/date"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  fm_write_meta "$d/state/resolved-answer.meta" "window=fm:fm-resolved-answer" "worktree=$d/wt" "kind=ship" "harness=claude" "dashboard_incarnation=resolved-answer-1"
+  printf 'needs-decision [key=scope]: choose the scope\n' > "$d/state/resolved-answer.status"
+  PATH="$d/datebin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-status-event.sh" resolve "$d/state" resolved-answer 'resolved [key=scope]: captain answered' \
+    || fail "resolution event could not record canonical timing"
+  FM_FAKE_AXI_STATUS=$(run_running fm/feat-resolved-answer)
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" resolved-answer)
+  assert_contains "$out" "state: working" "resolved answer did not preserve the active run"
+  assert_contains "$out" "transition_at: 100" "resolved answer did not use canonical transition time"
+  pass "resolved answers use the canonical transition timestamp"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1359,6 +1381,7 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_resolved_answer_uses_canonical_transition
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
 test_dead_window_overrides_active_run_step
