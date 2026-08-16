@@ -27,7 +27,7 @@ bridge_env() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$BRIDGE" "$@"
 }
 
-publish_preflight_record() {
+write_bridge_handoff() {
   local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp handoff tmp bypass
   chmod 755 "$home/data"
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
@@ -50,6 +50,12 @@ publish_preflight_record() {
     rm -f -- "$tmp"
     fail "could not prepare bridge handoff"
   fi
+  printf '%s' "$fp"
+}
+
+publish_preflight_record() {
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 fp
+  fp=$(write_bridge_handoff "$home" "$id" "$contract" "$origin" "$state" "$now") || return 1
   bridge_env "$home" publish "$id" >/dev/null || fail "could not publish bridge record"
   printf '%s' "$fp"
 }
@@ -239,7 +245,7 @@ test_preflight_rejects_cross_task_records() {
 }
 
 test_spawn_enforces_the_durable_preflight() {
-  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" out fp status
+  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
   mkdir -p "$home/data/missing-a1"
@@ -257,6 +263,36 @@ test_spawn_enforces_the_durable_preflight() {
   [ "$status" -ne 0 ] || fail "unapproved durable preflight must refuse spawn"
   assert_contains "$out" "preflight approval is missing" "spawn did not verify the durable preflight"
   assert_absent "$home/state/spawn-a1.meta" "preflight refusal wrote task metadata"
+
+  make_contract "$corrected"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  fp=$(publish_preflight_record "$home" race-a1 "$contract" direct approved 100) || fail "race preflight create failed"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/race-a1/brief.md"
+  write_bridge_handoff "$home" race-a1 "$corrected" direct awaiting_approval 101 >/dev/null || fail "race correction handoff could not be prepared"
+  mkdir -p "$racebin"
+  real_jq=$(command -v jq) || fail "jq is required for the preflight race test"
+  cat > "$racebin/jq" <<'SH'
+#!/usr/bin/env bash
+set -eu
+"$FM_RACE_REAL_JQ" "$@"
+if [ "$#" -ge 2 ] && [ "$1" = -r ] && [ "$2" = '.approval.approved_at // 0' ] && [ ! -e "$FM_RACE_TRIGGERED" ]; then
+  : > "$FM_RACE_TRIGGERED"
+  "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" >/dev/null
+fi
+SH
+  cat > "$racebin/tmux" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "$FM_RACE_TMUX_LOG"
+exit 1
+SH
+  chmod +x "$racebin/jq" "$racebin/tmux"
+  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a corrected preflight must refuse its in-flight spawn"
+  assert_contains "$out" "preflight approval is missing" "corrected preflight refusal was unclear"
+  [ -e "$home/race-triggered" ] || fail "race correction did not run after initial verification"
+  assert_absent "$home/state/race-a1.meta" "corrected preflight spawn wrote task metadata"
+  [ ! -s "$home/race-tmux.log" ] || fail "corrected preflight created an endpoint"
   pass "spawn verifies the durable preflight without a brief marker"
 }
 

@@ -677,6 +677,8 @@ SPAWN_META_LOCK=
 SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 RECOVERY_ENDPOINT_PENDING=0
+SPAWN_PREFLIGHT_LOCK=
+SPAWN_PREFLIGHT_LOCK_HELD=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -786,6 +788,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_META_LOCK_HELD" = 1 ]; then
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
+  fi
+  if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
+    SPAWN_PREFLIGHT_LOCK_HELD=0
+    fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || true
   fi
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
@@ -1939,6 +1945,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
+if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; then
+  SPAWN_PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
+  fm_lock_acquire_wait "$SPAWN_PREFLIGHT_LOCK" || {
+    echo "error: could not lock ship preflight record for $ID" >&2
+    exit 1
+  }
+  SPAWN_PREFLIGHT_LOCK_HELD=1
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   if [ "$RECOVER_MISSING" -eq 1 ]; then
     SES=$(fm_backend_tmux_container_ensure)
@@ -2190,6 +2206,13 @@ EOF
     T="$ORCA_TERMINAL"
     ;;
 esac
+fi
+if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
+  SPAWN_PREFLIGHT_LOCK_HELD=0
+  fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
+    echo "error: could not release ship preflight lock for $ID" >&2
+    exit 1
+  }
 fi
 if [ "$KIND" = secondmate ]; then
   FM_INHERITABLE_CONFIG=trace-context \
