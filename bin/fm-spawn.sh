@@ -20,6 +20,7 @@
 #   yolo=off, and the built-in Codex gpt-5.6-luna medium profile. A missing or
 #   conflicting profile refuses before an endpoint or metadata record exists.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
+#        fm-spawn.sh <task-id> --recover-missing
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded endpoint and worktree instead of creating either. It is
 #   the launch half of the control plane (bin/fm-control.sh relaunch), which
@@ -35,6 +36,13 @@
 #   or herdr), refuses unless the endpoint's shell is sitting in the recorded
 #   worktree, and clears the previous harness's per-task wiring before arming
 #   the new incarnation.
+#   --recover-missing is the narrow automatic-recovery path for a ship or scout
+#   whose validated tmux endpoint is positively missing. It recreates only that
+#   endpoint in the recorded worktree from the recorded task identity; it is not
+#   a normal control-plane relaunch and is called by fm-dashboard-recovery.sh.
+#   A workflow-enrolled ship must still validate its recorded preflight
+#   fingerprint, while a legacy ship with no recorded preflight remains
+#   recoverable.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
