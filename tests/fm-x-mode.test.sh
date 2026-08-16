@@ -2436,7 +2436,7 @@ test_link_recovery_relink_retains_thread_url_after_inbox_drain() {
   jq -e '.thread_url == "https://slack.example/thread/recovery"' "$registry" >/dev/null \
     || fail "link did not persist the validated thread URL"
   rm -f "$home/state/x-inbox/req-thread-recovery.json"
-  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 "$ROOT/bin/fm-x-link.sh" successor-thread req-thread-recovery \
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700600000 "$ROOT/bin/fm-x-link.sh" successor-thread req-thread-recovery \
     --carry-count 1 --carry-ts 1700000000 --carry-platform x --carry-max 280 >/dev/null; rc=$?
   expect_code 0 "$rc" "successor thread relink exit"
   assert_grep 'x_thread_url=https://slack.example/thread/recovery' "$successor" \
