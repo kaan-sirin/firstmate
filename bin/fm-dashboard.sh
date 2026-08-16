@@ -69,18 +69,13 @@ case "$NOW" in ''|*[!0-9]*) echo "fm-dashboard: FM_DASHBOARD_NOW must be an epoc
 case "$MAX_SNAPSHOT_BYTES" in ''|*[!0-9]*|0) echo "fm-dashboard: FM_DASHBOARD_MAX_SNAPSHOT_BYTES must be a positive integer" >&2; exit 2 ;; esac
 case "$MAX_RECORD_BYTES" in ''|*[!0-9]*|0) echo "fm-dashboard: FM_DASHBOARD_MAX_RECORD_BYTES must be a positive integer" >&2; exit 2 ;; esac
 
-# A simple directory lock serializes checkpoint reads and atomic publications.
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$DATA/.dashboard.lock"
-attempt=0
-while ! mkdir "$LOCK" 2>/dev/null; do
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 100 ] || { echo "fm-dashboard: dashboard lock unavailable" >&2; exit 1; }
-  sleep 0.05
-done
+fm_lock_acquire_wait "$LOCK"
 SNAPSHOT_FILE=
 cleanup() {
   [ -z "$SNAPSHOT_FILE" ] || rm -f -- "$SNAPSHOT_FILE"
-  rmdir "$LOCK" 2>/dev/null || true
+  fm_lock_release "$LOCK" || true
 }
 trap cleanup EXIT HUP INT TERM
 

@@ -63,6 +63,9 @@ if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"
   exit 0
 fi
+if [ "$recovery_status" -eq 4 ]; then
+  exit 0
+fi
 if [ "$recovery_status" -eq 3 ]; then
   state=unrecoverable
   attempts=0

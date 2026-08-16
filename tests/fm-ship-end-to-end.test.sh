@@ -167,6 +167,21 @@ test_dashboard_projection_and_active_time() {
   pass "dashboard uses one private atomic projection with paused time excluded"
 }
 
+test_dashboard_recovers_stale_publication_lock() {
+  local home="$TMP_ROOT/dashboard-stale-lock" mock="$TMP_ROOT/dashboard-stale-lock-snapshot" lock record
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[]' '' pane '' 100 0
+  lock="$home/data/.dashboard.lock"
+  mkdir "$lock"
+  printf '%s\n' 999999 > "$lock/pid"
+  touch -t 200001010000 "$lock"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "dashboard refresh did not recover its stale lock"
+  record="$home/data/dashboard.json"
+  jq -e '.schema_version == 1 and .projection.in_progress[0].id == "dash-a1"' "$record" >/dev/null || fail "dashboard did not publish after stale-lock recovery"
+  [ ! -e "$lock" ] && [ ! -L "$lock" ] || fail "dashboard left its recovered lock behind"
+  pass "dashboard recovers stale publication locks"
+}
+
 test_dashboard_filters_and_checking_phase() {
   local home="$TMP_ROOT/dashboard-filter" mock="$TMP_ROOT/dashboard-filter-snapshot" record
   mkdir -p "$home/data" "$home/state"
@@ -271,6 +286,36 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
   pass "dashboard surfaces only exhausted worker recovery"
 }
 
+test_dashboard_recovery_defers_control_lock_contention() {
+  local home="$TMP_ROOT/dashboard-recovery-contention" state_bin="$TMP_ROOT/dashboard-recovery-contention-state" agent_bin="$TMP_ROOT/dashboard-recovery-contention-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-contention-spawn" record
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-a4.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "replacement refused\\n" >&2' 'exit 1' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a4 || fail "initial recovery attempt failed"
+  record="$home/state/dashboard-recovery/dash-a4.json"
+  jq -e '.state == "pending" and .attempts == 1' "$record" >/dev/null || fail "initial recovery failure must be recorded"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "another lifecycle action is already running\\n" >&2' 'exit 4' > "$spawn_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a4 || fail "contention recovery must defer"
+  jq -e '.state == "pending" and .attempts == 1' "$record" >/dev/null || fail "control-lock contention must not exhaust recovery"
+  pass "dashboard defers recovery while task control is busy"
+}
+
+test_missing_recovery_control_lock_is_retryable() {
+  local home="$TMP_ROOT/recovery-control-lock" out status lock
+  mkdir -p "$home/data" "$home/state" "$home/config"
+  lock="$home/state/.control-recovery-lock-a1.lock"
+  mkdir "$lock"
+  printf '%s\n' "$$" > "$lock/pid"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" recovery-lock-a1 --recover-missing 2>&1)
+  status=$?
+  [ "$status" -eq 4 ] || fail "missing-endpoint control contention must return retry-later"
+  assert_contains "$out" "another lifecycle action" "retry-later refusal was unclear"
+  pass "missing-endpoint control contention is retryable"
+}
+
 test_dashboard_recovery_surfaces_unsupported_replacement() {
   local home="$TMP_ROOT/dashboard-recovery-unsupported" state_bin="$TMP_ROOT/dashboard-recovery-unsupported-state" agent_bin="$TMP_ROOT/dashboard-recovery-unsupported-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-unsupported-spawn" mock="$TMP_ROOT/dashboard-recovery-unsupported-snapshot" record
   mkdir -p "$home/data" "$home/state"
@@ -359,11 +404,14 @@ test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
+test_dashboard_recovers_stale_publication_lock
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
 test_dashboard_busy_events_preserve_hidden_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
+test_dashboard_recovery_defers_control_lock_contention
+test_missing_recovery_control_lock_is_retryable
 test_dashboard_recovery_surfaces_unsupported_replacement
 test_dashboard_recovery_excludes_endpoint_outage
 test_dashboard_keeps_only_active_tasks
