@@ -17,7 +17,7 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
 
-usage() { sed -n '2,14p' "$0" | sed 's/^# //'; }
+usage() { sed -n '2,7p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
 sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | awk '{print $1}'; else printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; fi; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
