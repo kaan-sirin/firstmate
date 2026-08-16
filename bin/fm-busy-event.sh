@@ -153,6 +153,7 @@ read_pending() {
   PENDING_EVENT=
   PENDING_AT=
   [ -f "$JOURNAL" ] && [ ! -L "$JOURNAL" ] || return 1
+  # shellcheck disable=SC2034 # extra exists only to prove the record is one line
   { IFS= read -r line && ! IFS= read -r extra; } < "$JOURNAL" 2>/dev/null || return 1
   IFS=' ' read -r -a fields <<< "$line"
   [ "${#fields[@]}" -eq 7 ] && [ "${fields[0]}" = "$FM_BUSY_LIB_VERSION" ] || return 1
