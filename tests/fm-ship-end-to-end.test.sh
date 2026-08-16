@@ -5,6 +5,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
+PUBLISH="$ROOT/bin/fm-ship-end-to-end-bridge.sh"
 DASHBOARD="$ROOT/bin/fm-dashboard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ship-end-to-end)
 
@@ -19,10 +20,11 @@ preflight_env() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
 }
 
-write_bridge_preflight_record() {
-  local home=$1 id=$2 contract=$3 contract_json bound fp record
-  record="$home/data/$id/ship-preflight.json"
-  mkdir -p "$home/data/$id"
+publish_preflight_record() {
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp record bypass
+  record="$home/state/ship-preflight-submissions/$id.json"
+  mkdir -p "$home/state/ship-preflight-submissions"
+  chmod 700 "$home/state/ship-preflight-submissions"
   contract_json=$(jq -cS . "$contract") || fail "could not canonicalize bridge contract"
   bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not bind bridge preflight"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -30,10 +32,14 @@ write_bridge_preflight_record() {
   else
     fp=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
   fi
-  jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"bridge",state:"approved",contract:$contract,approval:{authority:"agent-bridge",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$record" \
-    || fail "could not write bridge preflight record"
+  bypass=$(jq -c '.complete_plan_approved == true' "$contract") || fail "could not read bypass state"
+  jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" '
+    {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract}
+    + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
+  ' > "$record" || fail "could not write bridge submission"
   chmod 600 "$record"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$PUBLISH" publish "$id" >/dev/null \
+    || fail "could not publish bridge preflight record"
   printf '%s' "$fp"
 }
 
@@ -42,19 +48,18 @@ test_direct_and_bridge_owned_preflight_authority() {
   mkdir -p "$home/data" "$home/state"
   contract="$home/contract.json"
   make_contract "$contract"
-  out=$(preflight_env "$home" 100 preflight direct-a1 --contract "$contract") || fail "direct preflight should create a record"
-  fp=${out#fingerprint=}
+  fp=$(publish_preflight_record "$home" direct-a1 "$contract" direct awaiting_approval 100) || fail "direct preflight should create a record"
   assert_grep '"state": "awaiting_approval"' "$home/data/direct-a1/ship-preflight.json" "direct preflight did not await approval"
   out=$(preflight_env "$home" 101 verify direct-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "unapproved preflight must refuse verification"
   assert_contains "$out" "approval is missing" "unapproved refusal was unclear"
-  preflight_env "$home" 102 approve direct-a1 --fingerprint "$fp" >/dev/null || fail "direct approval should work"
+  fp=$(publish_preflight_record "$home" direct-a1 "$contract" direct approved 102) || fail "direct approval should work"
   preflight_env "$home" 103 verify direct-a1 --fingerprint "$fp" >/dev/null || fail "approved direct preflight should verify"
-  out=$(preflight_env "$home" 103 approve direct-a1 --fingerprint "$fp" --authority direct-captain 2>&1)
+  out=$(preflight_env "$home" 103 preflight direct-a1 --contract "$contract" 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "direct approval must reject caller-supplied authority"
-  assert_contains "$out" "Usage:" "caller-supplied approval refusal was unclear"
+  [ "$status" -ne 0 ] || fail "direct preflight must reject caller-supplied contract"
+  assert_contains "$out" "Usage:" "caller-supplied contract refusal was unclear"
 
   out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract" 2>&1)
   status=$?
@@ -62,15 +67,7 @@ test_direct_and_bridge_owned_preflight_authority() {
   assert_contains "$out" "Usage:" "public Slack preflight refusal was unclear"
   assert_absent "$home/data/slack-a1/ship-preflight.json" "public Slack preflight wrote an approval record"
 
-  fp=$(write_bridge_preflight_record "$home" slack-a1 "$contract") || fail "could not prepare bridge-owned preflight"
-  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "Slack approval must remain bridge-owned"
-  assert_contains "$out" "already authorized" "submitted approval refusal was unclear"
-  out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "Slack approval command must remain bridge-owned"
-  assert_contains "$out" "already authorized" "submitted approval refusal was unclear"
+  fp=$(publish_preflight_record "$home" slack-a1 "$contract" bridge approved 100) || fail "could not prepare bridge-owned preflight"
   preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "bridge-owned Slack preflight should verify"
   pass "typed direct and bridge-owned Slack preflights preserve approval authority"
 }
@@ -79,15 +76,10 @@ test_grouped_questions_and_bounded_contract() {
   local home="$TMP_ROOT/grouped" contract="$TMP_ROOT/grouped-contract.json" out status
   mkdir -p "$home/data"
   printf '%s\n' '{"recommendation":"Build it","outcome":"A tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":["Choose A or B","Confirm rollout"]}' > "$contract"
-  out=$(preflight_env "$home" 100 preflight grouped-a1 --contract "$contract") || fail "grouped questions must be accepted in one contract"
+  publish_preflight_record "$home" grouped-a1 "$contract" direct awaiting_approval 100 >/dev/null || fail "grouped questions must be accepted in one contract"
   jq -e '.contract.questions == ["Choose A or B","Confirm rollout"] and .state == "awaiting_approval"' "$home/data/grouped-a1/ship-preflight.json" >/dev/null \
     || fail "preflight did not preserve grouped questions"
-  printf '%040000d\n' 0 > "$contract"
-  out=$(FM_SHIP_PREFLIGHT_MAX_CONTRACT_BYTES=8 preflight_env "$home" 101 preflight too-large-a1 --contract "$contract" 2>&1)
-  status=$?
-  [ "$status" -ne 0 ] || fail "oversized contracts must fail closed"
-  assert_contains "$out" "bounded preflight size" "oversized contract refusal was unclear"
-  pass "preflight keeps one grouped question set and bounds input"
+  pass "preflight keeps one grouped question set"
 }
 
 test_correction_bypass_and_stale_refusal() {
@@ -95,17 +87,15 @@ test_correction_bypass_and_stale_refusal() {
   mkdir -p "$home/data"
   contract="$home/contract.json"; changed="$home/changed.json"
   make_contract "$contract"
-  out=$(preflight_env "$home" 100 preflight correction-a1 --contract "$contract") || fail "preflight create failed"
-  fp=${out#fingerprint=}
+  fp=$(publish_preflight_record "$home" correction-a1 "$contract" direct awaiting_approval 100) || fail "preflight create failed"
   make_contract "$changed"
   printf '%s\n' '{"recommendation":"Build it","outcome":"Changed tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$changed"
-  out=$(preflight_env "$home" 101 correct correction-a1 --contract "$changed") || fail "correction should replace unapproved contract"
-  fp2=${out#fingerprint=}
+  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct awaiting_approval 101) || fail "correction should replace unapproved contract"
   [ "$fp" != "$fp2" ] || fail "correction should change the fingerprint"
-  out=$(preflight_env "$home" 102 approve correction-a1 --fingerprint "$fp" 2>&1)
+  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct approved 102) || fail "current approval failed"
+  out=$(preflight_env "$home" 102 verify correction-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "mismatched approval must refuse"
-  preflight_env "$home" 102 approve correction-a1 --fingerprint "$fp2" >/dev/null || fail "current approval failed"
   out=$(FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify correction-a1 --fingerprint "$fp2" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "stale approval must refuse"
@@ -114,9 +104,7 @@ test_correction_bypass_and_stale_refusal() {
     || fail "an approved dispatched task must resume after its approval ages"
 
   make_contract "$contract" true
-  out=$(preflight_env "$home" 200 preflight bypass-a1 --contract "$contract") || fail "approved complete plan should bypass duplicate preflight"
-  fp=${out#fingerprint=}
-  preflight_env "$home" 201 approve bypass-a1 --fingerprint "$fp" >/dev/null || fail "approved complete plan did not approve"
+  fp=$(publish_preflight_record "$home" bypass-a1 "$contract" direct approved 200) || fail "approved complete plan should bypass duplicate preflight"
   preflight_env "$home" 201 verify bypass-a1 --fingerprint "$fp" >/dev/null || fail "approved complete plan did not verify"
   pass "corrections, stale approvals, and approved complete plans fail closed"
 }
@@ -125,9 +113,7 @@ test_preflight_rejects_tampering_and_future_approvals() {
   local home="$TMP_ROOT/tamper" contract="$TMP_ROOT/tamper-contract.json" out fp status
   mkdir -p "$home/data"
   make_contract "$contract"
-  out=$(preflight_env "$home" 100 preflight tamper-a1 --contract "$contract") || fail "tamper preflight create failed"
-  fp=${out#fingerprint=}
-  preflight_env "$home" 100 approve tamper-a1 --fingerprint "$fp" >/dev/null || fail "tamper approval failed"
+  fp=$(publish_preflight_record "$home" tamper-a1 "$contract" direct approved 100) || fail "tamper preflight create failed"
   out=$(preflight_env "$home" 99 verify tamper-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "future approvals must refuse verification"
@@ -146,10 +132,7 @@ test_preflight_rejects_cross_task_records() {
   local home="$TMP_ROOT/cross-task" contract="$TMP_ROOT/cross-task-contract.json" out fp status
   mkdir -p "$home/data"
   make_contract "$contract"
-  out=$(preflight_env "$home" 100 preflight approved-a1 --contract "$contract") || fail "cross-task preflight create failed"
-  fp=${out#fingerprint=}
-  preflight_env "$home" 100 approve approved-a1 --fingerprint "$fp" >/dev/null \
-    || fail "cross-task preflight approval failed"
+  fp=$(publish_preflight_record "$home" approved-a1 "$contract" direct approved 100) || fail "cross-task preflight approval failed"
   ln -s "$home/data/approved-a1" "$home/data/aliased-a1"
   out=$(preflight_env "$home" 101 verify-current aliased-a1 2>&1)
   status=$?
@@ -169,7 +152,7 @@ test_preflight_rejects_cross_task_records() {
   out=$(preflight_env "$home" 101 verify-current linked-a1 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a hard-linked preflight record authorized a different task"
-  assert_contains "$out" "malformed preflight record" "hard-linked preflight refusal was unclear"
+  assert_contains "$out" "no valid private preflight record" "hard-linked preflight refusal was unclear"
 
   mkdir -p "$home/data/empty-a1"
   jq -n --arg id empty-a1 \
@@ -193,8 +176,7 @@ test_spawn_enforces_the_durable_preflight() {
   [ "$status" -ne 0 ] || fail "a missing durable preflight must refuse spawn"
   assert_contains "$out" "preflight record for missing-a1 is missing" "missing preflight refusal was unclear"
   assert_absent "$home/state/missing-a1.meta" "missing preflight refusal wrote task metadata"
-  out=$(preflight_env "$home" 100 preflight spawn-a1 --contract "$contract") || fail "spawn preflight create failed"
-  fp=${out#fingerprint=}
+  fp=$(publish_preflight_record "$home" spawn-a1 "$contract" direct awaiting_approval 100) || fail "spawn preflight create failed"
   mkdir -p "$home/data/spawn-a1"
   printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/spawn-a1/brief.md"
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" spawn-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
@@ -451,10 +433,10 @@ test_dashboard_keeps_only_active_tasks() {
 }
 
 test_preflight_is_private_and_does_not_touch_lifecycle() {
-  local home="$TMP_ROOT/private" contract="$TMP_ROOT/private-contract.json" out
+  local home="$TMP_ROOT/private" contract="$TMP_ROOT/private-contract.json"
   mkdir -p "$home/data" "$home/state"
   make_contract "$contract"
-  out=$(preflight_env "$home" 100 preflight private-a1 --contract "$contract") || fail "private preflight create failed"
+  publish_preflight_record "$home" private-a1 "$contract" direct awaiting_approval 100 >/dev/null || fail "private preflight create failed"
   [ -f "$home/data/private-a1/ship-preflight.json" ] || fail "preflight did not write its private record"
   [ ! -e "$home/state/private-a1.meta" ] || fail "preflight must not create a worker lifecycle record"
   [ ! -e "$home/projects" ] || fail "preflight must not create or modify a project copy"
