@@ -245,7 +245,7 @@ test_preflight_rejects_cross_task_records() {
 }
 
 test_spawn_enforces_the_durable_preflight() {
-  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq publish_out
+  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq publish_out publish_status attempts
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
   mkdir -p "$home/data/missing-a1"
@@ -277,9 +277,13 @@ set -eu
 "$FM_RACE_REAL_JQ" "$@"
 if [ "$#" -ge 2 ] && [ "$1" = -r ] && [ "$2" = '.approval.approved_at // 0' ] && [ ! -e "$FM_RACE_TRIGGERED" ]; then
   : > "$FM_RACE_TRIGGERED"
-  "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" > "$FM_RACE_PUBLISH_OUT" 2>&1 &
-  publisher=$!
-  wait "$publisher"
+  (
+    if "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" > "$FM_RACE_PUBLISH_OUT" 2>&1; then
+      printf '%s\n' 0 > "$FM_RACE_PUBLISH_STATUS"
+    else
+      printf '%s\n' 1 > "$FM_RACE_PUBLISH_STATUS"
+    fi
+  ) &
 fi
 SH
   cat > "$racebin/tmux" <<'SH'
@@ -289,11 +293,18 @@ exit 1
 SH
   chmod +x "$racebin/jq" "$racebin/tmux"
   publish_out="$home/race-publish.out"
-  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_PUBLISH_OUT="$publish_out" FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  publish_status="$home/race-publish-status"
+  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_PUBLISH_OUT="$publish_out" FM_RACE_PUBLISH_STATUS="$publish_status" FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
   status=$?
+  attempts=0
+  while [ ! -e "$publish_status" ] && [ "$attempts" -lt 50 ]; do
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
   [ "$status" -ne 0 ] || fail "a corrected preflight must refuse its in-flight spawn"
   assert_contains "$out" "preflight approval is missing" "corrected preflight refusal was unclear"
   [ -e "$home/race-triggered" ] || fail "race correction did not run after initial verification"
+  [ "$(cat "$publish_status")" = 0 ] || fail "asynchronous race correction did not finish"
   assert_contains "$(cat "$publish_out")" "published" "asynchronous race correction did not complete"
   jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/race-a1/ship-preflight.json" >/dev/null \
     || fail "asynchronous race correction did not replace the preflight record"
