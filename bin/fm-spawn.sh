@@ -1723,21 +1723,19 @@ if [ "$KIND" = ship ]; then
     fi
   fi
   PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
-  if [ -e "$PREFLIGHT_RECORD" ] || [ -L "$PREFLIGHT_RECORD" ]; then
-    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
-      echo "error: ship preflight record for $ID is unsafe" >&2
-      exit 1
-    }
-    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
-    PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
-    case "$PREFLIGHT_FINGERPRINT" in
-      ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
-      *) false ;;
-    esac || {
-      echo "error: ship preflight verification returned an invalid fingerprint" >&2
-      exit 1
-    }
-  fi
+  [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+    echo "error: ship preflight record for $ID is missing or unsafe" >&2
+    exit 1
+  }
+  PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+  PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
+  case "$PREFLIGHT_FINGERPRINT" in
+    ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+    *) false ;;
+  esac || {
+    echo "error: ship preflight verification returned an invalid fingerprint" >&2
+    exit 1
+  }
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
