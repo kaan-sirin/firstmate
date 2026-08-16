@@ -261,7 +261,7 @@ test_spawn_enforces_the_durable_preflight() {
 }
 
 write_snapshot() {
-  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-null} checkpoint=${8:-null} recovery=${9:-'{"state":"none"}'} json
+  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-100} checkpoint=${8:-0} recovery=${9:-'{"state":"none"}'} json
   json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s,"active_seconds":%s},"recovery":%s,"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$checkpoint" "$recovery" "$decision")
   printf '%s\n' '#!/usr/bin/env bash' > "$file"
   printf "printf '%%s\\n' '%s'\n" "$json" >> "$file"
@@ -290,6 +290,25 @@ test_dashboard_projection_and_active_time() {
   jq -e '.schema_version == 1 and .projection.in_progress[0].phase == "Building" and .projection.in_progress[0].active_seconds == 42 and (.projection.needs_you | length) == 0 and .projection.empty_text == "Nothing needs you."' "$record" >/dev/null || fail "dashboard projection or timing was wrong"
   find "$home/data" -maxdepth 1 -name '.dashboard.*' | grep -q . && fail "dashboard refresh left a non-atomic temporary file"
   pass "dashboard uses one private atomic projection with paused time excluded"
+}
+
+test_dashboard_omits_uncheckpointed_active_work() {
+  local home="$TMP_ROOT/dashboard-uncheckpointed" mock="$TMP_ROOT/dashboard-uncheckpointed-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  write_snapshot "$mock" working '[]' '' pane 'harness busy (grok-regex)' null null
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=150 "$DASHBOARD" refresh >/dev/null || fail "uncheckpointed Grok dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  jq -e '.projection.in_progress == [] and .technical.tasks[0].timing_exact == false and .technical.tasks[0].active_seconds == 0' "$record" >/dev/null \
+    || fail "dashboard derived Grok active time without a producer checkpoint"
+  write_snapshot "$mock" working '[]' '' pane 'harness busy (muse-session-log)' null null
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=200 "$DASHBOARD" refresh >/dev/null || fail "uncheckpointed Muse dashboard refresh failed"
+  jq -e '.projection.in_progress == [] and .technical.tasks[0].timing_exact == false and .technical.tasks[0].active_seconds == 0' "$record" >/dev/null \
+    || fail "dashboard derived Muse active time from refresh cadence"
+  write_snapshot "$mock" working '[]' '' pane 'harness busy (muse-session-log)' 210 4
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=220 "$DASHBOARD" refresh >/dev/null || fail "checkpointed Muse dashboard refresh failed"
+  jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Building",active_seconds:14}] and .technical.tasks[0].timing_exact == true' "$record" >/dev/null \
+    || fail "dashboard did not resume exact timing from the producer checkpoint"
+  pass "dashboard omits active work until its producer provides exact timing"
 }
 
 test_dashboard_recovers_stale_publication_lock() {
@@ -575,6 +594,7 @@ test_preflight_rejects_tampering_and_future_approvals
 test_preflight_rejects_cross_task_records
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
+test_dashboard_omits_uncheckpointed_active_work
 test_dashboard_recovers_stale_publication_lock
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
