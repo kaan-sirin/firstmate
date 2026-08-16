@@ -198,7 +198,7 @@ last_nonempty_line() {  # <file>
 }
 
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
+  local id=$1 raw rest state source detail transition_at sep
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -213,6 +213,7 @@ crew_state_json() {  # <id>
   state=unknown
   source=none
   detail=
+  transition_at=null
   case "$raw" in
     state:\ *"$sep"source:\ *)
       rest=${raw#state: }
@@ -222,10 +223,22 @@ crew_state_json() {  # <id>
         *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
         *) source=$rest ;;
       esac
+      case "$detail" in
+        transition_at:\ *"$sep"*)
+          transition_at=${detail#transition_at: }
+          transition_at=${transition_at%%"$sep"*}
+          detail=${detail#*"$sep"}
+          ;;
+        transition_at:\ *)
+          transition_at=${detail#transition_at: }
+          detail=
+          ;;
+      esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  case "$transition_at" in ''|*[!0-9]*) transition_at=null ;; esac
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" --argjson transition_at "$transition_at" \
+    '{state:$state,source:$source,detail:$detail,transition_at:$transition_at,raw:$raw}'
 }
 
 status_event_json() {  # <status-log>
@@ -404,7 +417,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source current_transition_at current_transition_history status_mtime transition_file transition_state transition_epoch transition_meta_mtime meta_mtime pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at current_active_seconds status_mtime transition_file transition_state transition_epoch transition_meta_mtime meta_mtime transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -450,42 +463,45 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
-    current_transition_at=null
-    current_transition_history='[]'
+    current_transition_at=$(printf '%s' "$current_json" | jq -r '.transition_at // "null"')
+    current_active_seconds=null
     if [ "$current_source" = status-log ]; then
       status_mtime=$(file_mtime_epoch "$status_log")
       case "$status_mtime" in
         ''|*[!0-9]*) ;;
         *)
           current_transition_at=$status_mtime
-          current_transition_history=$(jq -n --arg state "$current_state" --argjson at "$status_mtime" '[{state:$state,at:$at}]')
           ;;
       esac
     fi
     transition_file="$STATE/dashboard-transitions/$id.json"
+    recovery_file="$STATE/dashboard-recovery/$id.json"
+    recovery_json='{"state":"none"}'
+    if [ -f "$recovery_file" ] && [ ! -L "$recovery_file" ] && [ "$(file_mode_octal "$recovery_file")" = 600 ]; then
+      recovery_json=$(jq -c '
+        if .schema_version == 1 and (.state == "pending" or .state == "unrecoverable")
+          and (.attempts | type) == "number" and (.confirmed_at | type) == "number" and (.reason | type) == "string"
+        then {state,attempts,confirmed_at,reason} else {state:"none"} end
+      ' "$recovery_file" 2>/dev/null || printf '%s' '{"state":"none"}')
+    fi
     meta_mtime=$(file_mtime_epoch "$meta")
     if [ -f "$transition_file" ] && [ ! -L "$transition_file" ] \
        && [ "$(file_mode_octal "$transition_file")" = 600 ]; then
-      IFS=$'\t' read -r transition_state transition_epoch transition_meta_mtime < <(
-        jq -r '[.state // "",(.transition_at // "" | tostring),(.meta_mtime // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
+      IFS=$'\t' read -r transition_state transition_epoch transition_meta_mtime transition_active_seconds < <(
+        jq -r '[.state // "",(.transition_at // "" | tostring),(.meta_mtime // "" | tostring),(.active_seconds // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
       )
-      case "$transition_epoch:$transition_meta_mtime" in
-        *[!0-9:]*|:*) ;;
-        *)
-          if [ "$transition_state" = "$current_state" ] && [ "$transition_meta_mtime" = "$meta_mtime" ]; then
-            current_transition_history=$(jq -c '
-              if (.history | type) == "array" and all(.history[]?; (.state | type) == "string" and (.at | type) == "number")
-              then .history else [{state:.state,at:.transition_at}] end
-            ' "$transition_file" 2>/dev/null || true)
-            if printf '%s' "$current_transition_history" | jq -e --arg state "$current_state" --argjson at "$transition_epoch" '
-              type == "array" and length > 0 and .[-1].state == $state and .[-1].at == $at
-            ' >/dev/null 2>&1; then
+      case "$transition_epoch" in ''|*[!0-9]*) ;; *)
+        case "$transition_meta_mtime" in ''|*[!0-9]*) ;; *)
+          case "$transition_active_seconds" in ''|*[!0-9]*) ;; *)
+            if [ "$transition_state" = "$current_state" ] && [ "$transition_meta_mtime" = "$meta_mtime" ]; then
               current_transition_at=$transition_epoch
-            else
-              current_transition_history='[]'
+              current_active_seconds=$transition_active_seconds
             fi
-          fi
+            ;;
+          esac
           ;;
+        esac
+        ;;
       esac
     fi
 
@@ -591,7 +607,8 @@ task_json_lines() {
       --arg last_event_raw "$last_event_raw" \
       --argjson current_state "$current_json" \
       --argjson current_transition_at "$current_transition_at" \
-      --argjson current_transition_history "$current_transition_history" \
+      --argjson current_active_seconds "$current_active_seconds" \
+      --argjson recovery "$recovery_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -619,7 +636,8 @@ task_json_lines() {
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,transition_history:$current_transition_history,freshness:"fresh"}),
+        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,active_seconds:$current_active_seconds,freshness:"fresh"}),
+        recovery:$recovery,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive

@@ -16,7 +16,7 @@
 # checkpoint, provenance, and resolved stop; `technical.reconciliation` names
 # the canonical state sources. All technical fields are private and additive.
 #
-# The active-time accumulator consumes each canonical state transition. This
+# The active-time accumulator consumes the compact canonical checkpoint. This
 # excludes every paused interval and persists work time across restarts.
 # `FM_DASHBOARD_NOW` supplies a deterministic epoch for tests; production uses
 # date +%s.
@@ -129,6 +129,7 @@ RESULT=$(jq -n \
     | if $decision != null and .current_state.state == "parked" then $decision
       elif $blocked != null and .current_state.state == "blocked" then $blocked
       elif .current_state.state == "failed" then {verb:"failed",summary:"Worker stopped"}
+      elif .current_state.state == "unknown" and .recovery.state == "unrecoverable" then {verb:"failed",summary:"Worker recovery failed"}
       else null end;
   def prior_for($id): ($prior.technical.tasks[]? | select(.id == $id)) // {};
   def task_record:
@@ -136,33 +137,28 @@ RESULT=$(jq -n \
     | ($old.observed_at // $now) as $old_at
     | ($old.active_seconds // 0) as $old_seconds
     | (.current_state.transition_at? // null) as $reported_transition
-    | ([.current_state.transition_history[]?
-        | select((.state | type) == "string" and (.at | type) == "number" and .at >= $old_at and .at <= $now)]
-       | sort_by(.at)) as $recorded
-    | (if ($recorded | length) == 0 and $old.state != .current_state.state then
-         if ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now
-         then [{state:.current_state.state,at:$reported_transition}]
-         else [{state:.current_state.state,at:$now}] end
-       elif ($recorded | length) > 0 and $recorded[-1].state != .current_state.state then
-         $recorded + [{state:.current_state.state,at:$now}]
-       else $recorded end) as $transitions
-    | (reduce $transitions[] as $transition
-         ({state:($old.state // .current_state.state),at:$old_at,active:0,last_transition:($old.state_transition_at // $old_at)};
-          .active += (if .state == "working" then (($transition.at - .at) | if . > 0 then . else 0 end) else 0 end)
-          | .state = $transition.state
-          | .at = $transition.at
-          | .last_transition = $transition.at)
-       | .active += (if .state == "working" then (($now - .at) | if . > 0 then . else 0 end) else 0 end)) as $timing
+    | (.current_state.active_seconds? // null) as $checkpoint
+    | (if ($checkpoint | type) == "number" and $checkpoint >= 0
+       and ($reported_transition | type) == "number" and $reported_transition <= $now
+       then {active:($checkpoint + (if .current_state.state == "working" then (($now - $reported_transition) | if . > 0 then . else 0 end) else 0 end)),
+             transition:$reported_transition,canonical:true}
+       elif $old.state == "working" then
+         if .current_state.state == "working" then {active:($old_seconds + (($now - $old_at) | if . > 0 then . else 0 end)),transition:($old.state_transition_at // $old_at),canonical:false}
+         elif ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now then {active:($old_seconds + (($reported_transition - $old_at) | if . > 0 then . else 0 end)),transition:$reported_transition,canonical:false}
+         else {active:$old_seconds,transition:$now,canonical:false} end
+       elif .current_state.state == "working" and ($reported_transition | type) == "number" and $reported_transition <= $now then
+         {active:($old_seconds + (($now - $reported_transition) | if . > 0 then . else 0 end)),transition:$reported_transition,canonical:false}
+       else {active:$old_seconds,transition:(if $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),canonical:false} end) as $timing
     | (genuine_stop) as $stop
     | {id:.id,
        name:(.backlog.title // .id | clip(160)),
        state:.current_state.state,
        phase:(if active then phase else null end),
-       active_seconds:($old_seconds + $timing.active),
-       active_since:(if active then (if ($transitions | length) > 0 then $timing.last_transition elif $old.state == "working" then ($old.active_since // $timing.last_transition // $now) else ($timing.last_transition // $now) end) else null end),
-       state_transition_at:(if ($transitions | length) > 0 then $timing.last_transition elif $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),
+       active_seconds:$timing.active,
+       active_since:(if active then (if $timing.canonical then $timing.transition elif $old.state == "working" then ($old.active_since // $timing.transition // $now) else ($timing.transition // $now) end) else null end),
+       state_transition_at:$timing.transition,
        observed_at:$now,
-       recovery:(if .current_state.state == "unknown" then "automatic-recovery-pending" else null end),
+       recovery:(if .current_state.state == "unknown" then (if .recovery.state == "unrecoverable" then "unrecoverable" else "automatic-recovery-pending" end) else null end),
        provenance:{origin:(if (.x_request? // "") != "" then "slack" else "direct" end),
                    slack_thread_url:thread_url},
        stop:$stop};

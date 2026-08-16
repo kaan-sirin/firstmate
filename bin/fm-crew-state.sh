@@ -83,8 +83,21 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
-emit() {  # <state> <source> [detail]
+file_mtime_epoch() {
+  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
+}
+
+status_transition_at() {
+  [ -f "$LOG" ] || return 1
+  file_mtime_epoch "$LOG"
+}
+
+emit() {  # <state> <source> [detail] [transition-at]
   local line="state: $1${SEP}source: $2"
+  case "${4:-}" in
+    ''|*[!0-9]*) ;;
+    *) line="$line${SEP}transition_at: $4" ;;
+  esac
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -166,6 +179,45 @@ crew_busy_verdict() {  # <target>
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+}
+
+busy_transition_at() {
+  local record busy_state busy_source busy_event busy_seq busy_at
+  record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || return 1
+  read -r busy_state busy_source busy_event busy_seq busy_at <<< "$record"
+  [ "$busy_state" = busy ] || return 1
+  [ "$busy_source" = "${BUSY_VERDICT#* }" ] || return 1
+  case "$busy_at" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$busy_at"
+}
+
+duration_ms_transition_at() {  # <milliseconds>
+  local ms=$1 now seconds
+  case "$ms" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$ms" -gt 0 ] || return 1
+  now=$(date +%s)
+  seconds=$(( (ms + 999) / 1000 ))
+  [ "$seconds" -le "$now" ] || return 1
+  printf '%s' $((now - seconds))
+}
+
+nm_active_step_duration_ms() {
+  printf '%s\n' "$RUN_OUT" | awk -F, '
+    /^[[:space:]]*[^:][^,]*,[[:space:]]*"?(running|fixing|ci|awaiting_approval|fix_review)"?,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+/ {
+      value=$4; gsub(/[^0-9]/, "", value); if (value != "") print value; exit
+    }
+  '
+}
+
+awaiting_transition_at() {
+  local text=$1 value now seconds=0
+  if [[ $text =~ ([0-9]+)h ]]; then seconds=$((seconds + BASH_REMATCH[1] * 3600)); fi
+  if [[ $text =~ ([0-9]+)m ]]; then seconds=$((seconds + BASH_REMATCH[1] * 60)); fi
+  if [[ $text =~ ([0-9]+)s ]]; then seconds=$((seconds + BASH_REMATCH[1])); fi
+  [ "$seconds" -gt 0 ] || return 1
+  now=$(date +%s)
+  [ "$seconds" -le "$now" ] || return 1
+  printf '%s' $((now - seconds))
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -498,7 +550,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at || true)"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -509,7 +561,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at || true)"
     fi
   fi
 
@@ -528,7 +580,16 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  RUN_TRANSITION_AT=
+  if [ "$RUN_STATE" = parked ] && [ -n "$awaiting" ]; then
+    RUN_TRANSITION_AT=$(awaiting_transition_at "$awaiting" || true)
+  elif [ "$RUN_STATE" = working ] && [ "$LOG_VERB" = resolved ]; then
+    RUN_TRANSITION_AT=$(status_transition_at || true)
+  fi
+  if [ -z "$RUN_TRANSITION_AT" ]; then
+    RUN_TRANSITION_AT=$(duration_ms_transition_at "$(nm_active_step_duration_ms)" || true)
+  fi
+  emit "$RUN_STATE" run-step "$RUN_DETAIL" "$RUN_TRANSITION_AT"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
@@ -547,7 +608,7 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" "$(busy_transition_at || true)" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
@@ -566,7 +627,7 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")" "$(status_transition_at || true)"
   fi
 fi
 

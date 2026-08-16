@@ -136,8 +136,8 @@ test_spawn_enforces_the_durable_preflight() {
 }
 
 write_snapshot() {
-  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-null} history=${8:-[]} json
-  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s,"transition_history":%s},"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$history" "$decision")
+  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-null} checkpoint=${8:-null} recovery=${9:-'{"state":"none"}'} json
+  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s,"active_seconds":%s},"recovery":%s,"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$checkpoint" "$recovery" "$decision")
   printf '%s\n' '#!/usr/bin/env bash' > "$file"
   printf "printf '%%s\\n' '%s'\n" "$json" >> "$file"
   chmod +x "$file"
@@ -146,19 +146,19 @@ write_snapshot() {
 test_dashboard_projection_and_active_time() {
   local home="$TMP_ROOT/dashboard" mock="$TMP_ROOT/dashboard-snapshot" record
   mkdir -p "$home/data" "$home/state"
-  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 100 '[{"state":"working","at":100}]'
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 100 0
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "initial dashboard refresh failed"
-  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 120 '[{"state":"working","at":100},{"state":"paused","at":110},{"state":"working","at":120}]'
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 120 10
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=130 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
-  write_snapshot "$mock" paused '[]' 'https://slack.example/thread/1' pane '' 132 '[{"state":"working","at":100},{"state":"paused","at":110},{"state":"working","at":120},{"state":"paused","at":132}]'
+  write_snapshot "$mock" paused '[]' 'https://slack.example/thread/1' pane '' 132 22
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=140 "$DASHBOARD" refresh >/dev/null || fail "pause dashboard refresh failed"
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=170 "$DASHBOARD" refresh >/dev/null || fail "continued pause dashboard refresh failed"
   jq -e '.technical.tasks[0].active_seconds == 22 and .technical.tasks[0].state_transition_at == 132' "$home/data/dashboard.json" >/dev/null || fail "dashboard must exclude a full paused interval between refreshes"
-  write_snapshot "$mock" parked '[{"key":"ask","verb":"needs-decision","summary":"Choose"}]' 'https://slack.example/thread/1' pane '' 175
+  write_snapshot "$mock" parked '[{"key":"ask","verb":"needs-decision","summary":"Choose"}]' 'https://slack.example/thread/1' pane '' 175 22
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=175 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
   record="$home/data/dashboard.json"
   jq -e '(.projection.needs_you | length) == 1 and .projection.needs_you[0].slack_thread_url == "https://slack.example/thread/1"' "$record" >/dev/null || fail "dashboard did not preserve the Slack decision link"
-  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 180 '[{"state":"working","at":100},{"state":"paused","at":110},{"state":"working","at":120},{"state":"paused","at":132},{"state":"parked","at":175},{"state":"working","at":180}]'
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 180 22
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=200 "$DASHBOARD" refresh >/dev/null || fail "resume dashboard refresh failed"
   record="$home/data/dashboard.json"
   [ "$(stat -c %a "$record")" = 600 ] || fail "dashboard record must be mode 0600"
@@ -175,7 +175,7 @@ test_dashboard_filters_and_checking_phase() {
   record="$home/data/dashboard.json"
   jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Checking",active_seconds:0}] and .projection.needs_you == []' "$record" >/dev/null \
     || fail "dashboard must not duplicate a stale decision while checking"
-  write_snapshot "$mock" parked '[{"key":"d1","verb":"needs-decision","summary":"Choose"},{"key":"b1","verb":"blocked","summary":"Ignore duplicate"}]' '' run-step 'parked at authority gate' 103
+  write_snapshot "$mock" parked '[{"key":"d1","verb":"needs-decision","summary":"Choose"},{"key":"b1","verb":"blocked","summary":"Ignore duplicate"}]' '' run-step 'parked at authority gate' 103 3
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=105 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
   jq -e '.projection.in_progress == [] and (.projection.needs_you | length) == 1 and .projection.needs_you[0].kind == "needs-decision" and .technical.tasks[0].active_seconds == 3' "$record" >/dev/null \
     || fail "dashboard must show one genuine decision"
@@ -194,23 +194,46 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   local home="$TMP_ROOT/dashboard-ledger" state_file="$TMP_ROOT/dashboard-ledger-state" state_bin="$TMP_ROOT/dashboard-ledger-bin" record
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' 'kind=ship' > "$home/state/ledger-a1.meta"
-  printf '%s\n' '#!/usr/bin/env bash' 'IFS= read -r state < "$FM_DASHBOARD_TEST_STATE"' 'printf "state: %s\\n" "$state"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'IFS= read -r state < "$FM_DASHBOARD_TEST_STATE"' 'IFS= read -r timestamp < "$FM_DASHBOARD_TEST_TIMESTAMP"' 'printf "state: %s · source: run-step · transition_at: %s\\n" "$state" "$timestamp"' > "$state_bin"
   chmod +x "$state_bin"
   printf '%s\n' working > "$state_file"
+  printf '%s\n' 100 > "$TMP_ROOT/dashboard-ledger-timestamp"
   (
-    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file"
-    export FM_HOME FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_CREW_STATE_BIN FM_DASHBOARD_TEST_STATE
+    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp"
+    export FM_HOME FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_CREW_STATE_BIN FM_DASHBOARD_TEST_STATE FM_DASHBOARD_TEST_TIMESTAMP
     . "$ROOT/bin/fm-watch.sh"
     dashboard_transition_reconcile ledger-a1
     printf '%s\n' parked > "$state_file"
+    printf '%s\n' 110 > "$TMP_ROOT/dashboard-ledger-timestamp"
     dashboard_transition_reconcile ledger-a1
     printf '%s\n' working > "$state_file"
+    printf '%s\n' 120 > "$TMP_ROOT/dashboard-ledger-timestamp"
     dashboard_transition_reconcile ledger-a1
   ) || fail "canonical transition ledger reconciliation failed"
   record="$home/state/dashboard-transitions/ledger-a1.json"
-  jq -e '.schema_version == 1 and .state == "working" and (.history | map(.state) == ["working","parked","working"]) and all(.history[]; (.at | type) == "number")' "$record" >/dev/null \
-    || fail "canonical transition ledger did not preserve every state edge"
-  pass "watcher persists canonical dashboard transition history"
+  jq -e '.schema_version == 1 and .state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "canonical transition ledger did not preserve the producer checkpoint"
+  pass "watcher persists a compact canonical dashboard checkpoint"
+}
+
+test_dashboard_recovery_surfaces_only_exhausted_loss() {
+  local home="$TMP_ROOT/dashboard-recovery" state_bin="$TMP_ROOT/dashboard-recovery-state" agent_bin="$TMP_ROOT/dashboard-recovery-agent" control_bin="$TMP_ROOT/dashboard-recovery-control" mock="$TMP_ROOT/dashboard-recovery-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-a1.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "replacement refused\\n" >&2' 'exit 1' > "$control_bin"
+  chmod +x "$state_bin" "$agent_bin" "$control_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_CONTROL_BIN="$control_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "first automatic recovery attempt failed"
+  jq -e '.state == "pending" and .attempts == 1' "$home/state/dashboard-recovery/dash-a1.json" >/dev/null || fail "first recovery failure must remain recoverable"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_CONTROL_BIN="$control_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "exhausted recovery attempt failed"
+  record="$home/state/dashboard-recovery/dash-a1.json"
+  jq -e '.state == "unrecoverable" and .attempts == 2' "$record" >/dev/null || fail "recovery owner did not persist exhaustion"
+  write_snapshot "$mock" unknown '[]' '' pane 'endpoint unavailable' null null '{"state":"unrecoverable"}'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=120 "$DASHBOARD" refresh >/dev/null || fail "unrecoverable dashboard refresh failed"
+  jq -e '.projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker recovery failed",slack_thread_url:null}] and .technical.tasks[0].recovery == "unrecoverable"' "$home/data/dashboard.json" >/dev/null \
+    || fail "dashboard did not surface an exhausted worker recovery"
+  pass "dashboard surfaces only exhausted worker recovery"
 }
 
 test_dashboard_keeps_only_active_tasks() {
@@ -266,6 +289,7 @@ test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
+test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_keeps_only_active_tasks
 test_preflight_is_private_and_does_not_touch_lifecycle
 test_dashboard_rejects_unsafe_or_oversized_inputs

@@ -457,10 +457,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 }
 
 dashboard_transition_observe() {
-  local task=$1 state=$2 transition_at=$3 dir record meta meta_mtime prior_state prior_meta prior_history tmp
+  local task=$1 state=$2 transition_at=$3 dir record meta meta_mtime prior_state prior_meta prior_at prior_active tmp
   prior_state=
   prior_meta=
-  prior_history='[]'
+  prior_at=
+  prior_active=0
   case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 1 ;; esac
   case "$task:$state:$transition_at" in
     *[!A-Za-z0-9._:-]*|*::*|::*) return 1 ;;
@@ -478,22 +479,22 @@ dashboard_transition_observe() {
   fi
   record="$dir/$task.json"
   if [ -f "$record" ] && [ ! -L "$record" ]; then
-    IFS=$'\t' read -r prior_state prior_meta prior_history < <(
-      jq -r '[.state // "",(.meta_mtime // "" | tostring),((.history // []) | @json)] | @tsv' "$record" 2>/dev/null || true
+    IFS=$'\t' read -r prior_state prior_meta prior_at prior_active < <(
+      jq -r '[.state // "",(.meta_mtime // "" | tostring),(.transition_at // "" | tostring),(.active_seconds // 0 | tostring)] | @tsv' "$record" 2>/dev/null || true
     )
     if [ "$prior_meta" != "$meta_mtime" ]; then
       prior_state=
-      prior_history='[]'
-    elif ! printf '%s' "$prior_history" | jq -e '
-      type == "array" and all(.[]?; (.state | type) == "string" and (.at | type) == "number")
-    ' >/dev/null 2>&1; then
-      prior_history='[]'
+      prior_at=
+      prior_active=0
     fi
   fi
+  case "$prior_at:$prior_active" in *[!0-9:]*|:*) prior_at=; prior_active=0 ;; esac
+  if [ "$prior_state" = "$state" ]; then return 0; fi
+  if [ -n "$prior_at" ] && [ "$transition_at" -lt "$prior_at" ]; then return 1; fi
   tmp=$(umask 077; mktemp "$dir/.${task}.XXXXXX") || return 1
-  if ! jq -n --arg id "$task" --arg state "$state" --argjson transition_at "$transition_at" --argjson meta_mtime "$meta_mtime" --arg prior_state "$prior_state" --argjson history "$prior_history" '
-    ($history | if $prior_state == $state then . else . + [{state:$state,at:$transition_at}] end) as $history
-    | {schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime,history:$history}' > "$tmp" \
+  if ! jq -n --arg id "$task" --arg state "$state" --argjson transition_at "$transition_at" --argjson meta_mtime "$meta_mtime" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$transition_at}" --argjson active_seconds "$prior_active" '
+    ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
+    | {schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime,active_seconds:$active_seconds}' > "$tmp" \
     || ! chmod 600 "$tmp" \
     || ! mv -f -- "$tmp" "$record"; then
     rm -f -- "$tmp"
@@ -502,14 +503,22 @@ dashboard_transition_observe() {
 }
 
 dashboard_transition_reconcile() {
-  local task=$1 line state
+  local task=$1 line state transition_at
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
   case "$line" in
     state:\ *) state=${line#state: }; state=${state%% *} ;;
     *) return 0 ;;
   esac
   case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 0 ;; esac
-  dashboard_transition_observe "$task" "$state" "$(date +%s)" || triage_log "dashboard transition write failed for $task"
+  transition_at=$(printf '%s\n' "$line" | sed -n 's/.*transition_at: \([0-9][0-9]*\).*/\1/p' | head -1)
+  case "$transition_at" in ''|*[!0-9]*) return 0 ;; esac
+  dashboard_transition_observe "$task" "$state" "$transition_at" || triage_log "dashboard transition write failed for $task"
+}
+
+dashboard_recovery_reconcile() {
+  [ -x "$SCRIPT_DIR/fm-dashboard-recovery.sh" ] || return 0
+  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-dashboard-recovery.sh" observe "$1" >/dev/null 2>&1 \
+    || triage_log "dashboard recovery check failed for $1"
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -1822,6 +1831,7 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     dashboard_transition_reconcile "$task"
+    dashboard_recovery_reconcile "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
