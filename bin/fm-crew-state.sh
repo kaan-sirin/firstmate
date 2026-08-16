@@ -83,13 +83,19 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
-file_mtime_epoch() {
-  if [ "$(uname)" = Darwin ]; then stat -f %m "$1" 2>/dev/null; else stat -c %Y "$1" 2>/dev/null; fi
-}
-
-status_transition_at() {
-  [ -f "$LOG" ] || return 1
-  file_mtime_epoch "$LOG"
+status_transition_at() {  # <state>
+  local expected=$1 record recorded_state recorded_incarnation recorded_at incarnation
+  case "$expected" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 1 ;; esac
+  record="$STATE/dashboard-transitions/$ID.json"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  incarnation=$(meta_value dashboard_incarnation)
+  case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
+  IFS=$'\t' read -r recorded_state recorded_incarnation recorded_at < <(
+    jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at // "" | tostring)] | @tsv' "$record" 2>/dev/null || true
+  )
+  [ "$recorded_state" = "$expected" ] && [ "$recorded_incarnation" = "$incarnation" ] || return 1
+  case "$recorded_at" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$recorded_at"
 }
 
 emit() {  # <state> <source> [detail] [transition-at]
@@ -567,7 +573,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at || true)"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at done || true)"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -578,7 +584,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at || true)"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at done || true)"
     fi
   fi
 
@@ -601,7 +607,7 @@ if [ "$HAVE_RUN" = 1 ]; then
   if [ "$RUN_STATE" = parked ] && [ -n "$awaiting" ]; then
     RUN_TRANSITION_AT=$(awaiting_transition_at "$awaiting" || true)
   elif [ "$RUN_STATE" = working ] && [ "$LOG_VERB" = resolved ]; then
-    RUN_TRANSITION_AT=$(status_transition_at || true)
+    RUN_TRANSITION_AT=$(status_transition_at working || true)
   fi
   if [ -z "$RUN_TRANSITION_AT" ]; then
     RUN_TRANSITION_AT=$(duration_ms_transition_at "$(nm_active_step_duration_ms)" || true)
@@ -647,7 +653,7 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")" "$(status_transition_at || true)"
+    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")" "$(status_transition_at "$LOG_STATE" || true)"
   fi
 fi
 
