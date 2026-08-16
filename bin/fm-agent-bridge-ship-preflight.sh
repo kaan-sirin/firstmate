@@ -15,8 +15,19 @@ usage() { sed -n '2,5p' "$0" | sed 's/^# //'; }
 die() { echo "fm-agent-bridge-ship-preflight: $*" >&2; exit 1; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 links_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %l "$1"; else stat -c %h "$1"; fi; }
+owner_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi; }
 valid_private_file() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ] && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
-valid_private_dir() { [ -d "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 700 ]; }
+valid_private_dir() {
+  local path=$1 mode owner group other
+  [ -d "$path" ] && [ ! -L "$path" ] || return 1
+  owner=$(owner_of "$path" 2>/dev/null || true)
+  [ "$owner" = "$(id -u)" ] || return 1
+  mode=$(mode_of "$path" 2>/dev/null || true)
+  case "$mode" in [0-7][0-7][0-7]) ;; *) return 1 ;; esac
+  group=${mode#?}; group=${group%?}
+  other=${mode#??}
+  case "$group$other" in *[2367]*) return 1 ;; esac
+}
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
 
 [ "${1:-}" = publish ] && [ "$#" = 2 ] || { usage >&2; exit 2; }
@@ -31,11 +42,13 @@ fi
 HANDOFF="$HANDOFF_DIR/$ID.json"
 valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
 
+valid_private_dir "$DATA" || die "unsafe task record directory"
 REC_DIR="$DATA/$ID"
 if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
-  [ -d "$REC_DIR" ] && [ ! -L "$REC_DIR" ] || die "unsafe task record directory"
+  valid_private_dir "$REC_DIR" || die "unsafe task record directory"
 else
-  (umask 077; mkdir -p "$REC_DIR") || die "could not create task record directory"
+  (umask 077; mkdir "$REC_DIR") || die "could not create task record directory"
+  valid_private_dir "$REC_DIR" || die "unsafe task record directory"
 fi
 
 # shellcheck source=bin/fm-wake-lib.sh

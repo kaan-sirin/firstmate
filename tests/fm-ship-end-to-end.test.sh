@@ -244,6 +244,36 @@ test_preflight_rejects_cross_task_records() {
   pass "preflight refuses cross-task records and empty bridge contracts"
 }
 
+test_bridge_preserves_handoff_when_record_directories_are_unsafe() {
+  local home="$TMP_ROOT/bridge-unsafe-directories" contract="$TMP_ROOT/bridge-unsafe-directories-contract.json" out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+
+  write_bridge_handoff "$home" data-unsafe-a1 "$contract" bridge approved 100 >/dev/null || fail "could not write data-directory handoff"
+  chmod 733 "$home/data"
+  out=$(bridge_env "$home" publish data-unsafe-a1 2>&1)
+  status=$?
+  chmod 755 "$home/data"
+  [ "$status" -ne 0 ] || fail "bridge published through a writable data directory"
+  assert_contains "$out" "unsafe task record directory" "unsafe data directory refusal was unclear"
+  [ -f "$home/state/agent-bridge/ship-preflight/data-unsafe-a1.json" ] \
+    || fail "unsafe data directory publication consumed its handoff"
+  assert_absent "$home/data/data-unsafe-a1/ship-preflight.json" "unsafe data directory publication wrote a record"
+
+  write_bridge_handoff "$home" task-unsafe-a1 "$contract" bridge approved 100 >/dev/null || fail "could not write task-directory handoff"
+  mkdir "$home/data/task-unsafe-a1"
+  chmod 733 "$home/data/task-unsafe-a1"
+  out=$(bridge_env "$home" publish task-unsafe-a1 2>&1)
+  status=$?
+  chmod 700 "$home/data/task-unsafe-a1"
+  [ "$status" -ne 0 ] || fail "bridge published through a writable task directory"
+  assert_contains "$out" "unsafe task record directory" "unsafe task directory refusal was unclear"
+  [ -f "$home/state/agent-bridge/ship-preflight/task-unsafe-a1.json" ] \
+    || fail "unsafe task directory publication consumed its handoff"
+  assert_absent "$home/data/task-unsafe-a1/ship-preflight.json" "unsafe task directory publication wrote a record"
+  pass "bridge preserves handoffs when record directories are unsafe"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -774,6 +804,7 @@ test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
 test_preflight_rejects_cross_task_records
+test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
