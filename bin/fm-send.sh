@@ -390,7 +390,7 @@ fm_send_close_resolved_keys() {  # <answer-text>
   for k in $RESOLVE_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
-    if ! "$SCRIPT_DIR/fm-status-event.sh" resolve "$STATE" "$RESOLVE_TASK_ID" "$FM_LINE_CAP_LINE"; then
+    if ! "$SCRIPT_DIR/fm-status-event.sh" self-resolve "$STATE" "$RESOLVE_TASK_ID" "$FM_LINE_CAP_LINE"; then
       echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it with fm-status-event.sh resolve - do not resend the answer." >&2
       return 1
     fi

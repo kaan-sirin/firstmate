@@ -6,6 +6,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 usage() {
   echo "usage: fm-status-event.sh append <state-dir> <task-id> <status-line>" >&2
   echo "       fm-status-event.sh resolve <state-dir> <task-id> <resolved-status-line>" >&2
+  echo "       fm-status-event.sh self-append <state-dir> <task-id> <status-line>" >&2
+  echo "       fm-status-event.sh self-resolve <state-dir> <task-id> <resolved-status-line>" >&2
   echo "       fm-status-event.sh record <state-dir> <task-id> <status-line> <epoch>" >&2
   exit 2
 }
@@ -21,7 +23,7 @@ case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
 . "$SCRIPT_DIR/fm-classify-lib.sh"
 
 case "$MODE" in
-  append|resolve)
+  append|resolve|self-append|self-resolve)
     at=$(date +%s)
     ;;
   record)
@@ -39,16 +41,19 @@ case "$(status_line_verb "$LINE")" in
   failed) state=failed ;;
   *) state= ;;
 esac
-if [ "$MODE" = resolve ]; then
+if [ "$MODE" = resolve ] || [ "$MODE" = self-resolve ]; then
   [ "$(status_line_verb "$LINE")" = "${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}" ] || usage
   state=working
 fi
 if [ "$MODE" = record ]; then
   [ -z "$state" ] || "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at"
 else
-  if [ "$MODE" = resolve ]; then
-    "$SCRIPT_DIR/fm-dashboard-transition.sh" resolve "$STATE" "$ID" "$at" "$LINE"
-  else
-    "$SCRIPT_DIR/fm-dashboard-transition.sh" append "$STATE" "$ID" "$state" "$at" "$LINE"
-  fi
+  case "$MODE" in
+    resolve|self-resolve)
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" "$MODE" "$STATE" "$ID" "$at" "$LINE"
+      ;;
+    append|self-append)
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" "$MODE" "$STATE" "$ID" "$state" "$at" "$LINE"
+      ;;
+  esac
 fi

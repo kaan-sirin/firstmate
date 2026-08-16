@@ -880,13 +880,13 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
 }
 
 fm_pending_reply_append_status() {  # <state-dir> <record-path> <status-line>
-  local state=$1 rec=$2 line=$3 task_id parent_status state_real
+  local state=$1 rec=$2 line=$3 mode=${4:-append} task_id parent_status state_real
   task_id=$(fm_pending_reply_get "$rec" task_id)
   parent_status=$(fm_pending_reply_get "$rec" parent_status)
   [ -n "$task_id" ] && [ -n "$parent_status" ] || return 1
   state_real=$(cd "$state" 2>/dev/null && pwd) || return 1
   [ "$parent_status" = "$state_real/$task_id.status" ] || return 1
-  "$_FM_PENDING_REPLY_LIB_DIR/fm-status-event.sh" append "$state_real" "$task_id" "$line"
+  "$_FM_PENDING_REPLY_LIB_DIR/fm-status-event.sh" "$mode" "$state_real" "$task_id" "$line"
 }
 
 # Close the durable status decision a previous escalation opened for <corr_id>.
@@ -939,7 +939,7 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       printf -v line 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s' \
         "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
         "$(fm_pending_reply_get "$rec" resolved_via)"
-      fm_pending_reply_append_status "$state" "$rec" "$line" || return 1
+      fm_pending_reply_append_status "$state" "$rec" "$line" self-resolve || return 1
       break
     done <<EOF
 $(status_open_decisions "$parent_status")

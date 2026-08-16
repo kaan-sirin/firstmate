@@ -7,6 +7,8 @@ usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
   echo "       fm-dashboard-transition.sh append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
   echo "       fm-dashboard-transition.sh resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
+  echo "       fm-dashboard-transition.sh self-append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
+  echo "       fm-dashboard-transition.sh self-resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
   echo "       fm-dashboard-transition.sh replay-busy <state-dir> <task-id>" >&2
   exit 2
 }
@@ -31,8 +33,8 @@ if [ "$ACTION" = replay-busy ]; then
   esac
   exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
 fi
-[ "$ACTION" = record ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || usage
-if [ "$ACTION" = resolve ]; then
+[ "$ACTION" = record ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
+if [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   CURRENT=working
   AT=${4:-}
   LINE=${5:-}
@@ -44,11 +46,13 @@ fi
 case "$ACTION:$CURRENT" in
   record:working|record:parked|record:paused|record:blocked|record:failed|record:done|record:unknown) ;;
   append:|append:working|append:parked|append:paused|append:blocked|append:failed|append:done|append:unknown) ;;
+  self-append:|self-append:working|self-append:parked|self-append:paused|self-append:blocked|self-append:failed|self-append:done|self-append:unknown) ;;
   resolve:working) ;;
+  self-resolve:working) ;;
   *) usage ;;
 esac
 case "$AT" in ''|*[!0-9]*) usage ;; esac
-[ "$ACTION" != append ] && [ "$ACTION" != resolve ] || [ -n "$LINE" ] || usage
+case "$ACTION" in append|resolve|self-append|self-resolve) [ -n "$LINE" ] || usage ;; esac
 
 META="$STATE/$ID.meta"
 has_meta=0
@@ -57,7 +61,7 @@ if [ -f "$META" ] && [ ! -L "$META" ]; then
   incarnation=$(sed -n 's/^dashboard_incarnation=//p' "$META" | tail -1)
   case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
 fi
-[ "$has_meta" = 1 ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || exit 0
+[ "$has_meta" = 1 ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || exit 0
 
 DIR="$STATE/dashboard-transitions"
 if [ -e "$DIR" ] || [ -L "$DIR" ]; then
@@ -88,7 +92,7 @@ if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ -f "$RECORD" ] && [ ! -L "$RECO
   fi
 fi
 case "$prior_at:$prior_active" in *[!0-9:]*|:*) prior_at=; prior_active=0 ;; esac
-if [ "$ACTION" = resolve ]; then
+if [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   case "$prior_state" in done|failed) CURRENT= ;; esac
 fi
 if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ "$prior_state" != "$CURRENT" ]; then
@@ -102,4 +106,13 @@ if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ "$prior_state" != "$CURRENT" ];
     exit 1
   fi
 fi
-[ "$ACTION" != append ] && [ "$ACTION" != resolve ] || printf '%s\n' "$LINE" >> "$STATE/$ID.status"
+case "$ACTION" in
+  append|resolve)
+    printf '%s\n' "$LINE" >> "$STATE/$ID.status"
+    ;;
+  self-append|self-resolve)
+    append_rc=0
+    fm_wake_status_append_self_announced "$STATE" "$STATE/$ID.status" "$LINE" || append_rc=$?
+    [ "$append_rc" -ne 2 ] || exit 1
+    ;;
+esac
