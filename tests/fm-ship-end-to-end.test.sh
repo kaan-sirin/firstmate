@@ -2,6 +2,7 @@
 # Behavior tests for the two-phase ship preflight record and private dashboard.
 set -u
 
+# shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
@@ -45,7 +46,10 @@ publish_preflight_record() {
     {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract}
     + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
   ' > "$tmp" || { rm -f -- "$tmp"; fail "could not write bridge record"; }
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$handoff" || { rm -f -- "$tmp"; fail "could not prepare bridge handoff"; }
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
+    rm -f -- "$tmp"
+    fail "could not prepare bridge handoff"
+  fi
   bridge_env "$home" publish "$id" >/dev/null || fail "could not publish bridge record"
   printf '%s' "$fp"
 }
@@ -95,7 +99,9 @@ test_preflight_requires_typed_authority_evidence() {
   fp=$(publish_preflight_record "$home" authority-a1 "$contract" bridge approved 100) || fail "could not publish approved bridge preflight"
   record="$home/data/authority-a1/ship-preflight.json"
   tmp=$(mktemp "$home/data/authority-a1/.approval.XXXXXX") || fail "could not prepare malformed approval"
-  jq 'del(.approval.authority)' "$record" > "$tmp" && mv -f -- "$tmp" "$record" || fail "could not remove approval authority"
+  if ! jq 'del(.approval.authority)' "$record" > "$tmp" || ! mv -f -- "$tmp" "$record"; then
+    fail "could not remove approval authority"
+  fi
   chmod 600 "$record"
   out=$(preflight_env "$home" 101 verify authority-a1 --fingerprint "$fp" 2>&1)
   status=$?
@@ -105,7 +111,9 @@ test_preflight_requires_typed_authority_evidence() {
   fp=$(publish_preflight_record "$home" evidence-a1 "$contract" direct approved 100) || fail "could not publish approved direct preflight"
   record="$home/data/evidence-a1/ship-preflight.json"
   tmp=$(mktemp "$home/data/evidence-a1/.approval.XXXXXX") || fail "could not prepare malformed evidence"
-  jq '.approval.evidence = "unverified"' "$record" > "$tmp" && mv -f -- "$tmp" "$record" || fail "could not alter approval evidence"
+  if ! jq '.approval.evidence = "unverified"' "$record" > "$tmp" || ! mv -f -- "$tmp" "$record"; then
+    fail "could not alter approval evidence"
+  fi
   chmod 600 "$record"
   out=$(preflight_env "$home" 101 verify evidence-a1 --fingerprint "$fp" 2>&1)
   status=$?
@@ -326,6 +334,7 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   local home="$TMP_ROOT/dashboard-ledger" state_file="$TMP_ROOT/dashboard-ledger-state" state_bin="$TMP_ROOT/dashboard-ledger-bin" record
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' 'kind=ship' > "$home/state/ledger-a1.meta"
+  # shellcheck disable=SC2016 # Variables expand in the generated state fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'IFS= read -r state < "$FM_DASHBOARD_TEST_STATE"' 'IFS= read -r timestamp < "$FM_DASHBOARD_TEST_TIMESTAMP"' 'printf "state: %s · source: run-step · transition_at: %s\\n" "$state" "$timestamp"' > "$state_bin"
   chmod +x "$state_bin"
   printf '%s\n' working > "$state_file"
@@ -351,6 +360,7 @@ test_status_event_persists_transition_before_status() {
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/status-event-bin"
   printf '%s\n' 'kind=ship' > "$home/state/status-a1.meta"
   fake_date="$TMP_ROOT/status-event-bin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'working: implementation started' || fail "working status event failed"
@@ -374,6 +384,7 @@ test_dashboard_busy_events_preserve_hidden_transitions() {
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-busy-bin"
   printf '%s\n' 'kind=ship' > "$home/state/busy-a1.meta"
   fake_date="$TMP_ROOT/dashboard-busy-bin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   gen=$(PATH="$TMP_ROOT/dashboard-busy-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-a1) || fail "busy event arm failed"
@@ -391,6 +402,7 @@ test_dashboard_replays_spawn_busy_event_across_metadata_updates() {
   local home="$TMP_ROOT/dashboard-spawn-replay" fake_date gen record
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-spawn-bin"
   fake_date="$TMP_ROOT/dashboard-spawn-bin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   gen=$(PATH="$TMP_ROOT/dashboard-spawn-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" replay-a1) || fail "pre-metadata busy event failed"
@@ -412,6 +424,7 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-a1.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
+  # shellcheck disable=SC2016 # Positional parameters expand in the generated spawn fixture.
   printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --recover-missing ] || exit 2' 'printf "replacement refused\\n" >&2' 'exit 1' > "$spawn_bin"
   chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "first automatic recovery attempt failed"
@@ -432,6 +445,7 @@ test_dashboard_recovery_relaunches_dead_endpoint() {
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-dead.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  # shellcheck disable=SC2016 # Positional parameters expand in the generated spawn fixture.
   printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --relaunch ] || exit 2' 'exit 0' > "$spawn_bin"
   chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-dead \
@@ -496,6 +510,7 @@ test_dashboard_recovery_excludes_endpoint_outage() {
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$spawn_bin"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$state_bin" "$agent_bin" "$spawn_bin" "$fake_date"
   gen=$(PATH="$TMP_ROOT/dashboard-recovery-timing-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" dash-a3) || fail "initial busy event failed"
@@ -512,7 +527,7 @@ test_dashboard_keeps_only_active_tasks() {
   mkdir -p "$home/data" "$home/state"
   write_snapshot "$mock" working '[]'
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
-  write_snapshot "$mock" done '[]'
+  write_snapshot "$mock" "done" '[]'
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "completed dashboard refresh failed"
   record="$home/data/dashboard.json"
   jq -e '.projection.in_progress == [] and .projection.needs_you == [] and .technical.tasks == []' "$record" >/dev/null \

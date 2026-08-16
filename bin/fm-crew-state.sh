@@ -196,9 +196,9 @@ confirmed_endpoint_loss_state() {
 }
 
 busy_transition_at() {
-  local record busy_state busy_source busy_event busy_seq busy_at
+  local record busy_state busy_source busy_at
   record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || return 1
-  read -r busy_state busy_source busy_event busy_seq busy_at <<< "$record"
+  read -r busy_state busy_source _ _ busy_at <<< "$record"
   [ "$busy_state" = busy ] || return 1
   [ "$busy_source" = "${BUSY_VERDICT#* }" ] || return 1
   case "$busy_at" in ''|*[!0-9]*) return 1 ;; esac
@@ -573,7 +573,7 @@ if [ "$HAVE_RUN" = 1 ]; then
 
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at done || true)"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at "done" || true)"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -584,7 +584,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at done || true)"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at "done" || true)"
     fi
   fi
 

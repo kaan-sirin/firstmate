@@ -35,7 +35,7 @@ case "$(status_line_verb "$LINE")" in
   needs-decision) state=parked ;;
   blocked) state=blocked ;;
   "${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}") state=paused ;;
-  done) state=done ;;
+  "done") state="done" ;;
   failed) state=failed ;;
   *) state= ;;
 esac

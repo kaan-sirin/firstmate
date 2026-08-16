@@ -1054,6 +1054,7 @@ test_resolved_answer_uses_canonical_transition() {
   make_fakebin "$d" >/dev/null
   mkdir -p "$d/datebin"
   fake_date="$d/datebin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   fm_write_meta "$d/state/resolved-answer.meta" "window=fm:fm-resolved-answer" "worktree=$d/wt" "kind=ship" "harness=claude" "dashboard_incarnation=resolved-answer-1"

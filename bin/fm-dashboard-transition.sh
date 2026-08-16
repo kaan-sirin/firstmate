@@ -22,7 +22,7 @@ if [ "$ACTION" = replay-busy ]; then
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh"
   busy=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || exit 0
-  read -r busy_state busy_source busy_event busy_seq busy_at <<< "$busy"
+  read -r busy_state _ _ _ busy_at <<< "$busy"
   case "$busy_state:$busy_at" in
     busy:[0-9]*) CURRENT=working ;;
     idle:[0-9]*) CURRENT=parked ;;

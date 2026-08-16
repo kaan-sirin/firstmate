@@ -69,6 +69,7 @@ case "$NOW" in ''|*[!0-9]*) echo "fm-dashboard: FM_DASHBOARD_NOW must be an epoc
 case "$MAX_SNAPSHOT_BYTES" in ''|*[!0-9]*|0) echo "fm-dashboard: FM_DASHBOARD_MAX_SNAPSHOT_BYTES must be a positive integer" >&2; exit 2 ;; esac
 case "$MAX_RECORD_BYTES" in ''|*[!0-9]*|0) echo "fm-dashboard: FM_DASHBOARD_MAX_RECORD_BYTES must be a positive integer" >&2; exit 2 ;; esac
 
+# shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$DATA/.dashboard.lock"
 fm_lock_acquire_wait "$LOCK"
