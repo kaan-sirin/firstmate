@@ -451,6 +451,18 @@ dashboard_transition_observe() {
   "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$1" "$2" "$3"
 }
 
+dashboard_refresh() {
+  [ -x "$SCRIPT_DIR/fm-dashboard.sh" ] || return 0
+  "$SCRIPT_DIR/fm-dashboard.sh" refresh >/dev/null 2>&1 \
+    || triage_log "dashboard refresh failed"
+}
+
+dashboard_refresh_after_wake() {
+  dashboard_refresh
+}
+
+FM_WAKE_POST_DELIVERY_ACTION=dashboard_refresh_after_wake
+
 dashboard_transition_reconcile() {
   local task=$1 line state transition_at
   line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
@@ -1232,9 +1244,8 @@ EOF
   # The private dashboard is a checkpointed projection, not a second watcher.
   # Refresh it on the existing heartbeat cadence so it uses the same canonical
   # current-state reconciliation without adding a controller or poll loop.
-  if [ "$DASHBOARD_DUE" = 1 ] && [ -x "$SCRIPT_DIR/fm-dashboard.sh" ]; then
-    "$SCRIPT_DIR/fm-dashboard.sh" refresh >/dev/null 2>&1 \
-      || triage_log "dashboard refresh failed"
+  if [ "$DASHBOARD_DUE" = 1 ]; then
+    dashboard_refresh
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
