@@ -1665,6 +1665,32 @@ if [ "$KIND" = ship ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi
+  # The opt-in ship-end-to-end workflow binds its approved phase-1 record to
+  # the brief handed to this worker. Existing briefs carry neither marker nor
+  # record and retain their established lifecycle. Once a typed record exists,
+  # however, a missing, stale, or mismatched marker fails before any endpoint
+  # can be created. The record owner validates approval authority and scope.
+  PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+  PREFLIGHT_MARKERS=$(grep -c '^Ship preflight: fingerprint=[0-9a-f]\{64\}$' "$BRIEF" || true)
+  [ "$PREFLIGHT_MARKERS" -le 1 ] || {
+    echo "error: ship brief contains multiple preflight fingerprints" >&2
+    exit 1
+  }
+  PREFLIGHT_FINGERPRINT=$(sed -n 's/^Ship preflight: fingerprint=\([0-9a-f]\{64\}\)$/\1/p' "$BRIEF")
+  if [ -e "$PREFLIGHT_RECORD" ] || [ -L "$PREFLIGHT_RECORD" ]; then
+    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+      echo "error: ship preflight record for $ID is unsafe" >&2
+      exit 1
+    }
+    [ -n "$PREFLIGHT_FINGERPRINT" ] || {
+      echo "error: ship preflight record exists for $ID but the brief carries no matching fingerprint" >&2
+      exit 1
+    }
+  fi
+  if [ -n "$PREFLIGHT_FINGERPRINT" ]; then
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify "$ID" \
+      --fingerprint "$PREFLIGHT_FINGERPRINT" || exit 1
+  fi
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which
@@ -2632,7 +2658,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2647,6 +2673,7 @@ preserve_relaunch_meta() {
   echo "kind=$KIND"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
+  [ -z "${PREFLIGHT_FINGERPRINT:-}" ] || echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
   echo "effort=${EFFORT:-default}"

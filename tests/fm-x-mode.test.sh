@@ -2245,6 +2245,20 @@ test_link_records_request_and_timestamp() {
   pass "fm-x-link records and refreshes the X-request link without disturbing meta"
 }
 
+test_link_records_safe_thread_url() {
+  local home meta rc
+  home="$TMP_ROOT/link-thread-url"; private_artifact_dir "$home/state/x-inbox"
+  meta="$home/state/task-thread.meta"
+  printf 'window=w\nworktree=/wt\nkind=ship\nmode=no-mistakes\nyolo=off\n' > "$meta"
+  jq -cn '{request_id:"req-thread",tweet_id:"123",reply_max_chars:280,thread_url:"https://slack.example/thread/123",text:"ship this"}' \
+    > "$home/state/x-inbox/req-thread.json"
+  private_artifact_file "$home/state/x-inbox/req-thread.json"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 "$ROOT/bin/fm-x-link.sh" task-thread req-thread >/dev/null; rc=$?
+  expect_code 0 "$rc" "thread URL link exit"
+  assert_grep 'x_thread_url=https://slack.example/thread/123' "$meta" "link must keep a source thread URL for private consumers"
+  pass "fm-x-link records a safe source thread URL"
+}
+
 test_link_records_discord_platform_for_followups() {
   local home meta out rc reply
   home="$TMP_ROOT/link-discord-platform"; private_artifact_dir "$home/state/x-inbox"
@@ -2935,6 +2949,7 @@ test_dismiss_transport_failure_fails
 test_dismiss_unsafe_request_id_rejected
 test_dismiss_usage_error
 test_link_records_request_and_timestamp
+test_link_records_safe_thread_url
 test_link_records_discord_platform_for_followups
 test_link_resolves_platform_by_request_id_after_inbox_cleanup
 test_link_warns_loudly_when_platform_unresolvable

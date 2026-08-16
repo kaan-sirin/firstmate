@@ -41,7 +41,7 @@
 #   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
 #                                printing HTTP code and writing response body
 #   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
-#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]
+#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [thread-url]
 #                                - (re)write the X-request link, defaulting
 #                                followups to 0
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
@@ -928,7 +928,7 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [thread-url]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
 # line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
@@ -936,13 +936,13 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp lock
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} thread_url=${7:-} tmp lock
   [ -f "$meta" ] || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_thread_url=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
@@ -954,6 +954,17 @@ fmx_meta_link_set() {
   case "$reply_max" in
     ''|*[!0-9]*) ;;
     *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
+  esac
+  case "$thread_url" in
+    https://*)
+      if [ "${#thread_url}" -gt 2048 ]; then
+        rm -f -- "$tmp"; fm_lock_release "$lock"; return 1
+      fi
+      case "$thread_url" in
+        *$'\n'*|*$'\r'*|*[[:space:]]*) rm -f -- "$tmp"; fm_lock_release "$lock"; return 1 ;;
+      esac
+      printf 'x_thread_url=%s\n' "$thread_url" >> "$tmp" || { rm -f -- "$tmp"; fm_lock_release "$lock"; return 1; }
+      ;;
   esac
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
@@ -988,7 +999,7 @@ fmx_meta_link_clear() {
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_thread_url=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }

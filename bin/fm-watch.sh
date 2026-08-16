@@ -1176,7 +1176,9 @@ EOF
   [ "$streak" -gt 12 ] && streak=12
   hb=$(( HEARTBEAT * (1 << streak) ))
   [ "$hb" -gt "$HEARTBEAT_MAX" ] && hb=$HEARTBEAT_MAX
+  DASHBOARD_DUE=0
   if [ "$(age_of "$STATE/.last-heartbeat")" -ge "$hb" ]; then
+    DASHBOARD_DUE=1
     # Triage: in always-on mode a heartbeat is benign unless the cheap fleet-scan
     # turns up a captain-relevant status the per-wake path missed. Absorb the
     # no-change case (advance the schedule and back off exactly as wake() would,
@@ -1199,6 +1201,14 @@ EOF
       echo $(( $(cat "$STATE/.heartbeat-streak" 2>/dev/null || echo 0) + 1 )) > "$STATE/.heartbeat-streak"
       triage_log "absorbed heartbeat (no captain-relevant change)"
     fi
+  fi
+
+  # The private dashboard is a checkpointed projection, not a second watcher.
+  # Refresh it on the existing heartbeat cadence so it uses the same canonical
+  # current-state reconciliation without adding a controller or poll loop.
+  if [ "$DASHBOARD_DUE" = 1 ] && [ -x "$SCRIPT_DIR/fm-dashboard.sh" ]; then
+    "$SCRIPT_DIR/fm-dashboard.sh" refresh >/dev/null 2>&1 \
+      || triage_log "dashboard refresh failed"
   fi
 
   # Terminal wait: a bounded native-event wait for push-capable homes (herdr),
