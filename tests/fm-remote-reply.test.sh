@@ -86,6 +86,31 @@ sha256_file() {
   fi
 }
 
+write_delta_result() {
+  local result=$1 line=$2 payload empty payload_bytes payload_hash empty_hash
+  payload="$result.payload"
+  empty="$result.empty"
+  printf '%s\n' "$line" > "$payload"
+  : > "$empty"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d '[:space:]')
+  payload_hash=$(sha256_file "$payload") || fail "could not hash remote delta payload"
+  empty_hash=$(sha256_file "$empty") || fail "could not hash empty remote delta prefix"
+  {
+    printf 'schema=fm-remote-delta.v1\n'
+    printf 'status=delta\n'
+    printf 'path=state/parent-replies.status\n'
+    printf 'from_offset=0\n'
+    printf 'to_offset=%s\n' "$payload_bytes"
+    printf 'from_prefix_sha256=%s\n' "$empty_hash"
+    printf 'to_prefix_sha256=%s\n' "$payload_hash"
+    printf 'payload_sha256=%s\n' "$payload_hash"
+    printf 'payload_bytes=%s\n' "$payload_bytes"
+    printf 'reason=fixture\n\n'
+    cat "$payload"
+  } > "$result"
+  rm -f -- "$payload" "$empty"
+}
+
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
@@ -131,6 +156,36 @@ assert_present "$PARENT/state/procevent-inbox/$SID.1.handled" \
 assert_present "$PARENT/state/procevent/$SID.source" \
   "applying the capture left the relay unarmed for the next delta"
 pass "a captured delta is applied, acknowledged, and re-armed without a handler"
+
+TIMING_BIN="$TMP_ROOT/timing-bin"
+TIMING_RESULT="$TMP_ROOT/timing.result"
+TIMING_FAIL_ONCE="$TMP_ROOT/timing-transition-failed"
+cp -R "$ROOT/bin" "$TIMING_BIN"
+write_delta_result "$TIMING_RESULT" 'done: timing retry fixture'
+printf '%s\n' 'kind=ship' > "$PARENT/state/timing.meta"
+cat > "$TIMING_BIN/fm-dashboard-transition.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -e "$TIMING_FAIL_ONCE" ]; then
+  : > "$TIMING_FAIL_ONCE"
+  exit 1
+fi
+exec "$ROOT/bin/fm-dashboard-transition.sh" "\$@"
+EOF
+chmod +x "$TIMING_BIN/fm-dashboard-transition.sh"
+set +e
+remote_env "$TIMING_BIN/fm-procevent-remote-reply.sh" ingest timing "$TIMING_RESULT" > "$TMP_ROOT/timing-first.out" 2>&1
+timing_rc=$?
+set -e
+[ "$timing_rc" -ne 0 ] || fail "failed dashboard transition accepted a remote status"
+assert_absent "$PARENT/state/timing.status" "failed dashboard transition wrote a remote status"
+assert_absent "$PARENT/state/dashboard-transitions/timing.json" "failed dashboard transition wrote timing state"
+remote_env "$TIMING_BIN/fm-procevent-remote-reply.sh" ingest timing "$TIMING_RESULT" > "$TMP_ROOT/timing-retry.out" 2>&1 \
+  || fail "remote status retry did not recover after transition failure"
+assert_contains "$(cat "$TMP_ROOT/timing-retry.out")" 'ingested: timing appended=1' "remote retry did not accept its status"
+assert_grep 'done: timing retry fixture' "$PARENT/state/timing.status" "remote retry did not append its status"
+jq -e '.state == "done" and (.transition_at | type == "number")' "$PARENT/state/dashboard-transitions/timing.json" >/dev/null \
+  || fail "remote retry did not persist canonical timing"
+pass "remote status retries persist timing before accepting the status"
 
 # Now the handler's own retry path, from the state a crash between applying and
 # acknowledging leaves behind: the acknowledgement is gone and re-arming fails.
