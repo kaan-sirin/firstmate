@@ -26,11 +26,11 @@ For a complete plan that the captain explicitly approved, set `complete_plan_app
 Create the typed record:
 
 ```sh
-bin/fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <contract.json>
+bin/fm-ship-end-to-end.sh preflight <task-id> --contract <contract.json>
 ```
 
 Report its fingerprint in the contract. Wait for one explicit captain approval or correction for direct work.
-For an explicitly approved direct complete plan, record the captain authority and evidence in the preflight command instead of asking a duplicate question.
+For an explicitly approved direct complete plan, submit its fingerprint for the one direct approval without asking a duplicate question.
 For Slack work, the Agent bridge verifies the allowlisted same-thread approval and submits FirstMate's typed preflight record through its trusted internal task path. Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
 
 ## Phase 2 - approved execution
@@ -38,7 +38,7 @@ For Slack work, the Agent bridge verifies the allowlisted same-thread approval a
 Approve only the same fingerprint:
 
 ```sh
-bin/fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256> --authority direct-captain --evidence '<approval evidence>'
+bin/fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256>
 ```
 
 If the captain corrects the contract before approval, use `correct` and present the new fingerprint.

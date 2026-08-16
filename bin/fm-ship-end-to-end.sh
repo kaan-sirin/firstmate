@@ -2,9 +2,8 @@
 # Own the durable two-phase approval record for a material software ship task.
 #
 # Usage:
-#   fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <json-file>
-#   fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <json-file> --approved-authority direct-captain --approval-evidence <text>
-#   fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256> [--authority direct-captain --evidence <text>]
+#   fm-ship-end-to-end.sh preflight <task-id> --contract <json-file>
+#   fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh correct <task-id> --contract <json-file>
 #   fm-ship-end-to-end.sh verify <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-current <task-id>
@@ -21,7 +20,6 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
 MAX_CONTRACT_BYTES=${FM_SHIP_PREFLIGHT_MAX_CONTRACT_BYTES:-32768}
-MAX_EVIDENCE_BYTES=${FM_SHIP_PREFLIGHT_MAX_EVIDENCE_BYTES:-4096}
 
 usage() { sed -n '2,14p' "$0" | sed 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
@@ -30,7 +28,6 @@ mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %
 valid_private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ]; }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
 valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s' "$1" | grep -q '[^0-9a-f]' ;; *) return 1;; esac; }
-valid_direct_authority() { [ "$1" = direct-captain ]; }
 
 COMMAND=${1:-}
 case "$COMMAND" in preflight|approve|correct|verify|verify-current|verify-dispatched) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
@@ -39,20 +36,15 @@ valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
 case "$MAX_AGE" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_AGE must be a positive integer";; esac
 case "$MAX_CONTRACT_BYTES" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_CONTRACT_BYTES must be a positive integer";; esac
-case "$MAX_EVIDENCE_BYTES" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_EVIDENCE_BYTES must be a positive integer";; esac
 
-ORIGIN=''
 CONTRACT=''
 FINGERPRINT=''
-AUTHORITY=''
-EVIDENCE=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    --origin|--contract|--fingerprint|--authority|--evidence|--approved-authority|--approval-evidence)
+    --contract|--fingerprint)
       key=${1#--}; shift; [ "$#" -gt 0 ] || die "--$key needs a value"
       case "$key" in
-        origin) ORIGIN=$1;; contract) CONTRACT=$1;; fingerprint) FINGERPRINT=$1;;
-        authority|approved-authority) AUTHORITY=$1;; evidence|approval-evidence) EVIDENCE=$1;;
+        contract) CONTRACT=$1;; fingerprint) FINGERPRINT=$1;;
       esac
       ;;
     *) usage >&2; exit 2;;
@@ -95,18 +87,23 @@ preflight_fingerprint() {
   sha256_text "$bound"
 }
 validate_direct_approval() {
-  local authority=$1 evidence=$2
-  valid_direct_authority "$authority" || die "direct preflight requires direct captain approval"
-  [ -n "$evidence" ] || die "approval evidence is required"
-  [ "$(printf '%s' "$evidence" | wc -c | tr -d ' ')" -le "$MAX_EVIDENCE_BYTES" ] || die "approval evidence exceeds the bounded size"
+  jq -e '
+    .approval == {
+      authority:"direct-captain",
+      evidence:"direct-session",
+      approved_at:.approval.approved_at,
+      complete_plan_bypass:.approval.complete_plan_bypass
+    } and
+    (.approval.approved_at | type == "number") and
+    (.approval.complete_plan_bypass | type == "boolean")
+  ' "$RECORD" >/dev/null || die "preflight lacks a direct captain approval"
 }
 validate_submitted_approval() {
   jq -e '
     (.approval | type == "object") and
-    (.approval.authority | type == "string" and length > 0) and
-    (.approval.evidence | type == "string" and length > 0) and
+    (.approval.authority == "agent-bridge") and
     (.approval.approved_at | type == "number") and
-    (.approval.complete_plan_bypass | type == "boolean")
+    (.approval.complete_plan_bypass == false)
   ' "$RECORD" >/dev/null || die "preflight lacks a typed submitted approval"
 }
 read_record() {
@@ -145,14 +142,12 @@ lock_transition() {
   trap 'fm_lock_release "$PREFLIGHT_LOCK" || true' EXIT
 }
 verify_record() {
-  local fingerprint=$1 require_fresh=${2:-1} origin authority evidence bypass approved_at
+  local fingerprint=$1 require_fresh=${2:-1} origin bypass approved_at
   [ "$(jq -r '.state' "$RECORD")" = approved ] || die "preflight approval is missing"
   [ "$(jq -r '.fingerprint' "$RECORD")" = "$fingerprint" ] || die "preflight fingerprint does not match the approved contract"
   origin=$(jq -r '.origin' "$RECORD")
   if [ "$origin" = direct ]; then
-    authority=$(jq -r '.approval.authority // ""' "$RECORD")
-    evidence=$(jq -r '.approval.evidence // ""' "$RECORD")
-    validate_direct_approval "$authority" "$evidence"
+    validate_direct_approval
   else
     validate_submitted_approval
   fi
@@ -170,22 +165,14 @@ verify_record() {
 
 case "$COMMAND" in
   preflight)
-    case "$ORIGIN" in direct) ;; *) die "direct preflight requires --origin direct";; esac
     validate_contract
     prepare_dir
     lock_transition
     [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ] || die "preflight already exists; use correct to replace an unapproved contract"
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
     FP=$(preflight_fingerprint "$CANONICAL_CONTRACT") || die "could not bind preflight fingerprint"
-    if [ -n "$AUTHORITY" ] || [ -n "$EVIDENCE" ]; then
-      validate_direct_approval "$AUTHORITY" "$EVIDENCE"
-      jq -e '.complete_plan_approved == true' "$CONTRACT" >/dev/null || die "approved-complete-plan bypass requires complete_plan_approved=true"
-      jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:$authority,evidence:$evidence,approved_at:$now,complete_plan_bypass:true}}' | publish
-    else
-      jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now}' | publish
-    fi
+    jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --argjson now "$NOW" \
+      '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,created_at:$now}' | publish
     printf 'fingerprint=%s\n' "$FP"
     ;;
   approve)
@@ -196,8 +183,8 @@ case "$COMMAND" in
     [ "$origin" != bridge ] || die "submitted preflight is already authorized"
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "preflight is not awaiting approval"
     [ "$(jq -r '.fingerprint' "$RECORD")" = "$FINGERPRINT" ] || die "approval fingerprint does not match the current contract"
-    validate_direct_approval "$AUTHORITY" "$EVIDENCE"
-    APPROVAL=$(jq -cn --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" '{authority:$authority,evidence:$evidence,complete_plan_bypass:false}')
+    APPROVAL=$(jq -cn --argjson bypass "$(jq -c '.contract.complete_plan_approved == true' "$RECORD")" \
+      '{authority:"direct-captain",evidence:"direct-session",complete_plan_bypass:$bypass}')
     jq --arg fp "$FINGERPRINT" --argjson approval "$APPROVAL" --argjson now "$NOW" \
       'if .state == "awaiting_approval" and .fingerprint == $fp then .state="approved" | .approval=($approval + {approved_at:$now}) else error("preflight changed during approval") end' "$RECORD" | publish
     ;;
@@ -208,9 +195,8 @@ case "$COMMAND" in
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "an approved preflight cannot be corrected; create a new task contract"
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
     FP=$(preflight_fingerprint "$CANONICAL_CONTRACT") || die "could not bind preflight fingerprint"
-    origin=$(jq -r '.origin' "$RECORD")
-    jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$origin" --argjson now "$NOW" \
-      '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now}' | publish
+    jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --argjson now "$NOW" \
+      '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now}' | publish
     printf 'fingerprint=%s\n' "$FP"
     ;;
   verify)
