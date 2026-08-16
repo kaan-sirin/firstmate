@@ -166,6 +166,11 @@ test_no_profile_keeps_claude_profile_defaults() {
 
   launch=$(cat "$LAUNCH_LOG")
   expected="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions \"\$('${ROOT}/bin/fm-operational-input.sh' encode launch-brief < '$HOME_DIR/data/$id/brief.md')\""
+  # A no-mistakes ship gets a per-task wrapper when the executable is present.
+  # The wrapper reports run-state edges to the dashboard after the command exits.
+  if command -v no-mistakes >/dev/null 2>&1; then
+    expected="PATH='/tmp/fm-$id/nm-bin':\$PATH $expected"
+  fi
   [ "$launch" = "$expected" ] || fail "no-profile claude launch did not use the canonical launch kind"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   pass "no --model/--effort records defaults and types the claude launch instructions"
 }
