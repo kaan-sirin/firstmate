@@ -103,6 +103,11 @@ validate_submitted_approval() {
 }
 read_record() {
   local record_contract
+  if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
+    [ -d "$REC_DIR" ] && [ ! -L "$REC_DIR" ] || die "unsafe task record directory"
+  else
+    die "no valid private preflight record"
+  fi
   valid_private "$RECORD" || die "no valid private preflight record"
   jq -e '
     .schema_version == 1 and

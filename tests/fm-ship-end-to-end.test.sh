@@ -139,6 +139,22 @@ test_preflight_rejects_tampering_and_future_approvals() {
   pass "preflight verifies its approved contract and approval clock"
 }
 
+test_preflight_rejects_cross_task_record_directories() {
+  local home="$TMP_ROOT/cross-task" contract="$TMP_ROOT/cross-task-contract.json" out fp status
+  mkdir -p "$home/data"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 preflight approved-a1 --origin direct --contract "$contract") || fail "cross-task preflight create failed"
+  fp=${out#fingerprint=}
+  preflight_env "$home" 100 approve approved-a1 --fingerprint "$fp" --authority direct-captain --evidence approved >/dev/null \
+    || fail "cross-task preflight approval failed"
+  ln -s "$home/data/approved-a1" "$home/data/aliased-a1"
+  out=$(preflight_env "$home" 101 verify-current aliased-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a task directory symlink reused another task's approved preflight"
+  assert_contains "$out" "unsafe task record directory" "cross-task preflight refusal was unclear"
+  pass "preflight refuses cross-task record-directory aliases"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" out fp status
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -443,6 +459,7 @@ test_direct_and_bridge_owned_preflight_authority
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
+test_preflight_rejects_cross_task_record_directories
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_recovers_stale_publication_lock
