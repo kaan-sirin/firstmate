@@ -422,6 +422,7 @@ test_dashboard_busy_events_replay_interrupted_transitions() {
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-busy-replay-bin"
   printf '%s\n' 'kind=ship' > "$home/state/busy-replay-a1.meta"
   fake_date="$TMP_ROOT/dashboard-busy-replay-bin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
   printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
   chmod +x "$fake_date"
   gen=$(PATH="$TMP_ROOT/dashboard-busy-replay-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-replay-a1) || fail "busy replay arm failed"
