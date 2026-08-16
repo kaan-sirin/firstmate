@@ -16,10 +16,10 @@
 # checkpoint, provenance, and resolved stop; `technical.reconciliation` names
 # the canonical state sources. All technical fields are private and additive.
 #
-# The active-time accumulator stores each canonical state transition. A reported
-# transition time bounds every working interval, so paused time is excluded and a
-# restart does not reset elapsed work. `FM_DASHBOARD_NOW` supplies a deterministic
-# epoch for tests; production uses date +%s.
+# The active-time accumulator consumes each canonical state transition. This
+# excludes every paused interval and persists work time across restarts.
+# `FM_DASHBOARD_NOW` supplies a deterministic epoch for tests; production uses
+# date +%s.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -136,22 +136,31 @@ RESULT=$(jq -n \
     | ($old.observed_at // $now) as $old_at
     | ($old.active_seconds // 0) as $old_seconds
     | (.current_state.transition_at? // null) as $reported_transition
-    | (if ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now
-       then $reported_transition else null end) as $transition
-    | (if $old.state == "working" then
-         if .current_state.state == "working" then (($now - $old_at) | if . > 0 then . else 0 end)
-         elif $transition != null then (($transition - $old_at) | if . > 0 then . else 0 end)
-         else 0 end
-       elif .current_state.state == "working" and $transition != null then (($now - $transition) | if . > 0 then . else 0 end)
-       else 0 end) as $delta
+    | ([.current_state.transition_history[]?
+        | select((.state | type) == "string" and (.at | type) == "number" and .at >= $old_at and .at <= $now)]
+       | sort_by(.at)) as $recorded
+    | (if ($recorded | length) == 0 and $old.state != .current_state.state then
+         if ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now
+         then [{state:.current_state.state,at:$reported_transition}]
+         else [{state:.current_state.state,at:$now}] end
+       elif ($recorded | length) > 0 and $recorded[-1].state != .current_state.state then
+         $recorded + [{state:.current_state.state,at:$now}]
+       else $recorded end) as $transitions
+    | (reduce $transitions[] as $transition
+         ({state:($old.state // .current_state.state),at:$old_at,active:0,last_transition:($old.state_transition_at // $old_at)};
+          .active += (if .state == "working" then (($transition.at - .at) | if . > 0 then . else 0 end) else 0 end)
+          | .state = $transition.state
+          | .at = $transition.at
+          | .last_transition = $transition.at)
+       | .active += (if .state == "working" then (($now - .at) | if . > 0 then . else 0 end) else 0 end)) as $timing
     | (genuine_stop) as $stop
     | {id:.id,
        name:(.backlog.title // .id | clip(160)),
        state:.current_state.state,
        phase:(if active then phase else null end),
-       active_seconds:($old_seconds + $delta),
-       active_since:(if active then (if $old.state == "working" then ($old.active_since // $transition // $now) else ($transition // $now) end) else null end),
-       state_transition_at:(if $transition != null then $transition elif $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),
+       active_seconds:($old_seconds + $timing.active),
+       active_since:(if active then (if ($transitions | length) > 0 then $timing.last_transition elif $old.state == "working" then ($old.active_since // $timing.last_transition // $now) else ($timing.last_transition // $now) end) else null end),
+       state_transition_at:(if ($transitions | length) > 0 then $timing.last_transition elif $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),
        observed_at:$now,
        recovery:(if .current_state.state == "unknown" then "automatic-recovery-pending" else null end),
        provenance:{origin:(if (.x_request? // "") != "" then "slack" else "direct" end),
