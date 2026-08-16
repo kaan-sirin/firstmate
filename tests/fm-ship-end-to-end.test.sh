@@ -290,6 +290,24 @@ test_dashboard_recovery_surfaces_unsupported_replacement() {
   pass "dashboard surfaces unsupported worker replacement"
 }
 
+test_dashboard_recovery_excludes_endpoint_outage() {
+  local home="$TMP_ROOT/dashboard-recovery-timing" state_bin="$TMP_ROOT/dashboard-recovery-timing-state" agent_bin="$TMP_ROOT/dashboard-recovery-timing-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-timing-spawn" fake_date="$TMP_ROOT/dashboard-recovery-timing-bin/date" gen record
+  mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-recovery-timing-bin"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' 'dashboard_incarnation=i-recovery-timing' > "$home/state/dash-a3.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$spawn_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin" "$fake_date"
+  gen=$(PATH="$TMP_ROOT/dashboard-recovery-timing-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" dash-a3) || fail "initial busy event failed"
+  PATH="$TMP_ROOT/dashboard-recovery-timing-bin:$PATH" FM_FAKE_NOW=110 FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a3 || fail "recovery confirmation failed"
+  PATH="$TMP_ROOT/dashboard-recovery-timing-bin:$PATH" FM_FAKE_NOW=120 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" dash-a3 >/dev/null || fail "replacement busy event failed"
+  record="$home/state/dashboard-transitions/dash-a3.json"
+  jq -e '.state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "endpoint outage was counted as active time"
+  pass "dashboard excludes confirmed endpoint outage time"
+}
+
 test_dashboard_keeps_only_active_tasks() {
   local home="$TMP_ROOT/dashboard-active" mock="$TMP_ROOT/dashboard-active-snapshot" record
   mkdir -p "$home/data" "$home/state"
@@ -347,6 +365,7 @@ test_dashboard_busy_events_preserve_hidden_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_surfaces_unsupported_replacement
+test_dashboard_recovery_excludes_endpoint_outage
 test_dashboard_keeps_only_active_tasks
 test_preflight_is_private_and_does_not_touch_lifecycle
 test_dashboard_rejects_unsafe_or_oversized_inputs

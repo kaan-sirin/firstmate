@@ -197,18 +197,19 @@ if [ -n "$CARRY_MAX" ]; then
   REQ_REPLY_MAX=$CARRY_MAX
 fi
 
-if [ -z "$CARRY_TS" ]; then
-  REPLY_CONTEXT=$(fmx_resolve_reply_context "$STATE" "$RID" 1) || {
-    echo "fm-x-link: failed to resolve request reply context" >&2
-    exit 1
-  }
-  REQ_PLATFORM=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')
-  REQ_EXPLICIT_MAX=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')
-  REQ_REPLY_MAX=$REQ_EXPLICIT_MAX
-  INBOX="$STATE/x-inbox/$RID.json"
-  if fmx_private_artifact_file_valid "$STATE/x-inbox" "$RID.json" 600; then
-    REQ_THREAD_URL=$(jq -r '[.thread_url?,.permalink?,.url?,.thread?.url?] | map(select(type == "string" and startswith("https://"))) | .[0] // ""' "$INBOX" 2>/dev/null || true)
-  fi
+REPLY_CONTEXT=$(fmx_resolve_reply_context "$STATE" "$RID" 1) || {
+  echo "fm-x-link: failed to resolve request reply context" >&2
+  exit 1
+}
+CTX_PLATFORM=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.platform // ""')
+CTX_REPLY_MAX=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.reply_max_chars // ""')
+REQ_THREAD_URL=$(printf '%s' "$REPLY_CONTEXT" | jq -r '.thread_url // ""')
+if [ -z "$CARRY_PLATFORM" ]; then
+  REQ_PLATFORM=$CTX_PLATFORM
+fi
+if [ -z "$CARRY_MAX" ]; then
+  REQ_EXPLICIT_MAX=$CTX_REPLY_MAX
+  REQ_REPLY_MAX=$CTX_REPLY_MAX
 fi
 
 if [ -n "$CARRY_TS" ] && { [ -z "$REQ_PLATFORM" ] || [ -z "$REQ_REPLY_MAX" ]; }; then
@@ -230,6 +231,11 @@ else
   case "$LINK_TS" in
     ''|*[!0-9]*) echo "fm-x-link: could not read the current time" >&2; exit 1 ;;
   esac
+fi
+
+if ! fmx_context_registry_set "$STATE" "$RID" "$REQ_PLATFORM" "$REQ_REPLY_MAX" 0 "$REQ_THREAD_URL"; then
+  echo "fm-x-link: failed to preserve request context for $RID" >&2
+  exit 1
 fi
 
 if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX" "$REQ_THREAD_URL"; then

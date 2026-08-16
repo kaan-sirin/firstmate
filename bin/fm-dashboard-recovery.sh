@@ -34,6 +34,9 @@ else
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
 fi
 case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
+recovery_at=$(date +%s)
+case "$recovery_at" in ''|*[!0-9]*) exit 1 ;; esac
+"$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" unknown "$recovery_at"
 
 DIR="$STATE/dashboard-recovery"
 if [ -e "$DIR" ] || [ -L "$DIR" ]; then

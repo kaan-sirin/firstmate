@@ -2366,7 +2366,18 @@ if [ "$KIND" != secondmate ]; then
   esac
   case "$HARNESS" in
     claude*|opencode*|pi|pi-signed)
-      BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+      if [ "$RELAUNCH" -eq 1 ]; then
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID" --state unknown --source fm-recovery --event replacement-pending) || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      else
+        BUSY_GEN=$("$FM_ROOT/bin/fm-busy-event.sh" arm "$STATE_REAL" "$ID") || {
+          echo "error: failed to arm the busy-state contract for $ID" >&2
+          exit 1
+        }
+      fi
+      [ -n "$BUSY_GEN" ] || {
         echo "error: failed to arm the busy-state contract for $ID" >&2
         exit 1
       }
@@ -2883,7 +2894,18 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
+  "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" busy --gen "$BUSY_GEN" --source fm-recovery --event replacement-start || {
+    echo "error: failed to record replacement start for $ID" >&2
+    exit 1
+  }
+fi
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
+    "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" unknown --gen "$BUSY_GEN" --source fm-recovery --event replacement-send-failed || true
+  fi
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
