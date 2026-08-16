@@ -136,8 +136,8 @@ test_spawn_enforces_the_durable_preflight() {
 }
 
 write_snapshot() {
-  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} json
-  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s"},"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$decision")
+  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-null} json
+  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s},"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$decision")
   printf '%s\n' '#!/usr/bin/env bash' > "$file"
   printf "printf '%%s\\n' '%s'\n" "$json" >> "$file"
   chmod +x "$file"
@@ -146,20 +146,22 @@ write_snapshot() {
 test_dashboard_projection_and_active_time() {
   local home="$TMP_ROOT/dashboard" mock="$TMP_ROOT/dashboard-snapshot" record
   mkdir -p "$home/data" "$home/state"
-  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1'
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 100
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "initial dashboard refresh failed"
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=130 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
-  write_snapshot "$mock" paused '[]' 'https://slack.example/thread/1'
+  write_snapshot "$mock" paused '[]' 'https://slack.example/thread/1' pane '' 132
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=140 "$DASHBOARD" refresh >/dev/null || fail "pause dashboard refresh failed"
-  write_snapshot "$mock" parked '[{"key":"ask","verb":"needs-decision","summary":"Choose"}]' 'https://slack.example/thread/1'
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=150 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=170 "$DASHBOARD" refresh >/dev/null || fail "continued pause dashboard refresh failed"
+  jq -e '.technical.tasks[0].active_seconds == 32 and .technical.tasks[0].state_transition_at == 132' "$home/data/dashboard.json" >/dev/null || fail "paused time was counted after the canonical pause transition"
+  write_snapshot "$mock" parked '[{"key":"ask","verb":"needs-decision","summary":"Choose"}]' 'https://slack.example/thread/1' pane '' 175
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=175 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
   record="$home/data/dashboard.json"
   jq -e '(.projection.needs_you | length) == 1 and .projection.needs_you[0].slack_thread_url == "https://slack.example/thread/1"' "$record" >/dev/null || fail "dashboard did not preserve the Slack decision link"
-  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1'
+  write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 180
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=200 "$DASHBOARD" refresh >/dev/null || fail "resume dashboard refresh failed"
   record="$home/data/dashboard.json"
   [ "$(stat -c %a "$record")" = 600 ] || fail "dashboard record must be mode 0600"
-  jq -e '.schema_version == 1 and .projection.in_progress[0].phase == "Building" and .projection.in_progress[0].active_seconds == 40 and (.projection.needs_you | length) == 0 and .projection.empty_text == "Nothing needs you."' "$record" >/dev/null || fail "dashboard projection or timing was wrong"
+  jq -e '.schema_version == 1 and .projection.in_progress[0].phase == "Building" and .projection.in_progress[0].active_seconds == 52 and (.projection.needs_you | length) == 0 and .projection.empty_text == "Nothing needs you."' "$record" >/dev/null || fail "dashboard projection or timing was wrong"
   find "$home/data" -maxdepth 1 -name '.dashboard.*' | grep -q . && fail "dashboard refresh left a non-atomic temporary file"
   pass "dashboard uses one private atomic projection with paused time excluded"
 }
@@ -176,8 +178,12 @@ test_dashboard_filters_and_checking_phase() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=105 "$DASHBOARD" refresh >/dev/null || fail "decision dashboard refresh failed"
   jq -e '.projection.in_progress == [] and (.projection.needs_you | length) == 1 and .projection.needs_you[0].kind == "needs-decision"' "$record" >/dev/null \
     || fail "dashboard must show one genuine decision"
+  write_snapshot "$mock" unknown '[]' '' pane 'endpoint unavailable'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "unknown dashboard refresh failed"
+  jq -e '.projection.in_progress == [] and .projection.needs_you == [] and .technical.tasks[0].recovery == "automatic-recovery-pending"' "$record" >/dev/null \
+    || fail "dashboard must keep recoverable endpoint loss out of Needs you"
   write_snapshot "$mock" failed '[]' '' run-step 'run failed'
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "failed dashboard refresh failed"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=115 "$DASHBOARD" refresh >/dev/null || fail "failed dashboard refresh failed"
   jq -e '.projection.in_progress == [] and .projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker stopped",slack_thread_url:null}]' "$record" >/dev/null \
     || fail "dashboard must surface only unrecoverable stops after work ends: $(jq -c . "$record")"
   pass "dashboard maps checking work and filters duplicate or stale alerts"
