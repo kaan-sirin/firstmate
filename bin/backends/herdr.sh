@@ -3222,13 +3222,10 @@ fm_backend_herdr_clear_transition() {  # <state_dir> <window>
   rm -f "$marker" 2>/dev/null || true
 }
 
-# The wait below is now routinely interrupted where it stands: the watcher runs
-# it as its own process group and signals that group the moment a Fast Repair
-# result is ready. Its private FIFO directory therefore needs an owner on the
-# signal path too, not only on the return paths, or one directory per interrupted
-# wait accumulates under TMPDIR. The handler cleans, restores whatever HUP/INT/TERM
-# disposition the caller had, and re-raises, so an interrupted wait keeps the exact
-# stop semantics it has today and a returning wait leaves the caller's traps intact.
+# The event wait owns its private FIFO directory on signal paths as well as return
+# paths, so interrupted waits do not accumulate directories under TMPDIR. The
+# handler cleans, restores the caller's HUP, INT, and TERM dispositions, and
+# re-raises the signal.
 FM_BACKEND_HERDR_EVENTWAIT_DIR=
 FM_BACKEND_HERDR_EVENTWAIT_READER_PID=
 FM_BACKEND_HERDR_EVENTWAIT_TRAPS=

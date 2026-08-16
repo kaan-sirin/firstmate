@@ -4313,7 +4313,7 @@ test_wait_transition_clean_timeout_returns_1() {
 }
 
 # The watcher runs this wait as its own process group and signals that group as
-# soon as a Fast Repair result is ready, so interruption mid-read is a routine
+# when the watcher is interrupted during a read, so cleanup during the read is a routine
 # path, not only a shutdown one. Every interrupted wait must still reclaim its
 # private FIFO directory, or one directory accumulates under TMPDIR per result.
 test_wait_transition_signalled_removes_its_fifo_dir() {

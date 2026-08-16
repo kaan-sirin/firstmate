@@ -758,40 +758,6 @@ remove_pr_poll_artifacts() {
   fi
 }
 
-# Fast Repair progress artifacts are named <prefix>-<id>-<generation> (child and
-# sequence records) or <prefix>-<id>-<generation>-<sequence> (handoff records),
-# and a task id may itself contain hyphens, so a bare <prefix>-<id>-* glob also
-# matches every OTHER task whose id begins with "<id>-". Tearing task `fix` down
-# would then delete live `fix-2` markers, leaving that task's progress child
-# unsignalled at the poll boundary and its undrained handoffs gone. Ownership is
-# decided on the remainder instead of the glob: it must be exactly the expected
-# count of numeric fields, followed by nothing or by one of the dot-suffixes the
-# watcher's writers append (.ready, .starting, .starting.closing, .lock,
-# .attempts, and mkstemp temporaries).
-fast_repair_artifact_fields_match() {  # <remainder> <field-count>
-  local rest=$1 fields=$2 head
-  while [ "$fields" -gt 0 ]; do
-    head=${rest%%[!0-9]*}
-    [ -n "$head" ] || return 1
-    rest=${rest#"$head"}
-    fields=$((fields - 1))
-    if [ "$fields" -gt 0 ]; then
-      case "$rest" in -*) rest=${rest#-} ;; *) return 1 ;; esac
-    fi
-  done
-  case "$rest" in ''|.*) return 0 ;; esac
-  return 1
-}
-
-remove_fast_repair_progress_artifacts() {  # <state-dir> <prefix> <task-id> <field-count>
-  local state_dir=$1 prefix=$2 id=$3 fields=$4 path
-  for path in "$state_dir/$prefix-$id-"*; do
-    [ -e "$path" ] || [ -L "$path" ] || continue
-    fast_repair_artifact_fields_match "${path#"$state_dir/$prefix-$id-"}" "$fields" || continue
-    rm -rf "$path" || return 1
-  done
-}
-
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
 # single match and returns 0; returns non-zero on no match or any lookup failure,
 # so the caller treats it as "no PR found" (fail-safe).
@@ -2574,23 +2540,11 @@ retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
 status_retire_presentation_task "$STATE" "$ID" || exit 1
 rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
-   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-   "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
-   "$STATE/.$ID.open-decisions-cursor" \
-   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.fast-repair-tests" "$STATE/$ID.fast-repair-tests.log" \
-  "$STATE/$ID.fast-repair-broader" "$STATE/$ID.fast-repair-broader.log" \
-  "$STATE/.fast-repair-progress-$ID" "$STATE/.fast-repair-progress-generation-$ID" \
-  "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID" \
-  "$STATE/.fast-repair-progress-green-$ID"
-# The Fast Repair authorization proves this task's own request, so it dies with
-# the task: a later task reusing this id must present its own intake evidence.
-# Only that exact record goes; the report and the rest of data/<id>/ stay.
-rm -f "$DATA/$ID/fast-repair-eligibility"
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-handoff "$ID" 2 || exit 1
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-sequence "$ID" 1 || exit 1
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-child "$ID" 1 || exit 1
+  "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
+  "$STATE/.$ID.open-decisions-cursor" \
+  "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then
