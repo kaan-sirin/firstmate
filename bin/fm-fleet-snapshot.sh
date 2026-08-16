@@ -417,7 +417,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source current_transition_at current_active_seconds status_mtime transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at current_active_seconds transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -465,15 +465,6 @@ task_json_lines() {
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
     current_transition_at=$(printf '%s' "$current_json" | jq -r '.transition_at // "null"')
     current_active_seconds=null
-    if [ "$current_source" = status-log ]; then
-      status_mtime=$(file_mtime_epoch "$status_log")
-      case "$status_mtime" in
-        ''|*[!0-9]*) ;;
-        *)
-          current_transition_at=$status_mtime
-          ;;
-      esac
-    fi
     transition_file="$STATE/dashboard-transitions/$id.json"
     recovery_file="$STATE/dashboard-recovery/$id.json"
     recovery_json='{"state":"none"}'

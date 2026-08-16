@@ -259,6 +259,7 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
   local home state corr hook_log rec status_line escalations
   home=$(setup_parent escalate-once)
   state="$home/state"
+  printf '%s\n' 'kind=secondmate' > "$state/hibit.meta"
   hook_log="$TMP_ROOT/escalate-hook.log"
   : > "$hook_log"
   # Invoked indirectly through FM_PENDING_REPLY_SEND_HOOK.
@@ -283,6 +284,8 @@ test_second_missed_turn_escalates_once_and_stays_durable() {
     "blocked [key=pending-reply-$corr]:"*pending-reply-missed:*pending-reply-id=$corr*) : ;;
     *) fail "parent status should carry one blocked missed-report line"$'\n'"$status_line" ;;
   esac
+  jq -e '.state == "blocked" and (.transition_at | type) == "number"' "$state/dashboard-transitions/hibit.json" >/dev/null \
+    || fail "escalation did not persist its canonical blocked transition"
   [ ! -s "$state/.wake-queue" ] || fail "direct escalation must not enqueue a duplicate check wake"
   # Second escalate must be a no-op (phase no longer recovery_sent).
   if fm_pending_reply_maybe_escalate "$state" "$corr" 2>/dev/null; then
@@ -374,9 +377,10 @@ test_escalation_publication_failure_retries() {
   [ "$(phase_of "$state" "$corr")" = recovery_sent ] \
     || fail "publication failure must leave escalation retryable"
   rmdir "$target"
+  fm_pending_reply_set "$rec" parent_status "$state/hibit.status" || fail "failed to restore the canonical parent status"
   fm_pending_reply_maybe_escalate "$state" "$corr" || fail "escalation retry should succeed"
   [ "$(phase_of "$state" "$corr")" = escalated ] || fail "successful retry should commit escalation"
-  escalations=$(grep -Fc "blocked [key=pending-reply-$corr]:" "$target")
+  escalations=$(grep -Fc "blocked [key=pending-reply-$corr]:" "$state/hibit.status")
   [ "$escalations" = 1 ] || fail "successful retry should publish exactly once, got $escalations"
   pass "failed escalation publication remains retryable and publishes once"
 }

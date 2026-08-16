@@ -123,7 +123,6 @@ RESULT=$(jq -n \
     | ([.hints.open_decisions[]? | select(.verb == "blocked")][0]) as $blocked
     | if $decision != null and .current_state.state == "parked" then $decision
       elif $blocked != null and .current_state.state == "blocked" then $blocked
-      elif .current_state.state == "failed" then {verb:"failed",summary:"Worker stopped"}
       elif .current_state.state == "unknown" and .recovery.state == "unrecoverable" then {verb:"failed",summary:"Worker recovery failed"}
       else null end;
   def prior_for($id): ($prior.technical.tasks[]? | select(.id == $id)) // {};
