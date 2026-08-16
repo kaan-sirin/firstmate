@@ -114,11 +114,13 @@ make_spawn_case() {
   launchlog="$case_dir/launch.log"
   fakebin=$(make_spawn_fakebin "$case_dir/fake")
   mkdir -p "$home/data" "$home/projects" "$home/state" "$home/config"
+  chmod 755 "$home/data"
   printf '%s\n' "$harness" > "$home/config/crew-harness"
   fm_git_worktree "$proj" "$wt" "wt-$name"
   touch "$home/state/.last-watcher-beat"
   for id in "$@"; do
     mkdir -p "$home/data/$id"
+    chmod 700 "$home/data/$id"
     printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
     publish_approved_preflight "$home" "$id" || return 1
   done

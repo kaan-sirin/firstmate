@@ -33,6 +33,7 @@ make_home() {  # <name> [<registry-line>...]
   projects="$TMP_ROOT/$name/projects"
   fakebin="$TMP_ROOT/$name/bin"
   mkdir -p "$home/data" "$home/state" "$home/config" "$projects/proj" "$fakebin"
+  chmod 755 "$home/data"
   printf '#!/bin/sh\nexit 1\n' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
   if [ "$#" -gt 0 ]; then
@@ -44,6 +45,7 @@ make_home() {  # <name> [<registry-line>...]
 write_brief() {  # <home> <id> [<recorded-mode>]
   local home=$1 id=$2 mode=${3:-}
   mkdir -p "$home/data/$id"
+  chmod 700 "$home/data/$id"
   {
     printf 'You are a crewmate.\n\n# Definition of done\n'
     [ -z "$mode" ] || printf 'Delivery contract: mode=%s\n' "$mode"

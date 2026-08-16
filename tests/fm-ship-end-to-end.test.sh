@@ -28,6 +28,7 @@ bridge_env() {
 
 publish_preflight_record() {
   local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp handoff tmp bypass
+  chmod 755 "$home/data"
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
   mkdir -p "${handoff%/*}"
   chmod 700 "$home/state/agent-bridge" "${handoff%/*}"
@@ -174,6 +175,26 @@ test_preflight_rejects_cross_task_records() {
   mkdir -p "$home/data"
   make_contract "$contract"
   fp=$(publish_preflight_record "$home" approved-a1 "$contract" direct approved 100) || fail "cross-task preflight approval failed"
+  chmod 733 "$home/data"
+  out=$(preflight_env "$home" 101 verify-current approved-a1 2>&1)
+  status=$?
+  chmod 755 "$home/data"
+  [ "$status" -ne 0 ] || fail "a preflight under a writable data directory must refuse"
+  assert_contains "$out" "unsafe task record directory" "writable data directory refusal was unclear"
+
+  chmod 733 "$home/data/approved-a1"
+  out=$(preflight_env "$home" 101 verify-current approved-a1 2>&1)
+  status=$?
+  chmod 700 "$home/data/approved-a1"
+  [ "$status" -ne 0 ] || fail "a preflight under a writable task directory must refuse"
+  assert_contains "$out" "unsafe task record directory" "writable task directory refusal was unclear"
+
+  ln -s "$home/data" "$home/linked-data"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/linked-data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW=101 "$PREFLIGHT" verify-current approved-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a preflight under a linked data directory must refuse"
+  assert_contains "$out" "unsafe task record directory" "linked data directory refusal was unclear"
+
   ln -s "$home/data/approved-a1" "$home/data/aliased-a1"
   out=$(preflight_env "$home" 101 verify-current aliased-a1 2>&1)
   status=$?
@@ -181,6 +202,7 @@ test_preflight_rejects_cross_task_records() {
   assert_contains "$out" "unsafe task record directory" "cross-task preflight refusal was unclear"
 
   mkdir -p "$home/data/copied-a1"
+  chmod 700 "$home/data/copied-a1"
   cp "$home/data/approved-a1/ship-preflight.json" "$home/data/copied-a1/ship-preflight.json"
   chmod 600 "$home/data/copied-a1/ship-preflight.json"
   out=$(preflight_env "$home" 101 verify-current copied-a1 2>&1)
@@ -189,6 +211,7 @@ test_preflight_rejects_cross_task_records() {
   assert_contains "$out" "malformed preflight record" "copied preflight refusal was unclear"
 
   mkdir -p "$home/data/linked-a1"
+  chmod 700 "$home/data/linked-a1"
   ln "$home/data/approved-a1/ship-preflight.json" "$home/data/linked-a1/ship-preflight.json"
   out=$(preflight_env "$home" 101 verify-current linked-a1 2>&1)
   status=$?
@@ -196,6 +219,7 @@ test_preflight_rejects_cross_task_records() {
   assert_contains "$out" "no valid private preflight record" "hard-linked preflight refusal was unclear"
 
   mkdir -p "$home/data/empty-a1"
+  chmod 700 "$home/data/empty-a1"
   jq -n --arg id empty-a1 \
     '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:"0000000000000000000000000000000000000000000000000000000000000000",origin:"bridge",state:"approved",contract:{},approval:{authority:"agent-bridge",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$home/data/empty-a1/ship-preflight.json"
   chmod 600 "$home/data/empty-a1/ship-preflight.json"
