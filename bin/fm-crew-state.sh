@@ -181,6 +181,14 @@ crew_busy_verdict() {  # <target>
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
 }
 
+confirmed_endpoint_loss_state() {
+  local endpoint_state
+  case "$KIND" in ship|scout) ;; *) return 1 ;; esac
+  [ -n "$BACKEND_TARGET" ] || return 1
+  endpoint_state=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")
+  case "$endpoint_state" in dead|missing) printf '%s' "$endpoint_state" ;; *) return 1 ;; esac
+}
+
 busy_transition_at() {
   local record busy_state busy_source busy_event busy_seq busy_at
   record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || return 1
@@ -548,6 +556,15 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  case "$RUN_STATE" in
+    done|failed) ;;
+    *)
+      if ENDPOINT_LOSS=$(confirmed_endpoint_loss_state); then
+        emit unknown endpoint "confirmed endpoint loss ($ENDPOINT_LOSS)" "$(date +%s)"
+      fi
+      ;;
+  esac
+
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
       emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at || true)"
@@ -598,6 +615,9 @@ fi
 # is no run to consult, so a dead/unreadable target means the crew is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+if ENDPOINT_LOSS=$(confirmed_endpoint_loss_state); then
+  emit unknown endpoint "confirmed endpoint loss ($ENDPOINT_LOSS)" "$(date +%s)"
+fi
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy

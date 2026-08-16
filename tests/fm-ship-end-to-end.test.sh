@@ -141,6 +141,13 @@ test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" out fp status
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
+  mkdir -p "$home/data/missing-a1"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/missing-a1/brief.md"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux "$ROOT/bin/fm-spawn.sh" missing-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a missing durable preflight must refuse spawn"
+  assert_contains "$out" "preflight record for missing-a1 is missing" "missing preflight refusal was unclear"
+  assert_absent "$home/state/missing-a1.meta" "missing preflight refusal wrote task metadata"
   out=$(preflight_env "$home" 100 preflight spawn-a1 --origin direct --contract "$contract") || fail "spawn preflight create failed"
   fp=${out#fingerprint=}
   mkdir -p "$home/data/spawn-a1"
