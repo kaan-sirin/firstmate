@@ -8,14 +8,15 @@ metadata:
 
 # ship-end-to-end
 
-Use this skill before dispatching a software ship task.
-Do not use it for a scout, a narrow read-only investigation, or an ordinary task with no worker dispatch.
+Use this skill before dispatching a software ship task or promoting a scout into one.
+Do not use it for a scout that remains read-only, a narrow read-only investigation, or an ordinary task with no worker dispatch.
 
 ## Phase 1 - read-only preflight
 
 Inspect the request, repository, task, production, and fleet facts first.
 Resolve every question that these sources can answer.
-Do not start implementation, dispatch a worker, write production state, deploy, post externally, or change data.
+Do not start implementation, dispatch a worker, change project, production, or external data, deploy, or post externally.
+The private preflight record is the only workflow state written before approval.
 
 Give one concise contract with the recommendation first.
 Include the interpreted outcome, scope and non-goals, delivery and external-system boundaries, then put all remaining material questions in one group.

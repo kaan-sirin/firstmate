@@ -54,7 +54,7 @@ For whole-fleet read-only review, `bin/fm-fleet-snapshot.sh --json` emits schema
 The script header owns the exact JSON schema.
 `bin/fm-dashboard.sh` is the separate private consumer record owner: it atomically publishes mode-0600 `data/dashboard.json` from that snapshot's backlog and reconciled current state, with checkpointed active-time accounting that excludes paused intervals. Busy, status, and no-mistakes run-state lifecycle sources provide transition epochs; `state/dashboard-transitions/<id>.json` is keyed by the durable task incarnation and retains only the latest state and accumulated active seconds, so the private dashboard does not retain an unbounded event history. `bin/fm-dashboard-recovery.sh` records an unrecoverable worker only after its supported replacement attempt fails or is unavailable; the dashboard projects that record as a captain action.
 Its schema version is 1 and its intentionally small projection contains only `needs_you`, `in_progress`, and the exact empty text `Nothing needs you.`; `needs_you` contains only genuine decisions or unrecoverable stops, with the persisted Slack thread URL when available, and `in_progress` uses only `Building` or `Checking` with cumulative active seconds. The `technical` object retains task identity, timing, provenance, and reconciliation facts for restart-safe updates.
-`bin/fm-watch.sh` refreshes this record on its existing heartbeat cadence, so the dashboard adds no daemon or raw-pane parser.
+`bin/fm-watch.sh` refreshes this record after an actionable wake is durably queued and before the watcher exits, and on its existing heartbeat cadence, so the dashboard adds no daemon or raw-pane parser.
 
 ### Registered secondmate current state
 
