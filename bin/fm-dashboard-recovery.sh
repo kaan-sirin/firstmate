@@ -56,11 +56,14 @@ if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
   [ "$prior_state" != unrecoverable ] || exit 0
 fi
-CONTROL_BIN=${FM_DASHBOARD_RECOVERY_CONTROL_BIN:-$SCRIPT_DIR/fm-control.sh}
-out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$CONTROL_BIN" "$ID" relaunch --note 'Automatic recovery after confirmed worker loss.' 2>&1) || control_status=$?
-control_status=${control_status:-0}
-if [ "$control_status" -eq 0 ]; then
+RECOVERY_BIN=${FM_DASHBOARD_RECOVERY_SPAWN_BIN:-$SCRIPT_DIR/fm-spawn.sh}
+out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" --recover-missing 2>&1) || recovery_status=$?
+recovery_status=${recovery_status:-0}
+if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"
+  exit 0
+fi
+if [ "$recovery_status" -eq 3 ]; then
   exit 0
 fi
 attempts=$((attempts + 1))

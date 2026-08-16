@@ -216,17 +216,35 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   pass "watcher persists a compact canonical dashboard checkpoint"
 }
 
+test_dashboard_busy_events_preserve_hidden_transitions() {
+  local home="$TMP_ROOT/dashboard-busy-events" fake_date gen record
+  mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-busy-bin"
+  printf '%s\n' 'kind=ship' > "$home/state/busy-a1.meta"
+  fake_date="$TMP_ROOT/dashboard-busy-bin/date"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  gen=$(PATH="$TMP_ROOT/dashboard-busy-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" busy-a1) || fail "busy event arm failed"
+  PATH="$TMP_ROOT/dashboard-busy-bin:$PATH" FM_FAKE_NOW=110 "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-a1 idle --gen "$gen" --source claude-hook --event stop \
+    || fail "busy event pause failed"
+  PATH="$TMP_ROOT/dashboard-busy-bin:$PATH" FM_FAKE_NOW=120 "$ROOT/bin/fm-busy-event.sh" apply "$home/state" busy-a1 busy --gen "$gen" --source claude-hook --event user-prompt-submit \
+    || fail "busy event resume failed"
+  record="$home/state/dashboard-transitions/busy-a1.json"
+  jq -e '.state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "busy event producer did not preserve the hidden pause interval"
+  pass "busy events persist exact active-time transitions"
+}
+
 test_dashboard_recovery_surfaces_only_exhausted_loss() {
-  local home="$TMP_ROOT/dashboard-recovery" state_bin="$TMP_ROOT/dashboard-recovery-state" agent_bin="$TMP_ROOT/dashboard-recovery-agent" control_bin="$TMP_ROOT/dashboard-recovery-control" mock="$TMP_ROOT/dashboard-recovery-snapshot" record
+  local home="$TMP_ROOT/dashboard-recovery" state_bin="$TMP_ROOT/dashboard-recovery-state" agent_bin="$TMP_ROOT/dashboard-recovery-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-spawn" mock="$TMP_ROOT/dashboard-recovery-snapshot" record
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-a1.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "replacement refused\\n" >&2' 'exit 1' > "$control_bin"
-  chmod +x "$state_bin" "$agent_bin" "$control_bin"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_CONTROL_BIN="$control_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "first automatic recovery attempt failed"
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --recover-missing ] || exit 2' 'printf "replacement refused\\n" >&2' 'exit 1' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "first automatic recovery attempt failed"
   jq -e '.state == "pending" and .attempts == 1' "$home/state/dashboard-recovery/dash-a1.json" >/dev/null || fail "first recovery failure must remain recoverable"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_CONTROL_BIN="$control_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "exhausted recovery attempt failed"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a1 || fail "exhausted recovery attempt failed"
   record="$home/state/dashboard-recovery/dash-a1.json"
   jq -e '.state == "unrecoverable" and .attempts == 2' "$record" >/dev/null || fail "recovery owner did not persist exhaustion"
   write_snapshot "$mock" unknown '[]' '' pane 'endpoint unavailable' null null '{"state":"unrecoverable"}'
@@ -289,6 +307,7 @@ test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
+test_dashboard_busy_events_preserve_hidden_transitions
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_keeps_only_active_tasks
 test_preflight_is_private_and_does_not_touch_lifecycle
