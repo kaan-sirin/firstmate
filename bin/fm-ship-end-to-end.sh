@@ -73,6 +73,9 @@ prepare_dir() {
 validate_contract() {
   [ -f "$CONTRACT" ] && [ ! -L "$CONTRACT" ] || die "contract must be a regular JSON file"
   [ "$(wc -c < "$CONTRACT" | tr -d ' ')" -le "$MAX_CONTRACT_BYTES" ] || die "contract exceeds the bounded preflight size"
+  contract_valid "$CONTRACT" || die "contract must contain the concise grouped preflight fields"
+}
+contract_valid() {
   jq -e '
     type == "object" and
     (. as $contract | ["recommendation","outcome","scope","non_goals","delivery_boundary","external_boundaries","questions"] | all(.[]; . as $k | $contract | has($k))) and
@@ -83,9 +86,14 @@ validate_contract() {
     (.delivery_boundary | type == "string" and length > 0) and
     (.external_boundaries | type == "string" and length > 0) and
     (.questions | type == "array" and all(.[]; type == "string" and length > 0))
-  ' "$CONTRACT" >/dev/null || die "contract must contain the concise grouped preflight fields"
+  ' "${1:--}" >/dev/null
 }
 canonical_contract() { jq -cS . "$CONTRACT"; }
+preflight_fingerprint() {
+  local contract=$1 bound
+  bound=$(jq -cn --arg id "$ID" --argjson contract "$contract" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
+  sha256_text "$bound"
+}
 validate_direct_approval() {
   local authority=$1 evidence=$2
   valid_direct_authority "$authority" || die "direct preflight requires direct captain approval"
@@ -109,16 +117,18 @@ read_record() {
     die "no valid private preflight record"
   fi
   valid_private "$RECORD" || die "no valid private preflight record"
-  jq -e '
+  jq -e --arg id "$ID" '
     .schema_version == 1 and
     .workflow == "ship-end-to-end" and
+    .task_id == $id and
     (.fingerprint | type == "string" and test("^[0-9a-f]{64}$")) and
     (.origin == "direct" or .origin == "bridge") and
     (.state == "awaiting_approval" or .state == "approved") and
     (.contract | type == "object")
   ' "$RECORD" >/dev/null || die "malformed preflight record"
   record_contract=$(jq -cS '.contract' "$RECORD") || die "malformed preflight contract"
-  [ "$(sha256_text "$record_contract")" = "$(jq -r '.fingerprint' "$RECORD")" ] || die "preflight record fingerprint does not match its contract"
+  printf '%s\n' "$record_contract" | contract_valid || die "malformed preflight contract"
+  [ "$(preflight_fingerprint "$record_contract")" = "$(jq -r '.fingerprint' "$RECORD")" ] || die "preflight record fingerprint does not match its contract"
 }
 publish() {
   local tmp
@@ -166,15 +176,15 @@ case "$COMMAND" in
     lock_transition
     [ ! -e "$RECORD" ] && [ ! -L "$RECORD" ] || die "preflight already exists; use correct to replace an unapproved contract"
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
-    FP=$(sha256_text "$CANONICAL_CONTRACT")
+    FP=$(preflight_fingerprint "$CANONICAL_CONTRACT") || die "could not bind preflight fingerprint"
     if [ -n "$AUTHORITY" ] || [ -n "$EVIDENCE" ]; then
       validate_direct_approval "$AUTHORITY" "$EVIDENCE"
       jq -e '.complete_plan_approved == true' "$CONTRACT" >/dev/null || die "approved-complete-plan bypass requires complete_plan_approved=true"
-      jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:$authority,evidence:$evidence,approved_at:$now,complete_plan_bypass:true}}' | publish
+      jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --arg authority "$AUTHORITY" --arg evidence "$EVIDENCE" --argjson now "$NOW" \
+        '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"approved",contract:$contract,approval:{authority:$authority,evidence:$evidence,approved_at:$now,complete_plan_bypass:true}}' | publish
     else
-      jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --argjson now "$NOW" \
-        '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now}' | publish
+      jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$ORIGIN" --argjson now "$NOW" \
+        '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now}' | publish
     fi
     printf 'fingerprint=%s\n' "$FP"
     ;;
@@ -197,10 +207,10 @@ case "$COMMAND" in
     read_record
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "an approved preflight cannot be corrected; create a new task contract"
     CANONICAL_CONTRACT=$(canonical_contract) || die "could not canonicalize contract"
-    FP=$(sha256_text "$CANONICAL_CONTRACT")
+    FP=$(preflight_fingerprint "$CANONICAL_CONTRACT") || die "could not bind preflight fingerprint"
     origin=$(jq -r '.origin' "$RECORD")
-    jq -n --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$origin" --argjson now "$NOW" \
-      '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now}' | publish
+    jq -n --arg id "$ID" --argjson contract "$CANONICAL_CONTRACT" --arg fp "$FP" --arg origin "$origin" --argjson now "$NOW" \
+      '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:"awaiting_approval",contract:$contract,created_at:$now,corrected_at:$now}' | publish
     printf 'fingerprint=%s\n' "$FP"
     ;;
   verify)
