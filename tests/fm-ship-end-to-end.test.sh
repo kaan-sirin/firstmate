@@ -5,7 +5,6 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
-PUBLISH="$ROOT/bin/fm-ship-end-to-end-bridge.sh"
 DASHBOARD="$ROOT/bin/fm-dashboard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ship-end-to-end)
 
@@ -21,10 +20,9 @@ preflight_env() {
 }
 
 publish_preflight_record() {
-  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp record bypass
-  record="$home/state/ship-preflight-submissions/$id.json"
-  mkdir -p "$home/state/ship-preflight-submissions"
-  chmod 700 "$home/state/ship-preflight-submissions"
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp record tmp bypass
+  record="$home/data/$id/ship-preflight.json"
+  mkdir -p "${record%/*}"
   contract_json=$(jq -cS . "$contract") || fail "could not canonicalize bridge contract"
   bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not bind bridge preflight"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -33,13 +31,12 @@ publish_preflight_record() {
     fp=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
   fi
   bypass=$(jq -c '.complete_plan_approved == true' "$contract") || fail "could not read bypass state"
+  tmp=$(umask 077; mktemp "${record%/*}/.ship-preflight.XXXXXX") || fail "could not prepare bridge record"
   jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" '
     {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract}
     + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
-  ' > "$record" || fail "could not write bridge submission"
-  chmod 600 "$record"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$PUBLISH" publish "$id" >/dev/null \
-    || fail "could not publish bridge preflight record"
+  ' > "$tmp" || { rm -f -- "$tmp"; fail "could not write bridge record"; }
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$record" || { rm -f -- "$tmp"; fail "could not publish bridge record"; }
   printf '%s' "$fp"
 }
 
