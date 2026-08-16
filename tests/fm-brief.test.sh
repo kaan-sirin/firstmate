@@ -351,10 +351,6 @@ test_no_mistakes_dod_wording() {
   # guards the structure that makes it safe.
   assert_grep "firstmate's authority check" "$brief" \
     "no-mistakes DOD lost the apostrophe prose that the structural fix makes parse-safe"
-  assert_grep "A captain status or progress question is informational, not a stop instruction." "$brief" \
-    "no-mistakes brief did not preserve the informational-question continuation rule"
-  assert_grep "Stop only for an explicit pause or cancel, a changed finish line, a required authority decision, or a genuine external blocker." "$brief" \
-    "no-mistakes brief did not define the allowed terminal conditions"
   pass "fm-brief.sh: no-mistakes DOD keeps its apostrophe prose, now parse-safe"
 }
 

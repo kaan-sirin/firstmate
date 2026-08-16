@@ -293,8 +293,8 @@ test_dashboard_filters_and_checking_phase() {
     || fail "dashboard must keep recoverable endpoint loss out of Needs you"
   write_snapshot "$mock" failed '[]' '' run-step 'run failed'
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=115 "$DASHBOARD" refresh >/dev/null || fail "failed dashboard refresh failed"
-  jq -e '.projection.in_progress == [] and .projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker stopped",slack_thread_url:null}]' "$record" >/dev/null \
-    || fail "dashboard must surface only unrecoverable stops after work ends: $(jq -c . "$record")"
+  jq -e '.projection.in_progress == [] and .projection.needs_you == []' "$record" >/dev/null \
+    || fail "dashboard must keep ordinary worker failures out of Needs you: $(jq -c . "$record")"
   pass "dashboard maps checking work and filters duplicate or stale alerts"
 }
 
