@@ -19,7 +19,24 @@ preflight_env() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
 }
 
-test_direct_and_slack_preflight_authority() {
+write_bridge_dispatch_request() {
+  local home=$1 request=$2 id=$3 contract=$4 bridge_token=$5 signing_token=${6:-$5} contract_json unsigned proof
+  mkdir -p "$home/state/x-inbox"
+  chmod 700 "$home/state/x-inbox"
+  printf 'FMX_PAIRING_TOKEN=%s\n' "$bridge_token" > "$home/.env"
+  chmod 600 "$home/.env"
+  contract_json=$(jq -cS . "$contract") || fail "could not canonicalize bridge contract"
+  unsigned=$(jq -cn --arg request "$request" --arg id "$id" --argjson contract "$contract_json" \
+    '{request_id:$request,ship_dispatch:{schema_version:1,task_id:$id,approved_at:100,contract:$contract}}' | jq -cS .) \
+    || fail "could not create bridge dispatch request"
+  proof=$(printf '%s' "$unsigned" | openssl dgst -sha256 -hmac "$signing_token" | awk '{print $NF}')
+  jq -cn --argjson unsigned "$unsigned" --arg proof "$proof" \
+    '$unsigned + {ship_dispatch:($unsigned.ship_dispatch + {proof:$proof})}' > "$home/state/x-inbox/$request.json" \
+    || fail "could not write bridge dispatch request"
+  chmod 600 "$home/state/x-inbox/$request.json"
+}
+
+test_direct_and_bridge_dispatch_authority() {
   local home="$TMP_ROOT/preflight" contract fp out status
   mkdir -p "$home/data" "$home/state"
   contract="$home/contract.json"
@@ -40,9 +57,23 @@ test_direct_and_slack_preflight_authority() {
 
   out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract" --authority direct-captain --evidence 'caller supplied' 2>&1)
   status=$?
-  [ "$status" -ne 0 ] || fail "Slack preflight must reject caller-supplied authority"
-  assert_contains "$out" "caller-supplied authority" "Slack authority refusal was unclear"
-  out=$(preflight_env "$home" 100 preflight slack-a1 --origin slack --contract "$contract") || fail "bridge-dispatched Slack preflight should create a record"
+  [ "$status" -ne 0 ] || fail "public Slack preflight must refuse caller-supplied claims"
+  assert_contains "$out" "requires --origin direct" "public Slack preflight refusal was unclear"
+  assert_absent "$home/data/slack-a1/ship-preflight.json" "public Slack preflight wrote an approval record"
+  out=$(preflight_env "$home" 100 bridge-dispatch slack-a1 --request req-slack --contract "$contract" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "bridge dispatch must reject caller-supplied contracts"
+  assert_contains "$out" "only a Relay request proof" "bridge dispatch contract refusal was unclear"
+
+  write_bridge_dispatch_request "$home" req-slack slack-a1 "$contract" bridge-token wrong-token
+  out=$(preflight_env "$home" 100 bridge-dispatch slack-a1 --request req-slack 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "untrusted bridge proof must refuse dispatch"
+  assert_contains "$out" "not trusted" "untrusted bridge proof refusal was unclear"
+  assert_absent "$home/data/slack-a1/ship-preflight.json" "untrusted bridge proof wrote an approval record"
+
+  write_bridge_dispatch_request "$home" req-slack slack-a1 "$contract" bridge-token
+  out=$(preflight_env "$home" 100 bridge-dispatch slack-a1 --request req-slack) || fail "trusted bridge proof should create a Slack preflight"
   fp=${out#fingerprint=}
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority direct-captain --evidence 'message text' 2>&1)
   status=$?
@@ -53,6 +84,12 @@ test_direct_and_slack_preflight_authority() {
   [ "$status" -ne 0 ] || fail "Slack approval command must remain bridge-owned"
   assert_contains "$out" "Agent bridge dispatch" "Slack bridge-only refusal was unclear"
   preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "bridge-dispatched Slack preflight should verify"
+  rm -f -- "$home/data/slack-a1/ship-preflight.json"
+  out=$(preflight_env "$home" 102 bridge-dispatch slack-a1 --request req-slack 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a bridge dispatch proof must be single use"
+  assert_contains "$out" "already consumed" "single-use bridge proof refusal was unclear"
+  assert_absent "$home/data/slack-a1/ship-preflight.json" "reused bridge proof wrote an approval record"
   pass "typed direct and bridge-dispatched Slack preflights preserve approval authority"
 }
 
@@ -398,7 +435,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
   pass "dashboard rejects unsafe records and bounds canonical input"
 }
 
-test_direct_and_slack_preflight_authority
+test_direct_and_bridge_dispatch_authority
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals

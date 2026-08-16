@@ -27,12 +27,11 @@ Create the typed record:
 
 ```sh
 bin/fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <contract.json>
-bin/fm-ship-end-to-end.sh preflight <task-id> --origin slack --contract <contract.json>
 ```
 
 Report its fingerprint in the contract. Wait for one explicit captain approval or correction for direct work.
 For an explicitly approved direct complete plan, record the captain authority and evidence in the preflight command instead of asking a duplicate question.
-For Slack work, the Agent bridge verifies the allowlisted same-thread approval before it dispatches FirstMate. Do not provide Slack authority, evidence, identity, or approval input to FirstMate.
+For Slack work, the Agent bridge verifies the allowlisted same-thread approval and adds one signed dispatch proof to its durable Relay request record before it dispatches FirstMate. Run `bin/fm-ship-end-to-end.sh bridge-dispatch <task-id> --request <request-id>` to consume that proof. Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
 
 ## Phase 2 - approved execution
 
