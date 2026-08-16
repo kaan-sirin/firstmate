@@ -57,7 +57,11 @@ if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   [ "$prior_state" != unrecoverable ] || exit 0
 fi
 RECOVERY_BIN=${FM_DASHBOARD_RECOVERY_SPAWN_BIN:-$SCRIPT_DIR/fm-spawn.sh}
-out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" --recover-missing 2>&1) || recovery_status=$?
+case "$agent_state" in
+  dead) recovery_action=--relaunch ;;
+  missing) recovery_action=--recover-missing ;;
+esac
+out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" 2>&1) || recovery_status=$?
 recovery_status=${recovery_status:-0}
 if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"

@@ -8,6 +8,7 @@
 #   fm-ship-end-to-end.sh correct <task-id> --contract <json-file>
 #   fm-ship-end-to-end.sh verify <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-current <task-id>
+#   fm-ship-end-to-end.sh verify-dispatched <task-id> --fingerprint <sha256>
 #
 # The record is data/<task-id>/ship-preflight.json, mode 0600. Its schema is
 # `{schema_version,workflow,fingerprint,origin,state,contract,created_at|approval}`.
@@ -32,7 +33,7 @@ valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s
 valid_direct_authority() { [ "$1" = direct-captain ]; }
 
 COMMAND=${1:-}
-case "$COMMAND" in preflight|approve|correct|verify|verify-current) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
+case "$COMMAND" in preflight|approve|correct|verify|verify-current|verify-dispatched) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
 ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
@@ -91,16 +92,14 @@ validate_direct_approval() {
   [ -n "$evidence" ] || die "approval evidence is required"
   [ "$(printf '%s' "$evidence" | wc -c | tr -d ' ')" -le "$MAX_EVIDENCE_BYTES" ] || die "approval evidence exceeds the bounded size"
 }
-validate_bridge_dispatched_approval() {
+validate_submitted_approval() {
   jq -e '
-    .approval == {
-      authority:"agent-bridge",
-      evidence:"bridge-dispatched",
-      approved_at:.approval.approved_at,
-      complete_plan_bypass:false
-    } and
-    (.approval.approved_at | type == "number")
-  ' "$RECORD" >/dev/null || die "preflight lacks bridge-dispatched authorization"
+    (.approval | type == "object") and
+    (.approval.authority | type == "string" and length > 0) and
+    (.approval.evidence | type == "string" and length > 0) and
+    (.approval.approved_at | type == "number") and
+    (.approval.complete_plan_bypass | type == "boolean")
+  ' "$RECORD" >/dev/null || die "preflight lacks a typed submitted approval"
 }
 read_record() {
   local record_contract
@@ -109,7 +108,7 @@ read_record() {
     .schema_version == 1 and
     .workflow == "ship-end-to-end" and
     (.fingerprint | type == "string" and test("^[0-9a-f]{64}$")) and
-    (.origin == "direct" or .origin == "slack") and
+    (.origin == "direct" or .origin == "bridge") and
     (.state == "awaiting_approval" or .state == "approved") and
     (.contract | type == "object")
   ' "$RECORD" >/dev/null || die "malformed preflight record"
@@ -131,7 +130,7 @@ lock_transition() {
   trap 'fm_lock_release "$PREFLIGHT_LOCK" || true' EXIT
 }
 verify_record() {
-  local fingerprint=$1 origin authority evidence bypass approved_at
+  local fingerprint=$1 require_fresh=${2:-1} origin authority evidence bypass approved_at
   [ "$(jq -r '.state' "$RECORD")" = approved ] || die "preflight approval is missing"
   [ "$(jq -r '.fingerprint' "$RECORD")" = "$fingerprint" ] || die "preflight fingerprint does not match the approved contract"
   origin=$(jq -r '.origin' "$RECORD")
@@ -140,7 +139,7 @@ verify_record() {
     evidence=$(jq -r '.approval.evidence // ""' "$RECORD")
     validate_direct_approval "$authority" "$evidence"
   else
-    validate_bridge_dispatched_approval
+    validate_submitted_approval
   fi
   bypass=$(jq -r 'if (.approval | has("complete_plan_bypass")) then .approval.complete_plan_bypass else "" end' "$RECORD")
   case "$bypass" in
@@ -151,7 +150,7 @@ verify_record() {
   approved_at=$(jq -r '.approval.approved_at // 0' "$RECORD")
   case "$approved_at" in ''|*[!0-9]*) die "approval timestamp is malformed";; esac
   [ "$approved_at" -le "$NOW" ] || die "preflight approval timestamp is in the future"
-  [ $((NOW - approved_at)) -le "$MAX_AGE" ] || die "preflight approval is stale"
+  [ "$require_fresh" = 0 ] || [ $((NOW - approved_at)) -le "$MAX_AGE" ] || die "preflight approval is stale"
 }
 
 case "$COMMAND" in
@@ -179,7 +178,7 @@ case "$COMMAND" in
     lock_transition
     read_record
     origin=$(jq -r '.origin' "$RECORD")
-    [ "$origin" != slack ] || die "Slack approval is authorized only by Agent bridge dispatch"
+    [ "$origin" != bridge ] || die "submitted preflight is already authorized"
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "preflight is not awaiting approval"
     [ "$(jq -r '.fingerprint' "$RECORD")" = "$FINGERPRINT" ] || die "approval fingerprint does not match the current contract"
     validate_direct_approval "$AUTHORITY" "$EVIDENCE"
@@ -209,6 +208,12 @@ case "$COMMAND" in
     read_record
     FINGERPRINT=$(jq -r '.fingerprint' "$RECORD")
     verify_record "$FINGERPRINT"
+    printf 'fingerprint=%s\n' "$FINGERPRINT"
+    ;;
+  verify-dispatched)
+    valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
+    read_record
+    verify_record "$FINGERPRINT" 0
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;
 esac

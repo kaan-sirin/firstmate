@@ -30,7 +30,7 @@ write_bridge_preflight_record() {
     fp=$(printf '%s' "$contract_json" | shasum -a 256 | awk '{print $1}')
   fi
   jq -n --argjson contract "$contract_json" --arg fp "$fp" \
-    '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:"slack",state:"approved",contract:$contract,approval:{authority:"agent-bridge",evidence:"bridge-dispatched",approved_at:100,complete_plan_bypass:false}}' > "$record" \
+    '{schema_version:1,workflow:"ship-end-to-end",fingerprint:$fp,origin:"bridge",state:"approved",contract:$contract,approval:{authority:"trusted-bridge",evidence:"internal-submission",approved_at:100,complete_plan_bypass:false}}' > "$record" \
     || fail "could not write bridge preflight record"
   chmod 600 "$record"
   printf '%s' "$fp"
@@ -65,11 +65,11 @@ test_direct_and_bridge_owned_preflight_authority() {
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" --authority direct-captain --evidence 'message text' 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "Slack approval must remain bridge-owned"
-  assert_contains "$out" "Agent bridge dispatch" "Slack approval refusal was unclear"
+  assert_contains "$out" "already authorized" "submitted approval refusal was unclear"
   out=$(preflight_env "$home" 101 approve slack-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "Slack approval command must remain bridge-owned"
-  assert_contains "$out" "Agent bridge dispatch" "Slack bridge-only refusal was unclear"
+  assert_contains "$out" "already authorized" "submitted approval refusal was unclear"
   preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "bridge-owned Slack preflight should verify"
   pass "typed direct and bridge-owned Slack preflights preserve approval authority"
 }
@@ -109,6 +109,8 @@ test_correction_bypass_and_stale_refusal() {
   status=$?
   [ "$status" -ne 0 ] || fail "stale approval must refuse"
   assert_contains "$out" "stale" "stale refusal was unclear"
+  FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify-dispatched correction-a1 --fingerprint "$fp2" >/dev/null \
+    || fail "an approved dispatched task must resume after its approval ages"
 
   make_contract "$contract" true
   out=$(preflight_env "$home" 200 preflight bypass-a1 --origin direct --contract "$contract" --approved-authority direct-captain --approval-evidence 'approved complete plan') || fail "approved complete plan should bypass duplicate preflight"
@@ -311,6 +313,20 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
   pass "dashboard surfaces only exhausted worker recovery"
 }
 
+test_dashboard_recovery_relaunches_dead_endpoint() {
+  local home="$TMP_ROOT/dashboard-recovery-dead" state_bin="$TMP_ROOT/dashboard-recovery-dead-state" agent_bin="$TMP_ROOT/dashboard-recovery-dead-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-dead-spawn"
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-dead.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --relaunch ] || exit 2' 'exit 0' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-dead \
+    || fail "dead endpoint recovery did not relaunch"
+  [ ! -e "$home/state/dashboard-recovery/dash-dead.json" ] || fail "successful dead-endpoint relaunch left a recovery failure"
+  pass "dashboard relaunches a confirmed dead endpoint"
+}
+
 test_dashboard_recovery_defers_control_lock_contention() {
   local home="$TMP_ROOT/dashboard-recovery-contention" state_bin="$TMP_ROOT/dashboard-recovery-contention-state" agent_bin="$TMP_ROOT/dashboard-recovery-contention-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-contention-spawn" record
   mkdir -p "$home/data" "$home/state"
@@ -435,6 +451,7 @@ test_dashboard_transition_ledger_tracks_canonical_edges
 test_dashboard_busy_events_preserve_hidden_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
+test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_defers_control_lock_contention
 test_missing_recovery_control_lock_is_retryable
 test_dashboard_recovery_surfaces_unsupported_replacement
