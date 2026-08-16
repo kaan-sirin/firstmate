@@ -52,6 +52,7 @@ Do not merge.
 
 Ask again only for a new authority requirement, serious irreversible risk, agreed-outcome change, or a security, privacy, legal, or data-loss decision.
 Production writes, deployments, external communication, destructive work, and data changes keep their own authority gates.
+A captain status or progress question is informational, not a stop instruction. Answer it, then continue the approved run through its current completion gate. Stop only for an explicit pause or cancel, a changed finish line, a required authority decision, or a genuine external blocker.
 
 ## Dashboard record
 

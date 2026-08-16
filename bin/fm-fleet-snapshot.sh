@@ -417,7 +417,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source current_transition_at current_active_seconds status_mtime transition_file transition_state transition_epoch transition_meta_mtime meta_mtime transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at current_active_seconds status_mtime transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -484,16 +484,17 @@ task_json_lines() {
         then {state,attempts,confirmed_at,reason} else {state:"none"} end
       ' "$recovery_file" 2>/dev/null || printf '%s' '{"state":"none"}')
     fi
-    meta_mtime=$(file_mtime_epoch "$meta")
+    task_incarnation=$(meta_value "$meta" dashboard_incarnation)
+    case "$task_incarnation" in ''|*[!A-Za-z0-9._-]*) task_incarnation="legacy-$id" ;; esac
     if [ -f "$transition_file" ] && [ ! -L "$transition_file" ] \
        && [ "$(file_mode_octal "$transition_file")" = 600 ]; then
-      IFS=$'\t' read -r transition_state transition_epoch transition_meta_mtime transition_active_seconds < <(
-        jq -r '[.state // "",(.transition_at // "" | tostring),(.meta_mtime // "" | tostring),(.active_seconds // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
+      IFS=$'\t' read -r transition_state transition_epoch transition_incarnation transition_active_seconds < <(
+        jq -r '[.state // "",(.transition_at // "" | tostring),(.incarnation // "" | tostring),(.active_seconds // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
       )
       case "$transition_epoch" in ''|*[!0-9]*) ;; *)
-        case "$transition_meta_mtime" in ''|*[!0-9]*) ;; *)
+        case "$transition_incarnation" in ''|*[!A-Za-z0-9._-]*) ;; *)
           case "$transition_active_seconds" in ''|*[!0-9]*) ;; *)
-            if [ "$transition_state" = "$current_state" ] && [ "$transition_meta_mtime" = "$meta_mtime" ]; then
+            if [ "$transition_state" = "$current_state" ] && [ "$transition_incarnation" = "$task_incarnation" ]; then
               current_transition_at=$transition_epoch
               current_active_seconds=$transition_active_seconds
             fi

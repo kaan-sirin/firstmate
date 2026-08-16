@@ -2236,7 +2236,7 @@ kimi_wait_for_delivery() {
 }
 
 kimi_spawn_fail() {  # <detail>
-  printf 'failed: %s\n' "$1" >> "$STATE/$ID.status"
+  "$SCRIPT_DIR/fm-status-event.sh" append "$STATE" "$ID" "failed: $1"
   echo "error: $1; inspect window $T" >&2
 }
 
@@ -2667,6 +2667,13 @@ fi
 META_WINDOW=$T
 [ "$BACKEND" = orca ] && META_WINDOW=$W
 SPAWN_GEN="s$(date +%s).${BASHPID:-$$}.$RANDOM"
+DASHBOARD_INCARNATION=
+if [ "$RELAUNCH" -eq 1 ]; then
+  DASHBOARD_INCARNATION=$(fm_meta_get "$RELAUNCH_META" dashboard_incarnation)
+fi
+case "$DASHBOARD_INCARNATION" in
+  ''|*[!A-Za-z0-9._-]*) DASHBOARD_INCARNATION="i$(date +%s).${BASHPID:-$$}.$RANDOM" ;;
+esac
 SPAWN_META_PATH="$STATE/$ID.meta"
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_META_LOCK=$(fm_meta_lock_path "$STATE/$ID.meta") || exit 1
@@ -2678,7 +2685,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint dashboard_incarnation", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2691,6 +2698,7 @@ preserve_relaunch_meta() {
   echo "project=$PROJ_ABS"
   echo "harness=$HARNESS"
   echo "kind=$KIND"
+  echo "dashboard_incarnation=$DASHBOARD_INCARNATION"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
   [ -z "${PREFLIGHT_FINGERPRINT:-}" ] || echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
@@ -2744,6 +2752,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
+"$SCRIPT_DIR/fm-dashboard-transition.sh" replay-busy "$STATE" "$ID" || {
+  echo "error: could not publish dashboard timing for $ID" >&2
+  exit 1
+}
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   # The record is published, so this task is now part of the set a teardown
   # enumerates and locks per task. The set lock is only needed across that
@@ -2811,6 +2823,23 @@ if [ "$KIND" = secondmate ]; then
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
+fi
+if [ "$KIND" = ship ] && [ "$MODE" = no-mistakes ]; then
+  NM_REAL_BIN=$(command -v no-mistakes 2>/dev/null || true)
+  if [ -n "$NM_REAL_BIN" ]; then
+    NM_EVENT_BIN="$TASK_TMP/nm-bin"
+    mkdir -p "$NM_EVENT_BIN"
+    cat > "$NM_EVENT_BIN/no-mistakes" <<EOF
+#!/usr/bin/env bash
+PATH=$(shell_quote "$PATH")
+$(shell_quote "$NM_REAL_BIN") "\$@"
+status=\$?
+FM_HOME=$(shell_quote "$FM_HOME") FM_STATE_OVERRIDE=$(shell_quote "$STATE") $(shell_quote "$FM_ROOT/bin/fm-dashboard-run-state.sh") reconcile $(shell_quote "$ID") >/dev/null 2>&1 || true
+exit "\$status"
+EOF
+    chmod 700 "$NM_EVENT_BIN/no-mistakes"
+    LAUNCH="PATH=$(shell_quote "$NM_EVENT_BIN"):\$PATH $LAUNCH"
+  fi
 fi
 
 spawn_record_traceparent() {

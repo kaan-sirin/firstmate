@@ -5,23 +5,40 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
+  echo "       fm-dashboard-transition.sh replay-busy <state-dir> <task-id>" >&2
   exit 2
 }
 
-[ "${1:-}" = record ] || usage
+ACTION=${1:-}
 STATE=${2:-}
 ID=${3:-}
-CURRENT=${4:-}
-AT=${5:-}
 [ -n "$STATE" ] && [ -n "$ID" ] || usage
 case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
+if [ "$ACTION" = replay-busy ]; then
+  # shellcheck source=bin/fm-busy-lib.sh
+  . "$SCRIPT_DIR/fm-busy-lib.sh"
+  busy=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || exit 0
+  read -r busy_state busy_source busy_event busy_seq busy_at <<< "$busy"
+  case "$busy_state:$busy_at" in
+    busy:[0-9]*) CURRENT=working ;;
+    idle:[0-9]*) CURRENT=parked ;;
+    unknown:[0-9]*) CURRENT=unknown ;;
+    *) exit 0 ;;
+  esac
+  exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
+fi
+[ "$ACTION" = record ] || usage
+CURRENT=${4:-}
+AT=${5:-}
 case "$CURRENT" in working|parked|paused|blocked|failed|done|unknown) ;; *) usage ;; esac
 case "$AT" in ''|*[!0-9]*) usage ;; esac
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || exit 0
-if [ "$(uname -s)" = Darwin ]; then meta_mtime=$(stat -f %m "$META" 2>/dev/null || true); else meta_mtime=$(stat -c %Y "$META" 2>/dev/null || true); fi
-case "$meta_mtime" in ''|*[!0-9]*) exit 0 ;; esac
+incarnation=$(sed -n 's/^dashboard_incarnation=//p' "$META" | tail -1)
+case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
 
 DIR="$STATE/dashboard-transitions"
 if [ -e "$DIR" ] || [ -L "$DIR" ]; then
@@ -32,25 +49,20 @@ else
 fi
 
 LOCK="$DIR/$ID.lock"
-tries=0
-while ! mkdir "$LOCK" 2>/dev/null; do
-  tries=$((tries + 1))
-  [ "$tries" -lt 100 ] || exit 1
-  sleep 0.05
-done
-cleanup() { rmdir "$LOCK" 2>/dev/null || true; }
+fm_lock_acquire_wait "$LOCK"
+cleanup() { fm_lock_release "$LOCK" || true; }
 trap cleanup EXIT HUP INT TERM
 
 RECORD="$DIR/$ID.json"
 prior_state=
-prior_meta=
+prior_incarnation=
 prior_at=
 prior_active=0
 if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
-  IFS=$'\t' read -r prior_state prior_meta prior_at prior_active < <(
-    jq -r '[.state // "",(.meta_mtime // "" | tostring),(.transition_at // "" | tostring),(.active_seconds // 0 | tostring)] | @tsv' "$RECORD" 2>/dev/null || true
+  IFS=$'\t' read -r prior_state prior_incarnation prior_at prior_active < <(
+    jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at // "" | tostring),(.active_seconds // 0 | tostring)] | @tsv' "$RECORD" 2>/dev/null || true
   )
-  if [ "$prior_meta" != "$meta_mtime" ]; then
+  if [ "$prior_incarnation" != "$incarnation" ]; then
     prior_state=
     prior_at=
     prior_active=0
@@ -60,9 +72,9 @@ case "$prior_at:$prior_active" in *[!0-9:]*|:*) prior_at=; prior_active=0 ;; esa
 [ "$prior_state" != "$CURRENT" ] || exit 0
 if [ -n "$prior_at" ] && [ "$AT" -lt "$prior_at" ]; then exit 1; fi
 tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
-if ! jq -n --arg id "$ID" --arg state "$CURRENT" --argjson transition_at "$AT" --argjson meta_mtime "$meta_mtime" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
+if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --argjson transition_at "$AT" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
   ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
-  | {schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime,active_seconds:$active_seconds}' > "$tmp" \
+  | {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:$transition_at,active_seconds:$active_seconds}' > "$tmp" \
   || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
   rm -f -- "$tmp"
   exit 1
