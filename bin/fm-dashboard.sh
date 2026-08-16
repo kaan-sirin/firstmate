@@ -129,28 +129,25 @@ RESULT=$(jq -n \
   def prior_for($id): ($prior.technical.tasks[]? | select(.id == $id)) // {};
   def task_record:
     . as $task | (prior_for(.id)) as $old
-    | ($old.observed_at // $now) as $old_at
     | ($old.active_seconds // 0) as $old_seconds
     | (.current_state.transition_at? // null) as $reported_transition
     | (.current_state.active_seconds? // null) as $checkpoint
     | (if ($checkpoint | type) == "number" and $checkpoint >= 0
        and ($reported_transition | type) == "number" and $reported_transition <= $now
        then {active:($checkpoint + (if .current_state.state == "working" then (($now - $reported_transition) | if . > 0 then . else 0 end) else 0 end)),
-             transition:$reported_transition,canonical:true}
-       elif $old.state == "working" then
-         if .current_state.state == "working" then {active:($old_seconds + (($now - $old_at) | if . > 0 then . else 0 end)),transition:($old.state_transition_at // $old_at),canonical:false}
-         elif ($reported_transition | type) == "number" and $reported_transition >= $old_at and $reported_transition <= $now then {active:($old_seconds + (($reported_transition - $old_at) | if . > 0 then . else 0 end)),transition:$reported_transition,canonical:false}
-         else {active:$old_seconds,transition:$now,canonical:false} end
-       elif .current_state.state == "working" and ($reported_transition | type) == "number" and $reported_transition <= $now then
-         {active:($old_seconds + (($now - $reported_transition) | if . > 0 then . else 0 end)),transition:$reported_transition,canonical:false}
-       else {active:$old_seconds,transition:(if $old.state == .current_state.state then ($old.state_transition_at // $old_at) else $now end),canonical:false} end) as $timing
+             transition:$reported_transition,exact:true}
+       else {active:$old_seconds,
+             transition:(if ($reported_transition | type) == "number" and $reported_transition <= $now
+                         then $reported_transition else ($old.state_transition_at // null) end),
+             exact:false} end) as $timing
     | (genuine_stop) as $stop
     | {id:.id,
        name:(.backlog.title // .id | clip(160)),
        state:.current_state.state,
        phase:(if active then phase else null end),
        active_seconds:$timing.active,
-       active_since:(if active then (if $timing.canonical then $timing.transition elif $old.state == "working" then ($old.active_since // $timing.transition // $now) else ($timing.transition // $now) end) else null end),
+       timing_exact:$timing.exact,
+       active_since:(if active and $timing.exact then $timing.transition else null end),
        state_transition_at:$timing.transition,
        observed_at:$now,
        recovery:(if .current_state.state == "unknown" then (if .recovery.state == "unrecoverable" then "unrecoverable" else "automatic-recovery-pending" end) else null end),
@@ -158,7 +155,7 @@ RESULT=$(jq -n \
                    slack_thread_url:thread_url},
        stop:$stop};
   [$snapshot.tasks[]? | select(.kind != "secondmate" and .current_state.state != "done") | task_record] as $tasks
-  | ($tasks | map(select(.state == "working") | {id,name,phase,active_seconds})) as $progress
+  | ($tasks | map(select(.state == "working" and .timing_exact) | {id,name,phase,active_seconds})) as $progress
   | ($tasks | map(select(.stop != null) | {id,name,kind:.stop.verb,summary:(.stop.summary | clip(240)),slack_thread_url:.provenance.slack_thread_url})) as $needs
   | {schema_version:1,
      generated_at:$now,
