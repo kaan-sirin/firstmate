@@ -1,15 +1,15 @@
 ---
 name: ship-end-to-end
 description: >-
-  Run FirstMate's approved two-phase end-to-end software shipping workflow. Use before dispatching a material direct or Relay-originated software ship task that needs one read-only preflight, one explicit approval, then autonomous implementation, review, CI, and a PR.
+  Run FirstMate's approved two-phase end-to-end software shipping workflow. Use before dispatching a direct or Relay-originated software ship task: one read-only preflight, one explicit approval, then autonomous implementation, review, CI, and a PR.
 metadata:
   internal: true
 ---
 
 # ship-end-to-end
 
-Use this skill for a material software ship task.
-Do not use it for a scout, a narrow read-only investigation, or an ordinary task that does not need this approval workflow.
+Use this skill before dispatching a software ship task.
+Do not use it for a scout, a narrow read-only investigation, or an ordinary task with no worker dispatch.
 
 ## Phase 1 - read-only preflight
 
