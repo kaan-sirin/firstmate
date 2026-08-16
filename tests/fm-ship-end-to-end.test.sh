@@ -245,7 +245,7 @@ test_preflight_rejects_cross_task_records() {
 }
 
 test_spawn_enforces_the_durable_preflight() {
-  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq
+  local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" out fp status real_jq publish_out
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
   make_contract "$contract"
   mkdir -p "$home/data/missing-a1"
@@ -277,7 +277,9 @@ set -eu
 "$FM_RACE_REAL_JQ" "$@"
 if [ "$#" -ge 2 ] && [ "$1" = -r ] && [ "$2" = '.approval.approved_at // 0' ] && [ ! -e "$FM_RACE_TRIGGERED" ]; then
   : > "$FM_RACE_TRIGGERED"
-  "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" >/dev/null
+  "$FM_RACE_BRIDGE" publish "$FM_RACE_ID" > "$FM_RACE_PUBLISH_OUT" 2>&1 &
+  publisher=$!
+  wait "$publisher"
 fi
 SH
   cat > "$racebin/tmux" <<'SH'
@@ -286,11 +288,15 @@ printf '%s\n' "$*" >> "$FM_RACE_TMUX_LOG"
 exit 1
 SH
   chmod +x "$racebin/jq" "$racebin/tmux"
-  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
+  publish_out="$home/race-publish.out"
+  out=$(PATH="$racebin:$PATH" FM_RACE_REAL_JQ="$real_jq" FM_RACE_TRIGGERED="$home/race-triggered" FM_RACE_BRIDGE="$BRIDGE" FM_RACE_ID=race-a1 FM_RACE_PUBLISH_OUT="$publish_out" FM_RACE_TMUX_LOG="$home/race-tmux.log" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_BACKEND=tmux FM_SHIP_PREFLIGHT_NOW=101 "$ROOT/bin/fm-spawn.sh" race-a1 "$project" --mode no-mistakes --yolo off --harness codex 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a corrected preflight must refuse its in-flight spawn"
   assert_contains "$out" "preflight approval is missing" "corrected preflight refusal was unclear"
   [ -e "$home/race-triggered" ] || fail "race correction did not run after initial verification"
+  assert_contains "$(cat "$publish_out")" "published" "asynchronous race correction did not complete"
+  jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/race-a1/ship-preflight.json" >/dev/null \
+    || fail "asynchronous race correction did not replace the preflight record"
   assert_absent "$home/state/race-a1.meta" "corrected preflight spawn wrote task metadata"
   [ ! -s "$home/race-tmux.log" ] || fail "corrected preflight created an endpoint"
   pass "spawn verifies the durable preflight without a brief marker"
@@ -407,6 +413,22 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   record="$home/state/dashboard-transitions/ledger-a1.json"
   jq -e '.schema_version == 1 and .state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
     || fail "canonical transition ledger did not preserve the producer checkpoint"
+  printf '%s\n' parked > "$state_file"
+  printf '%s\n' '' > "$TMP_ROOT/dashboard-ledger-timestamp"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "untimed parked run-state event failed"
+  jq -e '.state == "parked" and .transition_at == null and .active_seconds == 10' "$record" >/dev/null \
+    || fail "untimed run-state event did not invalidate the exact checkpoint"
+  printf '%s\n' working > "$state_file"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "untimed resumed run-state event failed"
+  jq -e '.state == "working" and .transition_at == null and .active_seconds == 10' "$record" >/dev/null \
+    || fail "untimed resume revived a stale exact checkpoint"
+  printf '%s\n' 140 > "$TMP_ROOT/dashboard-ledger-timestamp"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "fresh exact run-state event failed"
+  jq -e '.state == "working" and .transition_at == 140 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "fresh exact run-state event reused an invalidated checkpoint"
   pass "run-state producer persists a compact canonical dashboard checkpoint"
 }
 

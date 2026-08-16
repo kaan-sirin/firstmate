@@ -15,9 +15,12 @@ case "$line" in state:\ *) ;; *) exit 0 ;; esac
 state=${line#state: }
 state=${state%% *}
 case "$line" in *' · source: run-step · '*) ;; *) exit 0 ;; esac
-at=$(printf '%s\n' "$line" | sed -n 's/.*transition_at: \([0-9][0-9]*\).*/\1/p' | head -1)
-case "$state:$at" in
-  working:[0-9]*|parked:[0-9]*|paused:[0-9]*|blocked:[0-9]*|failed:[0-9]*|done:[0-9]*|unknown:[0-9]*) ;;
+case "$state" in
+  working|parked|paused|blocked|failed|done|unknown) ;;
   *) exit 0 ;;
 esac
-"$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at"
+at=$(printf '%s\n' "$line" | sed -n 's/.*transition_at: \([0-9][0-9]*\).*/\1/p' | head -1)
+case "$at" in
+  [0-9]*) "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$state" "$at" ;;
+  *) "$SCRIPT_DIR/fm-dashboard-transition.sh" barrier "$STATE" "$ID" "$state" ;;
+esac
