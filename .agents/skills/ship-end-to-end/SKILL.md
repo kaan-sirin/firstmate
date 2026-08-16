@@ -52,10 +52,3 @@ Do not merge.
 Ask again only for a new authority requirement, serious irreversible risk, agreed-outcome change, or a security, privacy, legal, or data-loss decision.
 Production writes, deployments, external communication, destructive work, and data changes keep their own authority gates.
 A captain status or progress question is informational, not a stop instruction. Answer it, then continue the approved run through its current completion gate. Stop only for an explicit pause or cancel, a changed finish line, a required authority decision, or a genuine external blocker.
-
-## Dashboard record
-
-Use `bin/fm-dashboard.sh refresh` only as the canonical writer for `${FM_HOME}/data/dashboard.json`.
-Consumers read that 0600 record only.
-The existing watcher refreshes it on its heartbeat; do not add another daemon or parse pane text or Relay callback tails.
-The executable header owns the schema and update mechanics.
