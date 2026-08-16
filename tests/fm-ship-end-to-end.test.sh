@@ -87,6 +87,32 @@ test_direct_and_bridge_owned_preflight_authority() {
   pass "typed direct and bridge-owned Slack preflights preserve approval authority"
 }
 
+test_preflight_requires_typed_authority_evidence() {
+  local home="$TMP_ROOT/preflight-authority" contract="$TMP_ROOT/preflight-authority-contract.json" fp out status record tmp
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" authority-a1 "$contract" bridge approved 100) || fail "could not publish approved bridge preflight"
+  record="$home/data/authority-a1/ship-preflight.json"
+  tmp=$(mktemp "$home/data/authority-a1/.approval.XXXXXX") || fail "could not prepare malformed approval"
+  jq 'del(.approval.authority)' "$record" > "$tmp" && mv -f -- "$tmp" "$record" || fail "could not remove approval authority"
+  chmod 600 "$record"
+  out=$(preflight_env "$home" 101 verify authority-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "approval without typed authority must be refused"
+  assert_contains "$out" "typed approval authority evidence" "missing authority refusal was unclear"
+
+  fp=$(publish_preflight_record "$home" evidence-a1 "$contract" direct approved 100) || fail "could not publish approved direct preflight"
+  record="$home/data/evidence-a1/ship-preflight.json"
+  tmp=$(mktemp "$home/data/evidence-a1/.approval.XXXXXX") || fail "could not prepare malformed evidence"
+  jq '.approval.evidence = "unverified"' "$record" > "$tmp" && mv -f -- "$tmp" "$record" || fail "could not alter approval evidence"
+  chmod 600 "$record"
+  out=$(preflight_env "$home" 101 verify evidence-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "approval without typed evidence must be refused"
+  assert_contains "$out" "typed approval authority evidence" "missing evidence refusal was unclear"
+  pass "preflight requires typed authority and bridge evidence"
+}
+
 test_grouped_questions_and_bounded_contract() {
   local home="$TMP_ROOT/grouped" contract="$TMP_ROOT/grouped-contract.json" out status
   mkdir -p "$home/data"
@@ -296,6 +322,22 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   pass "run-state producer persists a compact canonical dashboard checkpoint"
 }
 
+test_status_event_persists_transition_before_status() {
+  local home="$TMP_ROOT/status-event" fake_date record
+  mkdir -p "$home/data" "$home/state" "$TMP_ROOT/status-event-bin"
+  printf '%s\n' 'kind=ship' > "$home/state/status-a1.meta"
+  fake_date="$TMP_ROOT/status-event-bin/date"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'working: implementation started' || fail "working status event failed"
+  PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=110 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-a1 'done: implementation finished' || fail "terminal status event failed"
+  record="$home/state/dashboard-transitions/status-a1.json"
+  jq -e '.state == "done" and .transition_at == 110 and .active_seconds == 10' "$record" >/dev/null \
+    || fail "status event did not persist canonical transition timing"
+  [ "$(wc -l < "$home/state/status-a1.status")" -eq 2 ] || fail "status event did not append both status lines"
+  pass "status events persist canonical transitions with status output"
+}
+
 test_dashboard_busy_events_preserve_hidden_transitions() {
   local home="$TMP_ROOT/dashboard-busy-events" fake_date gen record
   mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-busy-bin"
@@ -480,6 +522,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 }
 
 test_direct_and_bridge_owned_preflight_authority
+test_preflight_requires_typed_authority_evidence
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
@@ -489,6 +532,7 @@ test_dashboard_projection_and_active_time
 test_dashboard_recovers_stale_publication_lock
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
+test_status_event_persists_transition_before_status
 test_dashboard_busy_events_preserve_hidden_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss

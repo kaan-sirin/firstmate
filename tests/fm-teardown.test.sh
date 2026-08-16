@@ -576,6 +576,7 @@ test_local_only_fork_remote_allows() {
 
   expect_code 0 "$rc" "fork-allow: teardown should succeed when HEAD is on a fork remote"
   ! grep -q REFUSED "$case_dir/stderr" || fail "fork-allow: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/state/.meta-task-x1.lock" ] || fail "fork-allow: teardown left its metadata lock held"
   pass "local-only worktree with HEAD on a fork remote is torn down (fix holds)"
 }
 
