@@ -457,7 +457,11 @@ age_of() {  # seconds since file mtime; "due immediately" if missing
 }
 
 dashboard_transition_observe() {
-  local task=$1 state=$2 transition_at=$3 dir record meta meta_mtime prior_state prior_at prior_meta tmp
+  local task=$1 state=$2 transition_at=$3 dir record meta meta_mtime prior_state prior_meta prior_history tmp
+  prior_state=
+  prior_meta=
+  prior_history='[]'
+  case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 1 ;; esac
   case "$task:$state:$transition_at" in
     *[!A-Za-z0-9._:-]*|*::*|::*) return 1 ;;
   esac
@@ -474,21 +478,38 @@ dashboard_transition_observe() {
   fi
   record="$dir/$task.json"
   if [ -f "$record" ] && [ ! -L "$record" ]; then
-    IFS=$'\t' read -r prior_state prior_at prior_meta < <(
-      jq -r '[.state // "",(.transition_at // "" | tostring),(.meta_mtime // "" | tostring)] | @tsv' "$record" 2>/dev/null || true
+    IFS=$'\t' read -r prior_state prior_meta prior_history < <(
+      jq -r '[.state // "",(.meta_mtime // "" | tostring),((.history // []) | @json)] | @tsv' "$record" 2>/dev/null || true
     )
-    if [ "$prior_state" = "$state" ] && [ "$prior_meta" = "$meta_mtime" ]; then
-      return 0
+    if [ "$prior_meta" != "$meta_mtime" ]; then
+      prior_state=
+      prior_history='[]'
+    elif ! printf '%s' "$prior_history" | jq -e '
+      type == "array" and all(.[]?; (.state | type) == "string" and (.at | type) == "number")
+    ' >/dev/null 2>&1; then
+      prior_history='[]'
     fi
   fi
   tmp=$(umask 077; mktemp "$dir/.${task}.XXXXXX") || return 1
-  if ! jq -n --arg id "$task" --arg state "$state" --argjson transition_at "$transition_at" --argjson meta_mtime "$meta_mtime" \
-    '{schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime}' > "$tmp" \
+  if ! jq -n --arg id "$task" --arg state "$state" --argjson transition_at "$transition_at" --argjson meta_mtime "$meta_mtime" --arg prior_state "$prior_state" --argjson history "$prior_history" '
+    ($history | if $prior_state == $state then . else . + [{state:$state,at:$transition_at}] end) as $history
+    | {schema_version:1,id:$id,state:$state,transition_at:$transition_at,meta_mtime:$meta_mtime,history:$history}' > "$tmp" \
     || ! chmod 600 "$tmp" \
     || ! mv -f -- "$tmp" "$record"; then
     rm -f -- "$tmp"
     return 1
   fi
+}
+
+dashboard_transition_reconcile() {
+  local task=$1 line state
+  line=$("$FM_CREW_STATE_BIN" "$task" 2>/dev/null || true)
+  case "$line" in
+    state:\ *) state=${line#state: }; state=${state%% *} ;;
+    *) return 0 ;;
+  esac
+  case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 0 ;; esac
+  dashboard_transition_observe "$task" "$state" "$(date +%s)" || triage_log "dashboard transition write failed for $task"
 }
 
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
@@ -1800,6 +1821,7 @@ EOF
   while IFS= read -r w; do
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
+    dashboard_transition_reconcile "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}
@@ -1826,13 +1848,6 @@ EOF
     # content cannot suppress stale detection. Read once per window per poll and
     # reused below so a busy verdict is consistent within one cycle.
     if window_is_busy "$w" "$tail40"; then busy_now=0; else busy_now=1; fi
-    if [ "$busy_now" -eq 0 ]; then
-      dashboard_transition_observe "$task" working "$(date +%s)" || triage_log "dashboard transition write failed for $task"
-    elif status_is_paused "$last"; then
-      pause_transition=$(stat_mtime "$STATE/$task.status")
-      case "$pause_transition" in ''|*[!0-9]*) pause_transition=$(date +%s) ;; esac
-      dashboard_transition_observe "$task" paused "$pause_transition" || triage_log "dashboard transition write failed for $task"
-    fi
     if [ "$h" = "$prev" ]; then
       n=$(( $(cat "$cf" 2>/dev/null || echo 0) + 1 ))
       echo "$n" > "$cf"
