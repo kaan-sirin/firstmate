@@ -15,8 +15,6 @@ FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
 BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
 FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
 BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
-FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
-BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
 
 publish_approved_preflight() {  # <home> <task-id>
