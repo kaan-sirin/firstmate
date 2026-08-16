@@ -5,6 +5,7 @@ set -u
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
 PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
+BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
 DASHBOARD="$ROOT/bin/fm-dashboard.sh"
 TMP_ROOT=$(fm_test_tmproot fm-ship-end-to-end)
 
@@ -19,10 +20,17 @@ preflight_env() {
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW="$now" "$PREFLIGHT" "$@"
 }
 
+bridge_env() {
+  local home=$1
+  shift
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$BRIDGE" "$@"
+}
+
 publish_preflight_record() {
-  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp record tmp bypass
-  record="$home/data/$id/ship-preflight.json"
-  mkdir -p "${record%/*}"
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp handoff tmp bypass
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  mkdir -p "${handoff%/*}"
+  chmod 700 "$home/state/agent-bridge" "${handoff%/*}"
   contract_json=$(jq -cS . "$contract") || fail "could not canonicalize bridge contract"
   bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not bind bridge preflight"
   if command -v sha256sum >/dev/null 2>&1; then
@@ -31,12 +39,13 @@ publish_preflight_record() {
     fp=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
   fi
   bypass=$(jq -c '.complete_plan_approved == true' "$contract") || fail "could not read bypass state"
-  tmp=$(umask 077; mktemp "${record%/*}/.ship-preflight.XXXXXX") || fail "could not prepare bridge record"
+  tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || fail "could not prepare bridge record"
   jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" '
     {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract}
     + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
   ' > "$tmp" || { rm -f -- "$tmp"; fail "could not write bridge record"; }
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$record" || { rm -f -- "$tmp"; fail "could not publish bridge record"; }
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$handoff" || { rm -f -- "$tmp"; fail "could not prepare bridge handoff"; }
+  bridge_env "$home" publish "$id" >/dev/null || fail "could not publish bridge record"
   printf '%s' "$fp"
 }
 
@@ -66,6 +75,15 @@ test_direct_and_bridge_owned_preflight_authority() {
 
   fp=$(publish_preflight_record "$home" slack-a1 "$contract" bridge approved 100) || fail "could not prepare bridge-owned preflight"
   preflight_env "$home" 102 verify slack-a1 --fingerprint "$fp" >/dev/null || fail "bridge-owned Slack preflight should verify"
+
+  mkdir -p "$home/state/ship-preflight-submissions"
+  printf '%s\n' '{}' > "$home/state/ship-preflight-submissions/generic-a1.json"
+  chmod 600 "$home/state/ship-preflight-submissions/generic-a1.json"
+  out=$(bridge_env "$home" publish generic-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a generic submission path published a preflight"
+  assert_contains "$out" "no valid private bridge handoff" "generic submission refusal was unclear"
+  assert_absent "$home/data/generic-a1/ship-preflight.json" "generic submission wrote an approval record"
   pass "typed direct and bridge-owned Slack preflights preserve approval authority"
 }
 
