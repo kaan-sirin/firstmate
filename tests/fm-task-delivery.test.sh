@@ -80,7 +80,10 @@ approve_preflight() {  # <home> <task-id>
   now=$(date +%s)
   jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
     '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
-  chmod 600 "$tmp" && mv -f -- "$tmp" "$handoff" || { rm -f -- "$tmp"; return 1; }
+  if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
     "$BRIDGE" publish "$id" >/dev/null || return 1
   printf '%s\n' "$fingerprint"

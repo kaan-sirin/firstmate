@@ -187,7 +187,6 @@ fi
 command -v jq >/dev/null 2>&1 || { echo "fm-x-link: jq not found" >&2; exit 1; }
 fmx_load_config
 REQ_PLATFORM=
-REQ_EXPLICIT_MAX=
 REQ_REPLY_MAX=
 REQ_THREAD_URL=
 if [ -n "$CARRY_PLATFORM" ]; then
@@ -208,7 +207,6 @@ if [ -z "$CARRY_PLATFORM" ]; then
   REQ_PLATFORM=$CTX_PLATFORM
 fi
 if [ -z "$CARRY_MAX" ]; then
-  REQ_EXPLICIT_MAX=$CTX_REPLY_MAX
   REQ_REPLY_MAX=$CTX_REPLY_MAX
 fi
 

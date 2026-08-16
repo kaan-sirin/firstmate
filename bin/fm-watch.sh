@@ -461,7 +461,7 @@ dashboard_refresh_after_wake() {
   dashboard_refresh
 }
 
-FM_WAKE_POST_DELIVERY_ACTION=dashboard_refresh_after_wake
+export FM_WAKE_POST_DELIVERY_ACTION=dashboard_refresh_after_wake
 
 dashboard_transition_reconcile() {
   local task=$1 line state transition_at

@@ -25,7 +25,9 @@ valid_id "$ID" || die "unsafe task id"
 
 BRIDGE_ROOT="$STATE/agent-bridge"
 HANDOFF_DIR="$BRIDGE_ROOT/ship-preflight"
-valid_private_dir "$BRIDGE_ROOT" && valid_private_dir "$HANDOFF_DIR" || die "unsafe bridge handoff directory"
+if ! valid_private_dir "$BRIDGE_ROOT" || ! valid_private_dir "$HANDOFF_DIR"; then
+  die "unsafe bridge handoff directory"
+fi
 HANDOFF="$HANDOFF_DIR/$ID.json"
 valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
 
@@ -36,6 +38,7 @@ else
   (umask 077; mkdir -p "$REC_DIR") || die "could not create task record directory"
 fi
 
+# shellcheck source=bin/fm-wake-lib.sh
 STATE="$REC_DIR" FM_STATE_OVERRIDE="$REC_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$REC_DIR/.ship-preflight.lock"
 fm_lock_acquire_wait "$LOCK" || die "could not lock preflight record"
