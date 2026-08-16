@@ -235,7 +235,6 @@ if ! fmx_context_registry_set "$STATE" "$RID" "$REQ_PLATFORM" "$REQ_REPLY_MAX" 0
   echo "fm-x-link: failed to preserve request context for $RID" >&2
   exit 1
 fi
-
 if ! fmx_meta_link_set "$META" "$RID" "$LINK_TS" "$FOLLOWUPS" "$REQ_PLATFORM" "$REQ_REPLY_MAX" "$REQ_THREAD_URL"; then
   echo "fm-x-link: failed to record the link in state/$ID.meta" >&2
   exit 1
