@@ -80,7 +80,6 @@ fm_cursor_path_is_cursor() {  # <path>
   case "$canonical" in */cursor-agent/versions/*/*) return 0 ;; esac
   return 1
 }
-
 # True when running `$1 --help` produces Cursor's own CLI identity. Bounded and
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
@@ -240,4 +239,3 @@ fm_cursor_process_matches() {  # <comm> <args> [argv0]
   case "$comm" in */*) fm_cursor_path_is_cursor "$comm" && return 0 ;; esac
   return 1
 }
-
