@@ -525,12 +525,18 @@ test_self_announced_close_does_not_rewake_but_next_note_does() {
 # --- actionable wakes are surfaced (queue + exit) ---------------------------
 
 test_actionable_signal_surfaced() {
-  local dir state fakebin out drain_out status_file pid
+  local dir state fakebin out drain_out status_file snapshot record pid
   dir=$(make_case actionable-signal); state="$dir/state"; fakebin="$dir/fakebin"
   out="$dir/watch.out"; drain_out="$dir/drain.out"
   status_file="$state/task.status"
+  snapshot="$dir/dashboard-snapshot"; record="$dir/data/dashboard.json"
+  mkdir -p "$dir/data"
+  printf '%s\n' '#!/usr/bin/env bash' \
+    "printf '%s\\n' '{\"schema\":\"fm-fleet-snapshot.v1\",\"tasks\":[{\"id\":\"task\",\"kind\":\"ship\",\"backlog\":{\"title\":\"Choose a path\"},\"current_state\":{\"state\":\"parked\",\"source\":\"status\",\"detail\":\"\",\"transition_at\":100,\"active_seconds\":0},\"recovery\":{\"state\":\"none\"},\"hints\":{\"open_decisions\":[{\"verb\":\"needs-decision\",\"summary\":\"pick A or B\"}]}}]}'" > "$snapshot"
+  chmod +x "$snapshot"
   printf 'working: setup\nneeds-decision: pick A or B\n' > "$status_file"
-  watch_bg "$state" "$fakebin" "$out"
+  watch_bg "$state" "$fakebin" "$out" env FM_HOME="$dir" FM_DATA_OVERRIDE="$dir/data" \
+    FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$snapshot" FM_DASHBOARD_NOW=100
   pid=$!
   wait_for_exit "$pid" 40 || fail "watcher did not exit for an actionable needs-decision signal"
   grep -F "signal: $status_file" "$out" >/dev/null || fail "watcher did not print the actionable signal reason"

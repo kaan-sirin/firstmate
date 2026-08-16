@@ -21,6 +21,7 @@ SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
 PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
+PREFLIGHT_PUBLISH="$ROOT/bin/fm-ship-end-to-end-bridge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -61,14 +62,24 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
 }
 
 approve_preflight() {  # <home> <task-id>
-  local home=$1 id=$2 contract output fingerprint
+  local home=$1 id=$2 contract contract_json bound fingerprint submission
   contract="$home/$id-contract.json"
   printf '%s\n' '{"recommendation":"promote","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"local","external_boundaries":"none","questions":[]}' > "$contract"
-  output=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
-    "$PREFLIGHT" preflight "$id" --origin direct --contract "$contract") || return 1
-  fingerprint=${output#fingerprint=}
+  contract_json=$(jq -cS . "$contract") || return 1
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  submission="$home/state/ship-preflight-submissions/$id.json"
+  mkdir -p "${submission%/*}"
+  chmod 700 "${submission%/*}"
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$submission" || return 1
+  chmod 600 "$submission"
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
-    "$PREFLIGHT" approve "$id" --fingerprint "$fingerprint" --authority direct-captain --evidence approved || return 1
+    "$PREFLIGHT_PUBLISH" publish "$id" >/dev/null || return 1
   printf '%s\n' "$fingerprint"
 }
 

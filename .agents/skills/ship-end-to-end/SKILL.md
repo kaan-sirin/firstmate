@@ -23,25 +23,14 @@ Do not ask obvious questions.
 
 Create a JSON contract with these fields: `recommendation`, `outcome`, `scope`, `non_goals`, `delivery_boundary`, `external_boundaries`, and `questions`.
 For a complete plan that the captain explicitly approved, set `complete_plan_approved` to `true`.
-Create the typed record:
-
-```sh
-bin/fm-ship-end-to-end.sh preflight <task-id> --contract <contract.json>
-```
-
-Report its fingerprint in the contract. Wait for one explicit captain approval or correction for direct work.
-For an explicitly approved direct complete plan, submit its fingerprint for the one direct approval without asking a duplicate question.
-For Slack work, the Agent bridge verifies the allowlisted same-thread approval and submits FirstMate's typed preflight record through its trusted internal task path. Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
+Send the complete typed record through the Agent bridge's private submission path.
+For direct work, publish an awaiting-approval record, then replace it with the captain-approved same-fingerprint record after one explicit approval or correction.
+An explicitly approved complete plan can publish its approved record without a duplicate preflight question.
+For Slack work, the Agent bridge verifies the allowlisted same-thread approval and publishes the already-authorized typed record.
+Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
 
 ## Phase 2 - approved execution
 
-Approve only the same fingerprint:
-
-```sh
-bin/fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256>
-```
-
-If the captain corrects the contract before approval, use `correct` and present the new fingerprint.
 The durable preflight record declares this workflow. `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. It does not infer workflow use from brief text. A missing approval, corrected record, stale approval, or mismatch fails closed.
 
 Then execute autonomously in an isolated worktree.
