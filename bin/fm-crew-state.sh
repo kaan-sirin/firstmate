@@ -205,35 +205,6 @@ busy_transition_at() {
   printf '%s' "$busy_at"
 }
 
-duration_ms_transition_at() {  # <milliseconds>
-  local ms=$1 now seconds
-  case "$ms" in ''|*[!0-9]*) return 1 ;; esac
-  [ "$ms" -gt 0 ] || return 1
-  now=$(date +%s)
-  seconds=$(( (ms + 999) / 1000 ))
-  [ "$seconds" -le "$now" ] || return 1
-  printf '%s' $((now - seconds))
-}
-
-nm_active_step_duration_ms() {
-  printf '%s\n' "$RUN_OUT" | awk -F, '
-    /^[[:space:]]*[^:][^,]*,[[:space:]]*"?(running|fixing|ci|awaiting_approval|fix_review)"?,[[:space:]]*[0-9]+,[[:space:]]*[0-9]+/ {
-      value=$4; gsub(/[^0-9]/, "", value); if (value != "") print value; exit
-    }
-  '
-}
-
-awaiting_transition_at() {
-  local text=$1 value now seconds=0
-  if [[ $text =~ ([0-9]+)h ]]; then seconds=$((seconds + BASH_REMATCH[1] * 3600)); fi
-  if [[ $text =~ ([0-9]+)m ]]; then seconds=$((seconds + BASH_REMATCH[1] * 60)); fi
-  if [[ $text =~ ([0-9]+)s ]]; then seconds=$((seconds + BASH_REMATCH[1])); fi
-  [ "$seconds" -gt 0 ] || return 1
-  now=$(date +%s)
-  [ "$seconds" -le "$now" ] || return 1
-  printf '%s' $((now - seconds))
-}
-
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
 # trim, strip_quotes, the bounded nm_run call, nm_field's TOON parse, and the
 # branch+head attribution rule below are thin wrappers over the ONE owner in
@@ -603,15 +574,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  RUN_TRANSITION_AT=
-  if [ "$RUN_STATE" = parked ] && [ -n "$awaiting" ]; then
-    RUN_TRANSITION_AT=$(awaiting_transition_at "$awaiting" || true)
-  elif [ "$RUN_STATE" = working ] && [ "$LOG_VERB" = resolved ]; then
-    RUN_TRANSITION_AT=$(status_transition_at working || true)
-  fi
-  if [ -z "$RUN_TRANSITION_AT" ]; then
-    RUN_TRANSITION_AT=$(duration_ms_transition_at "$(nm_active_step_duration_ms)" || true)
-  fi
+  RUN_TRANSITION_AT=$(status_transition_at "$RUN_STATE" || true)
   emit "$RUN_STATE" run-step "$RUN_DETAIL" "$RUN_TRANSITION_AT"
 fi
 
