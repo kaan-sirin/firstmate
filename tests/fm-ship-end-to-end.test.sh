@@ -198,22 +198,20 @@ test_dashboard_transition_ledger_tracks_canonical_edges() {
   chmod +x "$state_bin"
   printf '%s\n' working > "$state_file"
   printf '%s\n' 100 > "$TMP_ROOT/dashboard-ledger-timestamp"
-  (
-    FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_CREW_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp"
-    export FM_HOME FM_DATA_OVERRIDE FM_STATE_OVERRIDE FM_ROOT_OVERRIDE FM_CREW_STATE_BIN FM_DASHBOARD_TEST_STATE FM_DASHBOARD_TEST_TIMESTAMP
-    . "$ROOT/bin/fm-watch.sh"
-    dashboard_transition_reconcile ledger-a1
-    printf '%s\n' parked > "$state_file"
-    printf '%s\n' 110 > "$TMP_ROOT/dashboard-ledger-timestamp"
-    dashboard_transition_reconcile ledger-a1
-    printf '%s\n' working > "$state_file"
-    printf '%s\n' 120 > "$TMP_ROOT/dashboard-ledger-timestamp"
-    dashboard_transition_reconcile ledger-a1
-  ) || fail "canonical transition ledger reconciliation failed"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "initial run-state event failed"
+  printf '%s\n' parked > "$state_file"
+  printf '%s\n' 110 > "$TMP_ROOT/dashboard-ledger-timestamp"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "parked run-state event failed"
+  printf '%s\n' working > "$state_file"
+  printf '%s\n' 120 > "$TMP_ROOT/dashboard-ledger-timestamp"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_ROOT_OVERRIDE="$ROOT" FM_DASHBOARD_RUN_STATE_BIN="$state_bin" FM_DASHBOARD_TEST_STATE="$state_file" FM_DASHBOARD_TEST_TIMESTAMP="$TMP_ROOT/dashboard-ledger-timestamp" "$ROOT/bin/fm-dashboard-run-state.sh" reconcile ledger-a1 \
+    || fail "resumed run-state event failed"
   record="$home/state/dashboard-transitions/ledger-a1.json"
   jq -e '.schema_version == 1 and .state == "working" and .transition_at == 120 and .active_seconds == 10' "$record" >/dev/null \
     || fail "canonical transition ledger did not preserve the producer checkpoint"
-  pass "watcher persists a compact canonical dashboard checkpoint"
+  pass "run-state producer persists a compact canonical dashboard checkpoint"
 }
 
 test_dashboard_busy_events_preserve_hidden_transitions() {
@@ -234,6 +232,25 @@ test_dashboard_busy_events_preserve_hidden_transitions() {
   pass "busy events persist exact active-time transitions"
 }
 
+test_dashboard_replays_spawn_busy_event_across_metadata_updates() {
+  local home="$TMP_ROOT/dashboard-spawn-replay" fake_date gen record
+  mkdir -p "$home/data" "$home/state" "$TMP_ROOT/dashboard-spawn-bin"
+  fake_date="$TMP_ROOT/dashboard-spawn-bin/date"
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  gen=$(PATH="$TMP_ROOT/dashboard-spawn-bin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-busy-event.sh" arm "$home/state" replay-a1) || fail "pre-metadata busy event failed"
+  [ ! -e "$home/state/dashboard-transitions/replay-a1.json" ] || fail "pre-metadata busy event must wait for task identity"
+  printf '%s\n' 'kind=ship' 'dashboard_incarnation=i-replay-a1' > "$home/state/replay-a1.meta"
+  "$ROOT/bin/fm-dashboard-transition.sh" replay-busy "$home/state" replay-a1 || fail "spawn replay failed"
+  printf '%s\n' 'x_thread_url=https://slack.example/thread/1' >> "$home/state/replay-a1.meta"
+  PATH="$TMP_ROOT/dashboard-spawn-bin:$PATH" FM_FAKE_NOW=110 "$ROOT/bin/fm-busy-event.sh" apply "$home/state" replay-a1 idle --gen "$gen" --source claude-hook --event stop \
+    || fail "post-metadata pause failed"
+  record="$home/state/dashboard-transitions/replay-a1.json"
+  jq -e '.incarnation == "i-replay-a1" and .state == "parked" and .active_seconds == 10' "$record" >/dev/null \
+    || fail "metadata update reset accumulated active time"
+  pass "spawn replay preserves active time across metadata updates"
+}
+
 test_dashboard_recovery_surfaces_only_exhausted_loss() {
   local home="$TMP_ROOT/dashboard-recovery" state_bin="$TMP_ROOT/dashboard-recovery-state" agent_bin="$TMP_ROOT/dashboard-recovery-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-spawn" mock="$TMP_ROOT/dashboard-recovery-snapshot" record
   mkdir -p "$home/data" "$home/state"
@@ -252,6 +269,25 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
   jq -e '.projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker recovery failed",slack_thread_url:null}] and .technical.tasks[0].recovery == "unrecoverable"' "$home/data/dashboard.json" >/dev/null \
     || fail "dashboard did not surface an exhausted worker recovery"
   pass "dashboard surfaces only exhausted worker recovery"
+}
+
+test_dashboard_recovery_surfaces_unsupported_replacement() {
+  local home="$TMP_ROOT/dashboard-recovery-unsupported" state_bin="$TMP_ROOT/dashboard-recovery-unsupported-state" agent_bin="$TMP_ROOT/dashboard-recovery-unsupported-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-unsupported-spawn" mock="$TMP_ROOT/dashboard-recovery-unsupported-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=zellij' 'window=main:worker' > "$home/state/dash-a2.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "replacement unavailable\\n" >&2' 'exit 3' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-a2 || fail "unsupported recovery record failed"
+  record="$home/state/dashboard-recovery/dash-a2.json"
+  jq -e '.state == "unrecoverable" and .attempts == 0 and .reason == "replacement unavailable"' "$record" >/dev/null \
+    || fail "unsupported recovery did not become terminal"
+  write_snapshot "$mock" unknown '[]' '' pane 'endpoint unavailable' null null '{"state":"unrecoverable"}'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=120 "$DASHBOARD" refresh >/dev/null || fail "unsupported dashboard refresh failed"
+  jq -e '.projection.needs_you == [{id:"dash-a1",name:"Build dashboard",kind:"failed",summary:"Worker recovery failed",slack_thread_url:null}]' "$home/data/dashboard.json" >/dev/null \
+    || fail "dashboard did not surface unsupported recovery"
+  pass "dashboard surfaces unsupported worker replacement"
 }
 
 test_dashboard_keeps_only_active_tasks() {
@@ -308,7 +344,9 @@ test_dashboard_projection_and_active_time
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges
 test_dashboard_busy_events_preserve_hidden_transitions
+test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
+test_dashboard_recovery_surfaces_unsupported_replacement
 test_dashboard_keeps_only_active_tasks
 test_preflight_is_private_and_does_not_touch_lifecycle
 test_dashboard_rejects_unsafe_or_oversized_inputs

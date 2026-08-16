@@ -14,6 +14,8 @@ case "$MAX_ATTEMPTS" in ''|*[!0-9]*|0) echo "fm-dashboard-recovery: invalid maxi
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 
 META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || exit 0
@@ -41,13 +43,8 @@ else
   chmod 700 "$DIR"
 fi
 LOCK="$DIR/$ID.lock"
-attempt=0
-while ! mkdir "$LOCK" 2>/dev/null; do
-  attempt=$((attempt + 1))
-  [ "$attempt" -lt 20 ] || exit 1
-  sleep 0.05
-done
-cleanup() { rmdir "$LOCK" 2>/dev/null || true; }
+fm_lock_acquire_wait "$LOCK"
+cleanup() { fm_lock_release "$LOCK" || true; }
 trap cleanup EXIT HUP INT TERM
 RECORD="$DIR/$ID.json"
 attempts=0
@@ -64,12 +61,22 @@ if [ "$recovery_status" -eq 0 ]; then
   exit 0
 fi
 if [ "$recovery_status" -eq 3 ]; then
+  state=unrecoverable
+  attempts=0
+  reason=$(printf '%s\n' "$out" | head -1 | tr '\r\n' ' ' | sed 's/[[:space:]]*$//' | cut -c1-240)
+  tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
+  if ! jq -n --arg id "$ID" --arg state "$state" --arg reason "$reason" --argjson attempts "$attempts" --argjson confirmed_at "$(date +%s)" \
+    '{schema_version:1,id:$id,state:$state,attempts:$attempts,confirmed_at:$confirmed_at,reason:$reason}' > "$tmp" \
+    || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
+    rm -f -- "$tmp"
+    exit 1
+  fi
   exit 0
 fi
 attempts=$((attempts + 1))
 state=pending
 [ "$attempts" -lt "$MAX_ATTEMPTS" ] || state=unrecoverable
-reason=$(printf '%s\n' "$out" | head -1 | tr '\r\n' ' ' | cut -c1-240)
+reason=$(printf '%s\n' "$out" | head -1 | tr '\r\n' ' ' | sed 's/[[:space:]]*$//' | cut -c1-240)
 tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
 if ! jq -n --arg id "$ID" --arg state "$state" --arg reason "$reason" --argjson attempts "$attempts" --argjson confirmed_at "$(date +%s)" \
   '{schema_version:1,id:$id,state:$state,attempts:$attempts,confirmed_at:$confirmed_at,reason:$reason}' > "$tmp" \

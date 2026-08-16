@@ -468,6 +468,7 @@ dashboard_transition_reconcile() {
     *) return 0 ;;
   esac
   case "$state" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 0 ;; esac
+  case "$line" in *' · source: run-step · '*) return 0 ;; esac
   transition_at=$(printf '%s\n' "$line" | sed -n 's/.*transition_at: \([0-9][0-9]*\).*/\1/p' | head -1)
   case "$transition_at" in ''|*[!0-9]*) return 0 ;; esac
   dashboard_transition_observe "$task" "$state" "$transition_at" || triage_log "dashboard transition write failed for $task"
