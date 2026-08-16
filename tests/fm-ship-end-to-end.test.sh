@@ -645,6 +645,33 @@ test_dashboard_recovery_defers_control_lock_contention() {
   pass "dashboard defers recovery while task control is busy"
 }
 
+test_dashboard_recovery_rechecks_eligibility_under_lock() {
+  local home="$TMP_ROOT/dashboard-recovery-stale" state_bin="$TMP_ROOT/dashboard-recovery-stale-state" agent_bin="$TMP_ROOT/dashboard-recovery-stale-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-stale-spawn" state_file="$TMP_ROOT/dashboard-recovery-stale-state-file" spawn_log="$TMP_ROOT/dashboard-recovery-stale-spawn-log" release="$TMP_ROOT/dashboard-recovery-stale-release" first second tries
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-stale.meta"
+  printf '%s\n' unknown > "$state_file"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: %s · source: endpoint\n" "$(cat "$FM_RECOVERY_STATE_FILE")"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "started\n" >> "$FM_RECOVERY_SPAWN_LOG"' 'while [ ! -e "$FM_RECOVERY_RELEASE" ]; do sleep 0.01; done' 'printf "working\n" > "$FM_RECOVERY_STATE_FILE"' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_RECOVERY_STATE_FILE="$state_file" FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_RECOVERY_RELEASE="$release" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-stale &
+  first=$!
+  tries=0
+  while [ ! -s "$spawn_log" ] && [ "$tries" -lt 50 ]; do
+    sleep 0.02
+    tries=$((tries + 1))
+  done
+  [ -s "$spawn_log" ] || fail "first recovery did not submit a replacement"
+  FM_RECOVERY_STATE_FILE="$state_file" FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_RECOVERY_RELEASE="$release" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-stale &
+  second=$!
+  sleep 0.2
+  : > "$release"
+  wait "$first" || fail "first recovery did not finish"
+  wait "$second" || fail "second recovery did not finish"
+  [ "$(wc -l < "$spawn_log")" -eq 1 ] || fail "stale recovery eligibility submitted a duplicate replacement"
+  pass "dashboard rechecks recovery eligibility after locking the task"
+}
+
 test_missing_recovery_control_lock_is_retryable() {
   local home="$TMP_ROOT/recovery-control-lock" out status lock
   mkdir -p "$home/data" "$home/state" "$home/config"
@@ -761,6 +788,7 @@ test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_defers_control_lock_contention
+test_dashboard_recovery_rechecks_eligibility_under_lock
 test_missing_recovery_control_lock_is_retryable
 test_dashboard_recovery_surfaces_unsupported_replacement
 test_dashboard_recovery_excludes_endpoint_outage

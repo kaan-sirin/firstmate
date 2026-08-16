@@ -21,6 +21,17 @@ META="$STATE/$ID.meta"
 [ -f "$META" ] && [ ! -L "$META" ] || exit 0
 kind=$(fm_meta_get "$META" kind)
 case "$kind" in ship|scout|'') ;; *) exit 0 ;; esac
+DIR="$STATE/dashboard-recovery"
+if [ -e "$DIR" ] || [ -L "$DIR" ]; then
+  [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
+else
+  (umask 077; mkdir -p "$DIR")
+  chmod 700 "$DIR"
+fi
+LOCK="$DIR/$ID.lock"
+fm_lock_acquire_wait "$LOCK"
+cleanup() { fm_lock_release "$LOCK" || true; }
+trap cleanup EXIT HUP INT TERM
 STATE_BIN=${FM_DASHBOARD_RECOVERY_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$STATE_BIN" "$ID" 2>/dev/null || true)
 case "$line" in state:\ unknown\ *) ;; *) exit 0 ;; esac
@@ -37,18 +48,6 @@ case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
 recovery_at=$(date +%s)
 case "$recovery_at" in ''|*[!0-9]*) exit 1 ;; esac
 "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" unknown "$recovery_at"
-
-DIR="$STATE/dashboard-recovery"
-if [ -e "$DIR" ] || [ -L "$DIR" ]; then
-  [ -d "$DIR" ] && [ ! -L "$DIR" ] || exit 1
-else
-  (umask 077; mkdir -p "$DIR")
-  chmod 700 "$DIR"
-fi
-LOCK="$DIR/$ID.lock"
-fm_lock_acquire_wait "$LOCK"
-cleanup() { fm_lock_release "$LOCK" || true; }
-trap cleanup EXIT HUP INT TERM
 RECORD="$DIR/$ID.json"
 attempts=0
 prior_state=
