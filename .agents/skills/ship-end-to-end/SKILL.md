@@ -23,17 +23,16 @@ Do not ask obvious questions.
 
 Create a JSON contract with these fields: `recommendation`, `outcome`, `scope`, `non_goals`, `delivery_boundary`, `external_boundaries`, and `questions`.
 For a complete plan that the captain explicitly approved, set `complete_plan_approved` to `true`.
-Create the typed record. For Slack, include the opaque source thread ID:
+Create the typed record:
 
 ```sh
 bin/fm-ship-end-to-end.sh preflight <task-id> --origin direct --contract <contract.json>
-bin/fm-ship-end-to-end.sh preflight <task-id> --origin slack --slack-thread <thread-id> --contract <contract.json>
+bin/fm-ship-end-to-end.sh preflight <task-id> --origin slack --contract <contract.json>
 ```
 
-Report its fingerprint in the contract.
-Wait for one explicit captain approval or correction.
+Report its fingerprint in the contract. Wait for one explicit captain approval or correction for direct work.
 For an explicitly approved direct complete plan, record the captain authority and evidence in the preflight command instead of asking a duplicate question.
-The Relay bridge must create the private allowlisted approval record for Slack. Do not supply Slack authority or evidence.
+For Slack work, the Agent bridge verifies the allowlisted same-thread approval before it dispatches FirstMate. Do not provide Slack authority, evidence, identity, or approval input to FirstMate.
 
 ## Phase 2 - approved execution
 
@@ -41,11 +40,10 @@ Approve only the same fingerprint:
 
 ```sh
 bin/fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256> --authority direct-captain --evidence '<approval evidence>'
-bin/fm-ship-end-to-end.sh approve <task-id> --fingerprint <sha256>
 ```
 
 If the captain corrects the contract before approval, use `correct` and present the new fingerprint.
-The durable preflight record declares this workflow. `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. It does not infer workflow use from brief text. A missing approval, corrected record, stale approval, mismatch, or untrusted Slack bridge record fails closed.
+The durable preflight record declares this workflow. `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. It does not infer workflow use from brief text. A missing approval, corrected record, stale approval, or mismatch fails closed.
 
 Then execute autonomously in an isolated worktree.
 Keep normal engineering choices inside the approved contract.
