@@ -19,6 +19,7 @@ FM_PUSH_TRANSITION_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TRIAGE_LOG="$STATE/.watch-triage.log"
 TRIAGE_LOG_MAX_BYTES=${FM_WATCH_TRIAGE_LOG_MAX_BYTES:-262144}
 FM_WAKE_POST_OUTPUT_ACTION=
+FM_WAKE_POST_DELIVERY_ACTION=
 # Set only after this watcher has printed a durable actionable reason. The
 # watcher's EXIT cleanup uses it to distinguish an ordinary delivered close from
 # an interruption that leaves a recovery gap before the next arm.
@@ -92,7 +93,9 @@ wake() {
     *) echo 0 > "$STATE/.heartbeat-streak" ;;
   esac
   trap '' HUP INT TERM
-  [ -z "$FM_WAKE_POST_OUTPUT_ACTION" ] || trap '' PIPE
+  if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ] || [ -n "$FM_WAKE_POST_DELIVERY_ACTION" ]; then
+    trap '' PIPE
+  fi
   if echo "$1"; then
     output_status=0
     watch_delivery_publish "$1" || true
@@ -103,6 +106,9 @@ wake() {
   fi
   if [ -n "$FM_WAKE_POST_OUTPUT_ACTION" ]; then
     "$FM_WAKE_POST_OUTPUT_ACTION" "$output_status" || true
+  fi
+  if [ -n "$FM_WAKE_POST_DELIVERY_ACTION" ]; then
+    "$FM_WAKE_POST_DELIVERY_ACTION" "$output_status" || true
   fi
   [ "$output_status" -eq 0 ] || exit "$output_status"
   exit 0
