@@ -12,7 +12,31 @@ set -u
 
 SPAWN="$ROOT/bin/fm-spawn.sh"
 FAST_REPAIR="$ROOT/bin/fm-fast-repair.sh"
+BRIDGE="$ROOT/bin/fm-agent-bridge-ship-preflight.sh"
 TMP_ROOT=$(fm_test_tmproot fm-spawn-dispatch-profile)
+
+publish_approved_preflight() {  # <home> <task-id>
+  local home=$1 id=$2 contract contract_json bound fingerprint handoff tmp now
+  contract='{"recommendation":"profile test","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"local","external_boundaries":"none","questions":[]}'
+  contract_json=$(printf '%s\n' "$contract" | jq -cS .) || return 1
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  mkdir -p "${handoff%/*}"
+  chmod 700 "$home/state/agent-bridge" "${handoff%/*}"
+  tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"bridge",state:"approved",contract:$contract,approval:{authority:"agent-bridge",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' \
+    > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$handoff" || { rm -f -- "$tmp"; return 1; }
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
+    "$BRIDGE" publish "$id" >/dev/null
+}
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -96,6 +120,7 @@ make_spawn_case() {
   for id in "$@"; do
     mkdir -p "$home/data/$id"
     printf 'brief for %s\n' "$id" > "$home/data/$id/brief.md"
+    publish_approved_preflight "$home" "$id" || return 1
   done
   printf '%s\n' "$case_dir|$home|$proj|$wt|$fakebin|$launchlog"
 }
@@ -134,8 +159,8 @@ run_spawn() {
     "$SPAWN" "$@" 2>&1
 }
 
-# Ship spawns carry an explicit delivery contract (AGENTS.md section 7); these
-# tests are about profile resolution, so they pass a fixed valid one.
+# Ship spawns carry an explicit delivery contract and a bridge-approved preflight;
+# these tests exercise only profile resolution.
 run_ship_spawn() {
   run_spawn "$@" --mode no-mistakes --yolo off
 }
@@ -407,7 +432,7 @@ test_active_dispatch_profile_allows_positional_harness() {
 }
 
 test_active_dispatch_profile_allows_raw_launch_command() {
-  local rec id out status launch
+  local rec id out status launch expected
   id=profile-raw-z15
   rec=$(make_spawn_case profile-raw claude "$id")
   read_case_record "$rec"
@@ -420,7 +445,11 @@ test_active_dispatch_profile_allows_raw_launch_command() {
   assert_contains "$out" "spawned $id harness=custom-agent" "spawn did not report raw command harness"
   assert_meta_profile "$HOME_DIR/state/$id.meta" custom-agent default default
   launch=$(cat "$LAUNCH_LOG")
-  [ "$launch" = "custom-agent --flag" ] || fail "raw launch command changed"$'\n'"actual: $launch"
+  expected="custom-agent --flag"
+  if command -v no-mistakes >/dev/null 2>&1; then
+    expected="PATH='/tmp/fm-$id/nm-bin':\$PATH $expected"
+  fi
+  [ "$launch" = "$expected" ] || fail "raw launch command changed"$'\n'"expected: $expected"$'\n'"actual: $launch"
   pass "active crew-dispatch profile allows the raw launch-command escape hatch"
 }
 
