@@ -173,7 +173,8 @@ POLL_CTX=$(fmx_extract_reply_context "$BODY_FILE" 2>/dev/null) || POLL_CTX=
 if [ -n "$POLL_CTX" ]; then
   POLL_PLATFORM=$(printf '%s' "$POLL_CTX" | jq -r '.platform // ""' 2>/dev/null) || POLL_PLATFORM=
   POLL_MAX=$(printf '%s' "$POLL_CTX" | jq -r '.reply_max_chars // ""' 2>/dev/null) || POLL_MAX=
-  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
+  POLL_THREAD_URL=$(printf '%s' "$POLL_CTX" | jq -r '.thread_url // ""' 2>/dev/null) || POLL_THREAD_URL=
+  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 0 "$POLL_THREAD_URL" 2>/dev/null || true
 fi
 
 fmx_offer_registry_claim "$STATE" "$REQ"

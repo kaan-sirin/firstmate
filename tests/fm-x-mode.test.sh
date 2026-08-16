@@ -2420,6 +2420,30 @@ TXT
   pass "fm-x-link recovery relink preserves Discord platform context after inbox drain"
 }
 
+test_link_recovery_relink_retains_thread_url_after_inbox_drain() {
+  local home original successor registry rc
+  home="$TMP_ROOT/link-carry-thread"; private_artifact_dir "$home/state/x-inbox"
+  original="$home/state/original-thread.meta"
+  successor="$home/state/successor-thread.meta"
+  printf 'window=w\nkind=ship\n' > "$original"
+  printf 'window=w\nkind=ship\n' > "$successor"
+  jq -cn '{request_id:"req-thread-recovery",tweet_id:"123",reply_max_chars:280,thread_url:"https://slack.example/thread/recovery",text:"ship this"}' \
+    > "$home/state/x-inbox/req-thread-recovery.json"
+  private_artifact_file "$home/state/x-inbox/req-thread-recovery.json"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700000000 "$ROOT/bin/fm-x-link.sh" original-thread req-thread-recovery >/dev/null; rc=$?
+  expect_code 0 "$rc" "initial thread link exit"
+  registry="$home/state/x-context/req-thread-recovery.json"
+  jq -e '.thread_url == "https://slack.example/thread/recovery"' "$registry" >/dev/null \
+    || fail "link did not persist the validated thread URL"
+  rm -f "$home/state/x-inbox/req-thread-recovery.json"
+  FM_HOME="$home" FMX_NOW_OVERRIDE=1700999999 "$ROOT/bin/fm-x-link.sh" successor-thread req-thread-recovery \
+    --carry-count 1 --carry-ts 1700000000 --carry-platform x --carry-max 280 >/dev/null; rc=$?
+  expect_code 0 "$rc" "successor thread relink exit"
+  assert_grep 'x_thread_url=https://slack.example/thread/recovery' "$successor" \
+    "successor relink removed the durable thread URL"
+  pass "fm-x-link recovery relink retains the durable thread URL"
+}
+
 test_link_carry_count_validation() {
   local home rc err
   home="$TMP_ROOT/link-carry-bad"; mkdir -p "$home/state"
@@ -2955,6 +2979,7 @@ test_link_resolves_platform_by_request_id_after_inbox_cleanup
 test_link_warns_loudly_when_platform_unresolvable
 test_link_carry_count_and_ts_preserve_followup_binding
 test_link_recovery_relink_carries_discord_context_after_inbox_drain
+test_link_recovery_relink_retains_thread_url_after_inbox_drain
 test_link_carry_count_validation
 test_meta_rewrites_do_not_depend_on_tmpdir
 test_link_rejects_unsafe_and_missing
