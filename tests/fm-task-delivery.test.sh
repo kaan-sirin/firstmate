@@ -20,8 +20,6 @@ set -u
 SPAWN="$ROOT/bin/fm-spawn.sh"
 PROMOTE="$ROOT/bin/fm-promote.sh"
 PROJECT_MODE="$ROOT/bin/fm-project-mode.sh"
-PREFLIGHT="$ROOT/bin/fm-ship-end-to-end.sh"
-PREFLIGHT_PUBLISH="$ROOT/bin/fm-ship-end-to-end-bridge.sh"
 TMP_ROOT=$(fm_test_tmproot fm-task-delivery)
 
 # A home with one registered project, one project directory, and a fake tmux that
@@ -62,7 +60,7 @@ run_spawn() {  # <home> <fakebin> <spawn-args...>
 }
 
 approve_preflight() {  # <home> <task-id>
-  local home=$1 id=$2 contract contract_json bound fingerprint submission
+  local home=$1 id=$2 contract contract_json bound fingerprint record tmp now
   contract="$home/$id-contract.json"
   printf '%s\n' '{"recommendation":"promote","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"local","external_boundaries":"none","questions":[]}' > "$contract"
   contract_json=$(jq -cS . "$contract") || return 1
@@ -72,14 +70,13 @@ approve_preflight() {  # <home> <task-id>
   else
     fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
   fi
-  submission="$home/state/ship-preflight-submissions/$id.json"
-  mkdir -p "${submission%/*}"
-  chmod 700 "${submission%/*}"
-  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$submission" || return 1
-  chmod 600 "$submission"
-  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" \
-    "$PREFLIGHT_PUBLISH" publish "$id" >/dev/null || return 1
+  record="$home/data/$id/ship-preflight.json"
+  mkdir -p "${record%/*}"
+  tmp=$(umask 077; mktemp "${record%/*}/.ship-preflight.XXXXXX") || return 1
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" && mv -f -- "$tmp" "$record" || { rm -f -- "$tmp"; return 1; }
   printf '%s\n' "$fingerprint"
 }
 
