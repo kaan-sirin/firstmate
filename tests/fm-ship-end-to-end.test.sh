@@ -330,6 +330,61 @@ test_bridge_recovers_a_claim_after_interruption() {
   pass "bridge recovers a claimed handoff after interruption"
 }
 
+test_bridge_serializes_concurrent_publish_claims() {
+  local home="$TMP_ROOT/bridge-concurrent" id=concurrent-a1 contract="$TMP_ROOT/bridge-concurrent-contract.json" fakebin real_mktemp first second attempts first_status second_status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  write_bridge_handoff "$home" "$id" "$contract" direct approved 100 >/dev/null || fail "could not prepare concurrent bridge handoff"
+  fakebin="$TMP_ROOT/bridge-concurrent-bin"
+  mkdir -p "$fakebin"
+  real_mktemp=$(command -v mktemp)
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  "$FM_BRIDGE_CONCURRENT_DIR"/.*.claim.*)
+    if [ ! -e "$FM_BRIDGE_CONCURRENT_READY" ]; then
+      : > "$FM_BRIDGE_CONCURRENT_READY"
+      while [ ! -e "$FM_BRIDGE_CONCURRENT_RELEASE" ]; do sleep 0.01; done
+    fi
+    ;;
+esac
+exec "$FM_BRIDGE_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$fakebin/mktemp"
+  PATH="$fakebin:$PATH" FM_BRIDGE_CONCURRENT_DIR="$home/state/agent-bridge/ship-preflight" FM_BRIDGE_CONCURRENT_READY="$home/first-ready" FM_BRIDGE_CONCURRENT_RELEASE="$home/release-first" FM_BRIDGE_REAL_MKTEMP="$real_mktemp" \
+    bridge_env "$home" publish "$id" > "$home/first.out" 2>&1 &
+  first=$!
+  attempts=0
+  while [ ! -e "$home/first-ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/first-ready" ]; then
+    kill "$first" 2>/dev/null || true
+    wait "$first" 2>/dev/null || true
+    fail "first bridge publish did not hold its claim path"
+  fi
+  bridge_env "$home" publish "$id" > "$home/second.out" 2>&1 &
+  second=$!
+  sleep 0.1
+  if ! kill -0 "$second" 2>/dev/null; then
+    : > "$home/release-first"
+    wait "$first" 2>/dev/null || true
+    wait "$second" 2>/dev/null || true
+    fail "second bridge publish bypassed the task lock"
+  fi
+  : > "$home/release-first"
+  wait "$first"; first_status=$?
+  wait "$second"; second_status=$?
+  expect_code 0 "$first_status" "first bridge publish should complete"
+  [ "$second_status" -ne 0 ] || fail "second bridge publish should refuse its consumed handoff"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "concurrent bridge publication corrupted the durable preflight"
+  assert_absent "$home/state/agent-bridge/ship-preflight/$id.json" "concurrent bridge publication recreated an empty handoff"
+  pass "bridge serializes concurrent publish claims without an empty handoff"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -863,6 +918,7 @@ test_preflight_rejects_cross_task_records
 test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_bridge_claims_a_handoff_before_reading_it
 test_bridge_recovers_a_claim_after_interruption
+test_bridge_serializes_concurrent_publish_claims
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
