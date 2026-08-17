@@ -455,6 +455,18 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the copied make executable is classified by its executable identity"
 assert_absent "$H/state/procevent/when-interpreter-make-copy.source" \
   "a copied make command form is never registered"
+FIND_BIN=$(type -P find)
+FIND_COPY="$TMP_ROOT/approved-runner-find-copy"
+cp "$FIND_BIN" "$FIND_COPY"
+chmod +x "$FIND_COPY"
+if when "$H" arm interpreter-find-copy --condition true --action "$FIND_COPY" "$TMP_ROOT" -exec "$INTERPRETED" ';' \
+  >"$TMP_ROOT/interpreter-find-copy.out" 2>"$TMP_ROOT/interpreter-find-copy.err"; then
+  fail "a renamed find dispatcher command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-find-copy.err" \
+  "the copied find dispatcher is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-find-copy.source" \
+  "a copied find dispatcher command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
