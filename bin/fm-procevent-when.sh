@@ -15,11 +15,13 @@
 # arm        Bind a (condition, action) pair as process-event source
 #            "when-<name>". The spec is written privately under state/when/ and
 #            hash-bound by a trust record the same way fm-check-register.sh
-#            binds a custom check. The action executable is resolved and its
-#            bytes are hash-bound at registration, then checked again immediately
-#            before the fire is claimed. The runner refuses a mutated spec or
-#            action without executing anything. Both argv vectors are executed
-#            directly with no shell, so nothing is re-split or interpreted.
+#            binds a custom check. Each command executable is resolved and its
+#            bytes are hash-bound at registration, then checked immediately
+#            before it runs. Interpreter command forms are rejected so an
+#            unbound script cannot be supplied as an argument. The runner
+#            refuses a mutated spec or command without executing it. Both argv
+#            vectors are executed directly with no shell, so nothing is
+#            re-split or interpreted.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)
@@ -119,7 +121,7 @@ positive_number() {
   [ "$n" != 0 ] && [[ ! "$n" =~ ^0+(\.0+)?$ ]]
 }
 
-action_executable() {  # <argv-zero>: print the executable's absolute path
+command_executable() {  # <argv-zero>: print the executable's absolute path
   local command=$1 found dir base
   case "$command" in
     */*) found=$command ;;
@@ -132,6 +134,23 @@ action_executable() {  # <argv-zero>: print the executable's absolute path
   found="$dir/$base"
   [ -f "$found" ] && [ -x "$found" ] || return 1
   printf '%s\n' "$found"
+}
+
+command_is_interpreter() {  # <absolute-command-path>
+  local base=${1##*/}
+  case "$base" in
+    sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi)
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+command_bytes_match() {  # <absolute-command-path> <registered-sha256>
+  local path=$1 expected=$2 actual
+  [ -f "$path" ] && [ -x "$path" ] || return 1
+  actual=$(fm_pr_sha256 "$path") || return 1
+  [ "$actual" = "$expected" ]
 }
 
 # --- arm ---------------------------------------------------------------------
@@ -186,8 +205,15 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device action_path action_hash
-  action_path=$(action_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
+  local tmp trust_tmp hash device condition_path condition_hash action_path action_hash
+  condition_path=$(command_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
+  command_is_interpreter "$condition_path" \
+    && die "condition interpreter command forms are not supported; execute the approved script directly"
+  condition_hash=$(fm_pr_sha256 "$condition_path") || die "cannot hash the condition executable"
+  cond[0]=$condition_path
+  action_path=$(command_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
+  command_is_interpreter "$action_path" \
+    && die "action interpreter command forms are not supported; execute the approved script directly"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
   act[0]=$action_path
   device=$(fm_pr_file_device "$WHEN_DIR") || die "cannot inspect the watch directory"
@@ -201,6 +227,7 @@ cmd_arm() {
     printf 'condition_timeout=%s\n' "$condition_timeout"
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
+    printf 'condition_sha256=%s\n' "$condition_hash"
     printf 'action_sha256=%s\n' "$action_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
@@ -260,7 +287,7 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
-  SPEC_ACTION_SHA256=''
+  SPEC_CONDITION_SHA256='' SPEC_ACTION_SHA256=''
   local cond_argc='' act_argc='' in_argv=0 read_cond=0 read_act=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
@@ -278,6 +305,7 @@ spec_load() {
           condition_timeout) SPEC_CONDITION_TIMEOUT=$value ;;
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
+          condition_sha256)  SPEC_CONDITION_SHA256=$value ;;
           action_sha256)     SPEC_ACTION_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
@@ -303,6 +331,8 @@ spec_load() {
   positive_int "$SPEC_CONDITION_TIMEOUT" || { SPEC_ERROR="spec condition timeout is malformed"; return 1; }
   positive_int "$SPEC_ACTION_TIMEOUT" || { SPEC_ERROR="spec action timeout is malformed"; return 1; }
   positive_int "$SPEC_ERROR_BUDGET" || { SPEC_ERROR="spec error budget is malformed"; return 1; }
+  [[ "$SPEC_CONDITION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
+    || { SPEC_ERROR="spec condition hash is malformed"; return 1; }
   [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || { SPEC_ERROR="spec action hash is malformed"; return 1; }
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
@@ -376,6 +406,11 @@ cmd_run() {
         "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' ''
       exit 0
     fi
+    if ! command_bytes_match "${COND_ARGV[0]}" "$SPEC_CONDITION_SHA256"; then
+      emit_doc "$sid" rejected \
+        "refused without executing the condition: its bytes do not match the registered trust binding" "$polls" '' ''
+      exit 0
+    fi
     if bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"; then
       rc=0
     else
@@ -420,9 +455,7 @@ cmd_run() {
 
   # Revalidate the registered action bytes immediately before claiming the
   # fire. A changed or unavailable executable must never be run.
-  local current_action_hash
-  current_action_hash=$(fm_pr_sha256 "${ACT_ARGV[0]}") || current_action_hash=
-  if [ "$current_action_hash" != "$SPEC_ACTION_SHA256" ]; then
+  if ! command_bytes_match "${ACT_ARGV[0]}" "$SPEC_ACTION_SHA256"; then
     emit_doc "$sid" rejected \
       "refused without executing the action: its bytes do not match the registered trust binding" "$polls" '' ''
     exit 0

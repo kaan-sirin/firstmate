@@ -378,6 +378,60 @@ assert_absent "$TMP_ROOT/tamper-count" "nothing from the mutated spec was execut
 assert_contains "$(when "$H" classify "$RESULT")" rejected "classify reads the refusal"
 pass "a mutated spec is refused without executing anything"
 
+# --- interpreter command forms are refused before registration ---------------
+H="$TMP_ROOT/h-interpreter"; new_home "$H"
+INTERPRETED="$TMP_ROOT/interpreted.sh"
+cat > "$INTERPRETED" <<'SH'
+#!/usr/bin/env bash
+printf 'interpreter script ran\n' >> "$1"
+SH
+if when "$H" arm interpreter-condition --condition /bin/sh "$INTERPRETED" --action "$ACT" "$TMP_ROOT/interpreter-condition-act" \
+  >"$TMP_ROOT/interpreter-condition.out" 2>"$TMP_ROOT/interpreter-condition.err"; then
+  fail "an interpreter condition command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-condition.err" \
+  "the condition refusal explains the safe invocation form"
+assert_absent "$H/state/procevent/when-interpreter-condition.source" \
+  "a refused condition command form is never registered"
+if when "$H" arm interpreter-action --condition true --action /bin/sh "$INTERPRETED" "$TMP_ROOT/interpreter-action-act" \
+  >"$TMP_ROOT/interpreter-action.out" 2>"$TMP_ROOT/interpreter-action.err"; then
+  fail "an interpreter action command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-action.err" \
+  "the action refusal explains the safe invocation form"
+assert_absent "$H/state/procevent/when-interpreter-action.source" \
+  "a refused action command form is never registered"
+pass "interpreter command forms cannot register mutable scripts"
+
+# --- mutated condition bytes are refused before the next poll ----------------
+H="$TMP_ROOT/h-condition-tamper"; new_home "$H"
+CONDITION_TAMPER_LOG="$TMP_ROOT/condition-tamper-act"
+MUTABLE_COND="$TMP_ROOT/mutable-cond.sh"
+cat > "$MUTABLE_COND" <<'SH'
+#!/usr/bin/env bash
+printf 'original condition ran\n' >> "$1"
+exit 0
+SH
+chmod +x "$MUTABLE_COND"
+when "$H" arm condition-tamper --stable 1 \
+  --condition "$MUTABLE_COND" "$TMP_ROOT/condition-tamper-polls" \
+  --action "$ACT" "$CONDITION_TAMPER_LOG" >/dev/null
+cat > "$MUTABLE_COND" <<'SH'
+#!/usr/bin/env bash
+printf 'mutated condition ran\n' >> "$1"
+exit 0
+SH
+chmod +x "$MUTABLE_COND"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-condition-tamper || fail "no outcome was captured for the mutated condition"
+RESULT=$(first_result "$H" when-condition-tamper)
+assert_grep 'status: rejected' "$RESULT" "the outcome reports the condition trust refusal"
+assert_grep 'condition: its bytes do not match the registered trust binding' "$RESULT" \
+  "the refusal identifies the condition binding"
+assert_absent "$TMP_ROOT/condition-tamper-polls" "the mutated condition was not executed"
+assert_absent "$CONDITION_TAMPER_LOG" "a rejected condition never reaches the action"
+pass "mutated condition bytes are refused before polling"
+
 # --- mutated action bytes are refused before the fire is claimed -------------
 H="$TMP_ROOT/h-action-tamper"; new_home "$H"
 ACTION_TAMPER_LOG="$TMP_ROOT/action-tamper-act"
