@@ -331,6 +331,63 @@ test_bridge_recovers_a_claim_after_interruption() {
   pass "bridge recovers a claimed handoff after interruption"
 }
 
+test_bridge_restores_a_claim_interrupted_after_rename() {
+  local home="$TMP_ROOT/bridge-rename-interruption" id=rename-interruption-a1 contract="$TMP_ROOT/bridge-rename-interruption-contract.json" handoff fakebin real_mv ready release target_pid publisher attempts status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  write_bridge_handoff "$home" "$id" "$contract" direct approved 100 >/dev/null || fail "could not prepare rename-interrupted bridge handoff"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  fakebin="$TMP_ROOT/bridge-rename-interruption-bin"
+  mkdir -p "$fakebin"
+  real_mv=$(command -v mv)
+  cat > "$fakebin/mv" <<'SH'
+#!/usr/bin/env bash
+set -eu
+interrupt=0
+for arg in "$@"; do
+  [ "$arg" != "$FM_BRIDGE_INTERRUPT_HANDOFF" ] || interrupt=1
+done
+"$FM_BRIDGE_REAL_MV" "$@"
+[ "$interrupt" -eq 0 ] || {
+  printf '%s\n' "$PPID" > "$FM_BRIDGE_INTERRUPT_PID"
+  : > "$FM_BRIDGE_INTERRUPT_READY"
+  while [ ! -e "$FM_BRIDGE_INTERRUPT_RELEASE" ]; do sleep 0.01; done
+}
+SH
+  chmod +x "$fakebin/mv"
+
+  ready="$home/rename-ready"
+  release="$home/rename-release"
+  PATH="$fakebin:$PATH" FM_BRIDGE_INTERRUPT_HANDOFF="$handoff" FM_BRIDGE_REAL_MV="$real_mv" FM_BRIDGE_INTERRUPT_PID="$home/rename-pid" FM_BRIDGE_INTERRUPT_READY="$ready" FM_BRIDGE_INTERRUPT_RELEASE="$release" \
+    bridge_env "$home" publish "$id" > "$home/rename-publish.out" 2>&1 &
+  publisher=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    : > "$release"
+    wait "$publisher" 2>/dev/null || true
+    fail "rename interruption did not reach the claimed handoff"
+  fi
+  target_pid=$(cat "$home/rename-pid")
+  kill -TERM "$target_pid" || fail "could not interrupt the claiming bridge process"
+  : > "$release"
+  wait "$publisher"
+  status=$?
+  [ "$status" -ne 0 ] || fail "rename interruption did not stop bridge publication"
+  [ -f "$handoff" ] || fail "rename interruption lost the bridge handoff"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$handoff" >/dev/null \
+    || fail "rename interruption did not restore the original handoff"
+  assert_absent "$home/data/$id/ship-preflight.json" "rename interruption published a preflight record"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not publish the restored rename-interrupted handoff"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "restored rename-interrupted handoff did not publish"
+  pass "bridge restores a claim interrupted after rename"
+}
+
 test_bridge_recovers_a_hard_linked_claim_after_interruption() {
   local home="$TMP_ROOT/bridge-hard-link-recovery" id=hard-link-recovery-a1 contract="$TMP_ROOT/bridge-hard-link-recovery-contract.json" handoff claim
   mkdir -p "$home/data" "$home/state"
@@ -946,6 +1003,7 @@ test_preflight_rejects_cross_task_records
 test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_bridge_claims_a_handoff_before_reading_it
 test_bridge_recovers_a_claim_after_interruption
+test_bridge_restores_a_claim_interrupted_after_rename
 test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_serializes_concurrent_publish_claims
 test_spawn_enforces_the_durable_preflight
