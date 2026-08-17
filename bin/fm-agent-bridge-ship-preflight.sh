@@ -38,15 +38,11 @@ valid_producer_revision() {
 }
 record_producer_revision() {
   jq -er '
-    if has("producer_revision") then
-      .producer_revision as $revision |
-      if ($revision | type == "number" and floor == . and . >= 1 and . <= 9007199254740991) then
-        $revision
-      else
-        empty
-      end
+    .producer_revision as $revision |
+    if ($revision | type == "number" and floor == . and . >= 1 and . <= 9007199254740991) then
+      $revision
     else
-      0
+      error("invalid producer revision")
     end
   ' "$1"
 }

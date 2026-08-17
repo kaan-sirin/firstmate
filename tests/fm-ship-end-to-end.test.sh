@@ -510,6 +510,32 @@ test_bridge_rejects_stale_producer_revisions() {
   pass "bridge preserves corrections against stale producer revisions"
 }
 
+test_bridge_rejects_unversioned_current_records() {
+  local home="$TMP_ROOT/bridge-unversioned-record" id=unversioned-record-a1 original="$TMP_ROOT/bridge-unversioned-record-original.json" corrected="$TMP_ROOT/bridge-unversioned-record-corrected.json" original_fp corrected_fp handoff out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  original_fp=$(publish_preflight_record "$home" "$id" "$original" direct approved 100 1) || fail "could not publish initial preflight"
+  corrected_fp=$(publish_preflight_record "$home" "$id" "$corrected" direct awaiting_approval 101 2) || fail "could not publish corrected preflight"
+  jq 'del(.producer_revision)' "$home/data/$id/ship-preflight.json" > "$home/unversioned.json" || fail "could not prepare unversioned preflight"
+  chmod 600 "$home/unversioned.json" && mv -f "$home/unversioned.json" "$home/data/$id/ship-preflight.json" || fail "could not publish unversioned preflight"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 1 >/dev/null || fail "could not stage delayed preflight handoff"
+  out=$(bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "an unversioned correction accepted a delayed approval"
+  assert_contains "$out" "existing preflight producer revision is malformed" "unversioned preflight refusal was unclear"
+  jq -e --arg fp "$corrected_fp" '(has("producer_revision") | not) and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "delayed approval changed the unversioned correction"
+  out=$(preflight_env "$home" 101 verify-recovery "$id" --fingerprint "$original_fp" 2>&1)
+  status=$?
+  expect_code 4 "$status" "recovery accepted the delayed approval"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  [ -f "$handoff" ] || fail "unversioned preflight refusal consumed the delayed handoff"
+  find "$home/data/$id" -maxdepth 1 -type f -name '.ship-preflight.*' | grep -q . \
+    && fail "unversioned preflight refusal left an unpublished record"
+  pass "bridge rejects unversioned current preflight records"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -1175,6 +1201,7 @@ test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_serializes_concurrent_publish_claims
 test_bridge_preserves_approved_record_on_invalid_handoff
 test_bridge_rejects_stale_producer_revisions
+test_bridge_rejects_unversioned_current_records
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
