@@ -185,6 +185,7 @@ The helper's header owns the exact signal detection, relocated-home limitation, 
 ## Two task shapes
 
 Ship tasks change projects and ship by project mode (`no-mistakes`, `direct-PR`, or `local-only`); scout tasks leave standalone investigation reports at `data/<id>/report.md` and never push.
+Every new ship task completes the two-phase preflight and explicit approval process before dispatch; [`ship-end-to-end`](../.agents/skills/ship-end-to-end/SKILL.md) owns that workflow and its legacy-recovery boundary.
 The intake and authority contract in `AGENTS.md` owns when separate scout research is warranted.
 
 ## Dispatch profiles
