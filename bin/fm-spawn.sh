@@ -697,6 +697,7 @@ RELAUNCH_REPLACEMENT_WT=
 RECOVERY_CLAIM_LOCK=
 RECOVERY_CLAIM_LOCK_HELD=0
 RECOVERY_CLAIM_VALUE=
+REPLACEMENT_START_AT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -3004,6 +3005,25 @@ if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
     echo "error: failed to record replacement start for $ID" >&2
     exit 1
   }
+  if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+    replacement_start_record=$(fm_busy_record_read "$STATE_REAL" "$ID") || {
+      echo "error: failed to read replacement start timing for $ID" >&2
+      exit 1
+    }
+    read -r replacement_busy_state replacement_busy_source replacement_busy_event replacement_busy_seq REPLACEMENT_START_AT <<< "$replacement_start_record"
+    if [ "$replacement_busy_state" != busy ] \
+       || [ "$replacement_busy_source" != fm-recovery ] \
+       || [ "$replacement_busy_event" != replacement-start ]; then
+      echo "error: replacement start timing is no longer current for $ID" >&2
+      exit 1
+    fi
+    case "$REPLACEMENT_START_AT" in
+      ''|*[!0-9]*)
+        echo "error: replacement start timing is invalid for $ID" >&2
+        exit 1
+        ;;
+    esac
+  fi
 fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
   if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
@@ -3046,8 +3066,13 @@ if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ];
 fi
 if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
   recovery_working_status=0
-  FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
-    "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$(date +%s)" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  if [ -n "$REPLACEMENT_START_AT" ]; then
+    FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$REPLACEMENT_START_AT" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  else
+    FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
+      "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$(date +%s)" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  fi
   case "$recovery_working_status" in
     0) ;;
     3) exit 4 ;;

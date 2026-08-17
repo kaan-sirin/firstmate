@@ -141,6 +141,12 @@ if [ "${1:-}" = apply ] && [ "${10:-}" = replacement-start ]; then
   else
     printf 'unlocked\n' > "$FM_BUSY_LOCK_PROBE"
   fi
+  "$FM_REAL_BUSY_EVENT" "$@"
+  rc=$?
+  if [ -n "${FM_BUSY_DELAY_AFTER_REPLACEMENT_START:-}" ]; then
+    /bin/sleep "$FM_BUSY_DELAY_AFTER_REPLACEMENT_START"
+  fi
+  exit "$rc"
 fi
 exec "$FM_REAL_BUSY_EVENT" "$@"
 SH
@@ -1320,7 +1326,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
 }
 
 test_dashboard_recovery_marks_launch_before_submit() {
-  local dir id claim out rc state root busy_probe
+  local dir id claim out rc state root busy_probe busy_state busy_source busy_event busy_seq busy_at transition_at
   id=rl41
   dir=$(new_case dashboard-launch "$id")
   add_ship_task "$dir" "$id" claude
@@ -1333,6 +1339,7 @@ test_dashboard_recovery_marks_launch_before_submit() {
     || fail "dashboard recovery claim was not created"
   out=$(FM_ROOT_OVERRIDE="$root" FM_REAL_BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
     FM_BUSY_LOCK_PROBE="$busy_probe" FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+    FM_BUSY_DELAY_AFTER_REPLACEMENT_START=1 \
     FM_FAKE_DASHBOARD_STATE="$dir/home/state/dashboard-transitions/$id.json" \
     run_spawn "$dir" "$id" --relaunch --dashboard-recovery --harness claude)
   rc=$?
@@ -1341,6 +1348,10 @@ test_dashboard_recovery_marks_launch_before_submit() {
     || fail "dashboard recovery held the transition lock while applying busy state"
   state=$(cat "$dir/fake/dashboard-state-on-enter")
   [ "$state" = working ] || fail "dashboard recovery submitted a launch before recording working state"
+  read -r busy_state busy_source busy_event busy_seq busy_at < <(fm_busy_record_read "$dir/home/state" "$id")
+  transition_at=$(jq -r '.transition_at' "$dir/home/state/dashboard-transitions/$id.json")
+  [ "$transition_at" = "$busy_at" ] \
+    || fail "dashboard recovery must retain the replacement-start timestamp"
   pass "fm-spawn dashboard recovery records launch state before submit"
 }
 
