@@ -927,7 +927,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=1
   else
     echo "error: another lifecycle action is already running for task $ID" >&2
-    [ "$RELAUNCH" -eq 1 ] && exit 4
+    if [ "$RECOVER_MISSING" -eq 1 ] || [ "$DASHBOARD_RECOVERY" -eq 1 ]; then
+      exit 4
+    fi
     exit 1
   fi
 fi

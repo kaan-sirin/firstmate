@@ -1256,6 +1256,25 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   assert_contains "$out" "another lifecycle action is already running" \
     "direct relaunch spawn should name lifecycle contention"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "contended direct relaunch spawn must deliver no launch bytes"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || fail "could not restage the lifecycle lock"
+  out=$(run_spawn "$dir" rl26 --relaunch --dashboard-recovery --harness claude); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 4 "$rc" "dashboard relaunch should defer a held lifecycle lock"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "dashboard relaunch should name lifecycle contention"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "contended dashboard relaunch must deliver no launch bytes"
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
 }
 
