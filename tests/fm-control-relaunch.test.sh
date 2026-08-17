@@ -79,6 +79,7 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          [ -z "${FM_FAKE_TERMINAL_STATUS:-}" ] || printf '%s\n' 'done: terminal status raced recovery submission' > "$FM_FAKE_TERMINAL_STATUS"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
@@ -121,6 +122,7 @@ case "${1:-}" in
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
   new-window) printf '@1\n'; exit 0 ;;
+  kill-window) printf '%s\n' "$*" >> "$D/killed"; exit 0 ;;
 esac
 exit 0
 SH
@@ -1376,6 +1378,28 @@ test_dashboard_recovery_marks_launch_before_submit() {
   pass "fm-spawn dashboard recovery records launch state before submit"
 }
 
+test_dashboard_recovery_removes_unsubmitted_missing_endpoint() {
+  local dir id claim out rc
+  id=rl42
+  dir=$(new_case dashboard-terminal-race "$id")
+  add_ship_task "$dir" "$id" claude
+  printf '%s\n' 'dashboard_incarnation=i-dashboard-terminal-race' >> "$dir/home/state/$id.meta"
+  : > "$dir/fake/windows"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+
+  out=$(FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+    FM_FAKE_TERMINAL_STATUS="$dir/home/state/$id.status" \
+    run_spawn "$dir" "$id" --recover-missing --dashboard-recovery --harness claude)
+  rc=$?
+  expect_code 4 "$rc" "terminal status must cancel missing-endpoint recovery"
+  assert_grep "fm-$id" "$dir/fake/killed" \
+    "terminal recovery cancellation did not remove the unsubmitted endpoint"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "terminal recovery cancellation submitted the replacement command"
+  pass "fm-spawn recovery removes an endpoint when terminal status cancels submission"
+}
+
 # shellcheck disable=SC2031
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   local dir out rc lock holder i=0
@@ -1501,6 +1525,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_dashboard_recovery_marks_launch_before_submit
+test_dashboard_recovery_removes_unsubmitted_missing_endpoint
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
