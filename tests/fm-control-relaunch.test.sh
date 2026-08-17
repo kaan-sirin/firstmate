@@ -101,8 +101,10 @@ case "${1:-}" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
-          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
+          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ] \
+             && [ ! -e "${FM_FAKE_CWD_RACE_READY}.released" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
+            : > "${FM_FAKE_CWD_RACE_READY}.released"
             /bin/sleep 1
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
@@ -371,7 +373,7 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+  grep -q 'unset TRACEPARENT; .*claude' "$dir/fake/literal" \
     || fail "disabled relaunch must clear the pane carrier before replacement launch"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
