@@ -146,15 +146,39 @@ command_executable() {  # <argv-zero>: print the executable's canonical path
   printf '%s\n' "$found"
 }
 
-command_is_interpreter() {  # <absolute-command-path>
-  local path=$1 base=${1##*/} known
-  case "$base" in
+interpreter_name() {
+  case "$1" in
     sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi)
       return 0
       ;;
+    *) return 1 ;;
   esac
-  for known in /bin/sh /bin/bash /bin/dash; do
-    [ -x "$known" ] && cmp -s "$path" "$known" && return 0
+}
+
+INTERPRETER_CANDIDATES_READY=0
+INTERPRETER_CANDIDATES=()
+
+interpreter_candidates_load() {
+  local known candidate false_path
+  [ "$INTERPRETER_CANDIDATES_READY" -eq 0 ] || return 0
+  INTERPRETER_CANDIDATES=(/bin/sh /bin/bash /bin/dash /usr/bin/awk /usr/bin/gawk /usr/bin/mawk /usr/bin/nawk)
+  false_path=$(type -P false 2>/dev/null || true)
+  while IFS= read -r known; do
+    interpreter_name "$known" || continue
+    candidate=$(type -P -- "$known" 2>/dev/null || true)
+    [ -n "$candidate" ] || continue
+    [ "$known" != env ] || [ -z "$false_path" ] || ! cmp -s "$candidate" "$false_path" || continue
+    INTERPRETER_CANDIDATES+=("$candidate")
+  done < <(compgen -c)
+  INTERPRETER_CANDIDATES_READY=1
+}
+
+command_is_interpreter() {  # <absolute-command-path>
+  local path=$1 base=${1##*/} candidate
+  interpreter_name "$base" && return 0
+  interpreter_candidates_load
+  for candidate in "${INTERPRETER_CANDIDATES[@]}"; do
+    [ -x "$candidate" ] && cmp -s "$path" "$candidate" && return 0
   done
   return 1
 }

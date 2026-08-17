@@ -422,6 +422,19 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the copied interpreter is classified by its executable identity"
 assert_absent "$H/state/procevent/when-interpreter-copy.source" \
   "a copied interpreter command form is never registered"
+INTERPRETER_AWK_COPY="$TMP_ROOT/approved-runner-awk-copy"
+INTERPRETED_AWK="$TMP_ROOT/interpreted.awk"
+printf 'BEGIN { exit 0 }\n' > "$INTERPRETED_AWK"
+cp "$(type -P awk)" "$INTERPRETER_AWK_COPY"
+chmod +x "$INTERPRETER_AWK_COPY"
+if when "$H" arm interpreter-awk-copy --condition true --action "$INTERPRETER_AWK_COPY" -f "$INTERPRETED_AWK" \
+  >"$TMP_ROOT/interpreter-awk-copy.out" 2>"$TMP_ROOT/interpreter-awk-copy.err"; then
+  fail "a renamed non-shell interpreter command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-awk-copy.err" \
+  "the copied non-shell interpreter is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-awk-copy.source" \
+  "a copied non-shell interpreter command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
