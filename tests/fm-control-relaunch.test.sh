@@ -871,6 +871,30 @@ test_missing_instructions_refuse_before_stopping_anything() {
   pass "fm-control relaunch: a worker with nothing to work from is never launched"
 }
 
+test_fast_repair_relaunch_refuses_before_stopping_anything() {
+  local dir out rc before_meta before_brief meta
+  dir=$(new_case fast-repair rl11b)
+  add_ship_task "$dir" rl11b claude
+  meta="$dir/home/state/rl11b.meta"
+  sed 's/^mode=no-mistakes$/mode=fast-repair/' "$meta" > "$meta.tmp" \
+    && mv "$meta.tmp" "$meta" || fail "could not prepare a legacy Fast Repair task"
+  before_meta=$(cat "$meta")
+  before_brief=$(cat "$dir/home/data/rl11b/brief.md")
+
+  out=$(run_control "$dir" rl11b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a legacy Fast Repair relaunch should refuse"
+  assert_contains "$out" "uses the removed fast-repair delivery mode" \
+    "the relaunch refusal did not name the removed delivery mode"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a rejected Fast Repair relaunch must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a rejected Fast Repair relaunch must send no exit command"
+  [ "$before_meta" = "$(cat "$meta")" ] || fail "a rejected Fast Repair relaunch changed task metadata"
+  [ "$before_brief" = "$(cat "$dir/home/data/rl11b/brief.md")" ] \
+    || fail "a rejected Fast Repair relaunch changed task instructions"
+  [ ! -e "$dir/home/state/rl11b.control-relaunch" ] \
+    || fail "a rejected Fast Repair relaunch recorded a checkpoint transaction"
+  pass "fm-control relaunch: Fast Repair refuses before checkpoint and exit"
+}
+
 test_checkpoint_refusal_leaves_the_record_byte_identical() {
   local dir before after
   dir=$(new_case bytes rl12)
@@ -1340,6 +1364,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
+test_fast_repair_relaunch_refuses_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
 test_checkpoint_refuses_uninspectable_head_and_status
 test_launch_failure_keeps_the_prior_record_and_reports_it
