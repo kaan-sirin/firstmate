@@ -467,6 +467,19 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the copied find dispatcher is classified by its executable identity"
 assert_absent "$H/state/procevent/when-interpreter-find-copy.source" \
   "a copied find dispatcher command form is never registered"
+GIT_BIN=$(type -P git)
+GIT_COPY="$TMP_ROOT/approved-runner-git-copy"
+cp "$GIT_BIN" "$GIT_COPY"
+chmod +x "$GIT_COPY"
+if when "$H" arm interpreter-git-copy --condition true --action "$GIT_COPY" -C "$TMP_ROOT/git-hook-repo" \
+  -c "core.hooksPath=$TMP_ROOT/git-hooks" -c user.name=x -c user.email=x commit --allow-empty -m x \
+  >"$TMP_ROOT/interpreter-git-copy.out" 2>"$TMP_ROOT/interpreter-git-copy.err"; then
+  fail "a renamed git dispatcher command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-git-copy.err" \
+  "the copied git dispatcher is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-git-copy.source" \
+  "a copied git dispatcher command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
