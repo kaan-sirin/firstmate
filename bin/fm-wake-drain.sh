@@ -195,7 +195,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$page_snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
-      presented=${FM_WAKE_ANNOTATION_PAGED_TASKS:-}
+      presented=${FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS:-}
     fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$page_snapshot" ]; then print_status_sections "$page_snapshot" "$presented" || rc=1; fi

@@ -1235,7 +1235,6 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local read_bytes=8192 line_cap=8 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0 marker_reserve=256
   local LC_ALL=C
   FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS=
-  FM_WAKE_ANNOTATION_PAGED_TASKS=
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
@@ -1298,13 +1297,7 @@ EOF
       [ -n "$endpoint" ] || continue
     fi
     [ "${snapshot_visible:-true}" != false ] || continue
-    if [ "${snapshot_skip:-false}" = true ]; then
-      if [ "$mode" = direct ]; then
-        task=${status_key%.status}
-        FM_WAKE_ANNOTATION_PAGED_TASKS="${FM_WAKE_ANNOTATION_PAGED_TASKS}${FM_WAKE_ANNOTATION_PAGED_TASKS:+$'\n'}$task"
-      fi
-      continue
-    fi
+    [ "${snapshot_skip:-false}" != true ] || continue
     if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then
       if [ "${snapshot_overlong:-false}" = true ]; then
         printf 'wake annotation: status line exceeds the bounded presentation cap: %s\n' "$status_key" || return 1
@@ -1319,10 +1312,6 @@ EOF
       # the snapshot must not suppress annotations for other status files; the
       # presentation commit will reject a changed snapshot identity.
       continue
-    fi
-    if [ "$mode" = direct ]; then
-      task=${status_key%.status}
-      FM_WAKE_ANNOTATION_PAGED_TASKS="${FM_WAKE_ANNOTATION_PAGED_TASKS}${FM_WAKE_ANNOTATION_PAGED_TASKS:+$'\n'}$task"
     fi
     task_complete=true
     if [ "$event_rc" -eq 2 ] || [ "$FM_WAKE_UNREAD_COMPLETE" != true ]; then
