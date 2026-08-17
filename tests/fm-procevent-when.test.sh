@@ -70,7 +70,7 @@ wait_for_file() {  # <file> [tries]
 # every evaluation so flap tests can wait on real poll activity.
 COND="$TMP_ROOT/cond.sh"
 cat > "$COND" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 trigger=$1
 counter=$2
 echo x >> "$counter"
@@ -81,7 +81,7 @@ chmod +x "$COND"
 # An action that records every invocation, so exactly-once is observable.
 ACT="$TMP_ROOT/act.sh"
 cat > "$ACT" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 log=$1
 exit_code=${2:-0}
 echo invoked >> "$log"
@@ -184,7 +184,7 @@ FLAPLOG="$TMP_ROOT/flap-act"
 # never fire.
 FLAP="$TMP_ROOT/flap.sh"
 cat > "$FLAP" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 counter=$1
 echo x >> "$counter"
 [ "$(grep -c . "$counter")" -eq 1 ]
@@ -225,7 +225,7 @@ H="$TMP_ROOT/h-conderr"; new_home "$H"
 CONDERRLOG="$TMP_ROOT/conderr-act"
 BROKEN="$TMP_ROOT/broken.sh"
 cat > "$BROKEN" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 echo "cannot reach the service" >&2
 exit 3
 SH
@@ -260,7 +260,7 @@ H="$TMP_ROOT/h-late-true"; new_home "$H"
 LATELOG="$TMP_ROOT/late-true-act"
 LATE="$TMP_ROOT/late-true.sh"
 cat > "$LATE" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 sleep 2
 exit 0
 SH
@@ -280,7 +280,7 @@ DESCENDANT_EFFECT="$TMP_ROOT/descendant-effect"
 DESCENDANT_PID="$TMP_ROOT/descendant-pid"
 SPAWNER="$TMP_ROOT/spawner.sh"
 cat > "$SPAWNER" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 (
   trap '' TERM
   sleep 10
@@ -320,7 +320,7 @@ H="$TMP_ROOT/h-bounded-output"; new_home "$H"
 NOISY_READY="$TMP_ROOT/noisy-ready"
 NOISY="$TMP_ROOT/noisy.sh"
 cat > "$NOISY" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'ready\n' > "$1"
 i=0
 while [ "$i" -lt 20000 ]; do
@@ -382,7 +382,7 @@ pass "a mutated spec is refused without executing anything"
 H="$TMP_ROOT/h-interpreter"; new_home "$H"
 INTERPRETED="$TMP_ROOT/interpreted.sh"
 cat > "$INTERPRETED" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'interpreter script ran\n' >> "$1"
 SH
 if when "$H" arm interpreter-condition --condition /bin/sh "$INTERPRETED" --action "$ACT" "$TMP_ROOT/interpreter-condition-act" \
@@ -440,7 +440,7 @@ MAKEFILE="$TMP_ROOT/mutable.mk"
 RENAMED_MAKE="$TMP_ROOT/approved-runner-make-copy"
 mkdir -p "$MAKE_BIN_DIR"
 cat > "$MAKE_BIN_DIR/make" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 exit 0
 SH
 chmod +x "$MAKE_BIN_DIR/make"
@@ -481,12 +481,59 @@ assert_absent "$H/state/procevent/when-symlink-cycle.source" \
   "a cyclic command symlink is never registered"
 pass "cyclic command symlinks are rejected within a fixed bound"
 
+# --- a changed shebang interpreter is refused before the command runs --------
+H="$TMP_ROOT/h-shebang-action"; new_home "$H"
+SHEBANG_ACTION_RUNNER="$TMP_ROOT/shebang-action-runner"
+SHEBANG_ACTION="$TMP_ROOT/shebang-action.sh"
+SHEBANG_ACTION_LOG="$TMP_ROOT/shebang-action.log"
+cp /bin/sh "$SHEBANG_ACTION_RUNNER"
+printf '#!%s\nprintf "registered action ran\\n" >> "$1"\n' "$SHEBANG_ACTION_RUNNER" > "$SHEBANG_ACTION"
+chmod +x "$SHEBANG_ACTION"
+when "$H" arm shebang-action --stable 1 --condition true \
+  --action "$SHEBANG_ACTION" "$SHEBANG_ACTION_LOG" >/dev/null
+cat > "$SHEBANG_ACTION_RUNNER" <<SH
+#!/bin/bash
+printf 'mutated action interpreter ran\n' >> '$SHEBANG_ACTION_LOG'
+exit 0
+SH
+chmod +x "$SHEBANG_ACTION_RUNNER"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-shebang-action || fail "no outcome was captured for the changed action interpreter"
+RESULT=$(first_result "$H" when-shebang-action)
+assert_grep 'status: rejected' "$RESULT" "a changed action interpreter is rejected"
+assert_absent "$SHEBANG_ACTION_LOG" "the changed action interpreter was not executed"
+
+H="$TMP_ROOT/h-shebang-condition"; new_home "$H"
+SHEBANG_CONDITION_RUNNER="$TMP_ROOT/shebang-condition-runner"
+SHEBANG_CONDITION="$TMP_ROOT/shebang-condition.sh"
+SHEBANG_CONDITION_LOG="$TMP_ROOT/shebang-condition.log"
+SHEBANG_CONDITION_ACTION="$TMP_ROOT/shebang-condition-action.log"
+cp /bin/sh "$SHEBANG_CONDITION_RUNNER"
+printf '#!%s\nprintf "registered condition ran\\n" >> "$1"\nexit 0\n' "$SHEBANG_CONDITION_RUNNER" > "$SHEBANG_CONDITION"
+chmod +x "$SHEBANG_CONDITION"
+when "$H" arm shebang-condition --stable 1 \
+  --condition "$SHEBANG_CONDITION" "$SHEBANG_CONDITION_LOG" \
+  --action "$ACT" "$SHEBANG_CONDITION_ACTION" >/dev/null
+cat > "$SHEBANG_CONDITION_RUNNER" <<SH
+#!/bin/bash
+printf 'mutated condition interpreter ran\n' >> '$SHEBANG_CONDITION_LOG'
+exit 0
+SH
+chmod +x "$SHEBANG_CONDITION_RUNNER"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-shebang-condition || fail "no outcome was captured for the changed condition interpreter"
+RESULT=$(first_result "$H" when-shebang-condition)
+assert_grep 'status: rejected' "$RESULT" "a changed condition interpreter is rejected"
+assert_absent "$SHEBANG_CONDITION_LOG" "the changed condition interpreter was not executed"
+assert_absent "$SHEBANG_CONDITION_ACTION" "a changed condition interpreter never reaches the action"
+pass "changed shebang interpreters are refused before execution"
+
 # --- mutated condition bytes are refused before the next poll ----------------
 H="$TMP_ROOT/h-condition-tamper"; new_home "$H"
 CONDITION_TAMPER_LOG="$TMP_ROOT/condition-tamper-act"
 MUTABLE_COND="$TMP_ROOT/mutable-cond.sh"
 cat > "$MUTABLE_COND" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'original condition ran\n' >> "$1"
 exit 0
 SH
@@ -495,7 +542,7 @@ when "$H" arm condition-tamper --stable 1 \
   --condition "$MUTABLE_COND" "$TMP_ROOT/condition-tamper-polls" \
   --action "$ACT" "$CONDITION_TAMPER_LOG" >/dev/null
 cat > "$MUTABLE_COND" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'mutated condition ran\n' >> "$1"
 exit 0
 SH
@@ -515,14 +562,14 @@ H="$TMP_ROOT/h-action-tamper"; new_home "$H"
 ACTION_TAMPER_LOG="$TMP_ROOT/action-tamper-act"
 MUTABLE_ACT="$TMP_ROOT/mutable-act.sh"
 cat > "$MUTABLE_ACT" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'original action ran\n' >> "$1"
 SH
 chmod +x "$MUTABLE_ACT"
 when "$H" arm action-tamper --stable 1 \
   --condition true --action "$MUTABLE_ACT" "$ACTION_TAMPER_LOG" >/dev/null
 cat > "$MUTABLE_ACT" <<'SH'
-#!/usr/bin/env bash
+#!/bin/bash
 printf 'mutated action ran\n' >> "$1"
 SH
 chmod +x "$MUTABLE_ACT"

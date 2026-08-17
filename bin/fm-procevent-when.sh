@@ -190,6 +190,35 @@ command_bytes_match() {  # <absolute-command-path> <registered-sha256>
   [ "$actual" = "$expected" ]
 }
 
+script_interpreter_binding() {  # <command-path>
+  local command=$1 line interpreter_path interpreter_hash
+  COMMAND_INTERPRETER_PATH=-
+  COMMAND_INTERPRETER_SHA256=-
+  IFS= read -r line < "$command" || true
+  case "$line" in
+    '#!'/*) ;;
+    '#!'*) return 1 ;;
+    *) return 0 ;;
+  esac
+  interpreter_path=${line:2}
+  case "$interpreter_path" in *' '*|*$'\t'*) return 1 ;; esac
+  interpreter_path=$(command_executable "$interpreter_path") || return 1
+  IFS= read -r line < "$interpreter_path" || true
+  case "$line" in '#!'*) return 1 ;; esac
+  interpreter_hash=$(fm_pr_sha256 "$interpreter_path") || return 1
+  COMMAND_INTERPRETER_PATH=$interpreter_path
+  COMMAND_INTERPRETER_SHA256=$interpreter_hash
+}
+
+script_interpreter_binding_matches() {  # <path-or-dash> <sha256-or-dash>
+  local path=$1 expected=$2
+  if [ "$path" = - ] && [ "$expected" = - ]; then
+    return 0
+  fi
+  [ "$path" != - ] && [[ "$expected" =~ ^[0-9a-f]{64}$ ]] || return 1
+  command_bytes_match "$path" "$expected"
+}
+
 # --- arm ---------------------------------------------------------------------
 
 cmd_arm() {
@@ -242,16 +271,22 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device condition_path condition_hash action_path action_hash
+  local tmp trust_tmp hash device condition_path condition_hash condition_interpreter_path condition_interpreter_hash action_path action_hash action_interpreter_path action_interpreter_hash
   condition_path=$(command_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
   command_is_interpreter "$condition_path" \
     && die "condition interpreter command forms are not supported; execute the approved script directly"
   condition_hash=$(fm_pr_sha256 "$condition_path") || die "cannot hash the condition executable"
+  script_interpreter_binding "$condition_path" || die "condition script interpreter is unsupported"
+  condition_interpreter_path=$COMMAND_INTERPRETER_PATH
+  condition_interpreter_hash=$COMMAND_INTERPRETER_SHA256
   cond[0]=$condition_path
   action_path=$(command_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
   command_is_interpreter "$action_path" \
     && die "action interpreter command forms are not supported; execute the approved script directly"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
+  script_interpreter_binding "$action_path" || die "action script interpreter is unsupported"
+  action_interpreter_path=$COMMAND_INTERPRETER_PATH
+  action_interpreter_hash=$COMMAND_INTERPRETER_SHA256
   act[0]=$action_path
   device=$(fm_pr_file_device "$WHEN_DIR") || die "cannot inspect the watch directory"
   tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || die "cannot stage the spec"
@@ -265,7 +300,11 @@ cmd_arm() {
     printf 'action_timeout=%s\n' "$action_timeout"
     printf 'error_budget=%s\n' "$error_budget"
     printf 'condition_sha256=%s\n' "$condition_hash"
+    printf 'condition_interpreter_path=%s\n' "$condition_interpreter_path"
+    printf 'condition_interpreter_sha256=%s\n' "$condition_interpreter_hash"
     printf 'action_sha256=%s\n' "$action_hash"
+    printf 'action_interpreter_path=%s\n' "$action_interpreter_path"
+    printf 'action_interpreter_sha256=%s\n' "$action_interpreter_hash"
     printf 'condition_argc=%s\n' "${#cond[@]}"
     printf 'action_argc=%s\n' "${#act[@]}"
     printf 'argv:\n'
@@ -324,7 +363,8 @@ spec_load() {
 
   SPEC_ARMED='' SPEC_INTERVAL='' SPEC_STABLE='' SPEC_DEADLINE=''
   SPEC_CONDITION_TIMEOUT='' SPEC_ACTION_TIMEOUT='' SPEC_ERROR_BUDGET=''
-  SPEC_CONDITION_SHA256='' SPEC_ACTION_SHA256=''
+  SPEC_CONDITION_SHA256='' SPEC_CONDITION_INTERPRETER_PATH='' SPEC_CONDITION_INTERPRETER_SHA256=''
+  SPEC_ACTION_SHA256='' SPEC_ACTION_INTERPRETER_PATH='' SPEC_ACTION_INTERPRETER_SHA256=''
   local cond_argc='' act_argc='' in_argv=0 read_cond=0 read_act=0
   {
     IFS= read -r version || { SPEC_ERROR="spec is empty"; return 1; }
@@ -343,7 +383,11 @@ spec_load() {
           action_timeout)    SPEC_ACTION_TIMEOUT=$value ;;
           error_budget)      SPEC_ERROR_BUDGET=$value ;;
           condition_sha256)  SPEC_CONDITION_SHA256=$value ;;
+          condition_interpreter_path)   SPEC_CONDITION_INTERPRETER_PATH=$value ;;
+          condition_interpreter_sha256) SPEC_CONDITION_INTERPRETER_SHA256=$value ;;
           action_sha256)     SPEC_ACTION_SHA256=$value ;;
+          action_interpreter_path)      SPEC_ACTION_INTERPRETER_PATH=$value ;;
+          action_interpreter_sha256)    SPEC_ACTION_INTERPRETER_SHA256=$value ;;
           condition_argc)    cond_argc=$value ;;
           action_argc)       act_argc=$value ;;
           *) SPEC_ERROR="spec carries an unknown field: $key"; return 1 ;;
@@ -372,6 +416,12 @@ spec_load() {
     || { SPEC_ERROR="spec condition hash is malformed"; return 1; }
   [[ "$SPEC_ACTION_SHA256" =~ ^[0-9a-f]{64}$ ]] \
     || { SPEC_ERROR="spec action hash is malformed"; return 1; }
+  if [ "$SPEC_CONDITION_INTERPRETER_PATH" = - ] && [ "$SPEC_CONDITION_INTERPRETER_SHA256" = - ]; then :
+  elif [[ "$SPEC_CONDITION_INTERPRETER_PATH" = /* && "$SPEC_CONDITION_INTERPRETER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then :
+  else SPEC_ERROR="spec condition interpreter binding is malformed"; return 1; fi
+  if [ "$SPEC_ACTION_INTERPRETER_PATH" = - ] && [ "$SPEC_ACTION_INTERPRETER_SHA256" = - ]; then :
+  elif [[ "$SPEC_ACTION_INTERPRETER_PATH" = /* && "$SPEC_ACTION_INTERPRETER_SHA256" =~ ^[0-9a-f]{64}$ ]]; then :
+  else SPEC_ERROR="spec action interpreter binding is malformed"; return 1; fi
   positive_int "${cond_argc:-}" || { SPEC_ERROR="spec condition argc is malformed"; return 1; }
   positive_int "${act_argc:-}" || { SPEC_ERROR="spec action argc is malformed"; return 1; }
   [ "$read_cond" -eq "$cond_argc" ] && [ "$read_act" -eq "$act_argc" ] \
@@ -448,6 +498,11 @@ cmd_run() {
         "refused without executing the condition: its bytes do not match the registered trust binding" "$polls" '' ''
       exit 0
     fi
+    if ! script_interpreter_binding_matches "$SPEC_CONDITION_INTERPRETER_PATH" "$SPEC_CONDITION_INTERPRETER_SHA256"; then
+      emit_doc "$sid" rejected \
+        "refused without executing the condition: its script interpreter does not match the registered trust binding" "$polls" '' ''
+      exit 0
+    fi
     if bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"; then
       rc=0
     else
@@ -495,6 +550,11 @@ cmd_run() {
   if ! command_bytes_match "${ACT_ARGV[0]}" "$SPEC_ACTION_SHA256"; then
     emit_doc "$sid" rejected \
       "refused without executing the action: its bytes do not match the registered trust binding" "$polls" '' ''
+    exit 0
+  fi
+  if ! script_interpreter_binding_matches "$SPEC_ACTION_INTERPRETER_PATH" "$SPEC_ACTION_INTERPRETER_SHA256"; then
+    emit_doc "$sid" rejected \
+      "refused without executing the action: its script interpreter does not match the registered trust binding" "$polls" '' ''
     exit 0
   fi
 
