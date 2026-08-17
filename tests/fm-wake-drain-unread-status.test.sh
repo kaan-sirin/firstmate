@@ -227,14 +227,15 @@ test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
   pass "bounded status pages retain the main cursor until complete"
 }
 
-test_overlong_status_line_is_retained_without_event_splitting() {
-  local dir state out status cursor payload offset
+test_overlong_status_line_advances_without_splitting_later_events() {
+  local dir state out status cursor page payload offset
   dir=$(make_case overlong-status-page)
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task-overlong.status"
   payload=$(printf '%09000d' 0)
-  printf 'note: %s\n' "$payload" > "$status"
+  printf 'working: %s\n' "$payload" > "$status"
+  printf 'note: reachable after overlong line\n' >> "$status"
   append_wake "$state" signal task-overlong.status "signal: task-overlong.status" \
     || fail "queueing the overlong status signal failed"
 
@@ -249,7 +250,29 @@ test_overlong_status_line_is_retained_without_event_splitting() {
   offset=$(awk -F '\t' '$1 == "task-overlong" { print $3 }' "$cursor")
   [ -z "$offset" ] || [ "$offset" -eq 0 ] \
     || fail "the overlong status line advanced its main cursor to $offset"
-  pass "an overlong status line remains whole and unacknowledged"
+  page="$state/.task-overlong.status-presentation-page"
+  [ -s "$page" ] || fail "the overlong status scan was not persisted"
+
+  append_wake "$state" signal task-overlong.status "signal: task-overlong.status" \
+    || fail "queueing the completion scan signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while completing the overlong status line"
+  if grep -F 'reachable after overlong line' "$out" >/dev/null; then
+    fail "the later note was combined with the overlong status line: $(cat "$out")"
+  fi
+  [ -s "$page" ] || fail "the later status page was not retained after the overlong line"
+
+  append_wake "$state" signal task-overlong.status "signal: task-overlong.status" \
+    || fail "queueing the later status signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while reaching the status after an overlong line"
+  grep -F 'task-overlong note: reachable after overlong line' "$out" >/dev/null \
+    || fail "a later note remained blocked behind an overlong status line: $(cat "$out")"
+  [ ! -e "$page" ] || fail "the completed overlong status page was not retired"
+  offset=$(awk -F '\t' '$1 == "task-overlong" { print $3 }' "$cursor")
+  [ "$offset" -eq "$(wc -c < "$status")" ] \
+    || fail "the main cursor did not advance after the later status event"
+  pass "an overlong status line does not block later status events"
 }
 
 test_snapshot_does_not_ack_a_later_append() {
@@ -384,7 +407,7 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_bounded_signal_annotations_keep_routine_status_unacknowledged
-test_overlong_status_line_is_retained_without_event_splitting
+test_overlong_status_line_advances_without_splitting_later_events
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
