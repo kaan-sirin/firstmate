@@ -41,7 +41,10 @@ cleanup() {
   fi
   fm_lock_release "$LOCK" || true
 }
-trap cleanup EXIT HUP INT TERM
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 STATE_BIN=${FM_DASHBOARD_RECOVERY_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$STATE_BIN" "$ID" 2>/dev/null || true)
 case "$line" in state:\ unknown\ *) ;; *) exit 0 ;; esac

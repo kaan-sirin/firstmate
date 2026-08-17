@@ -1141,6 +1141,49 @@ SH
   pass "dashboard recovery holds preflight approval through replacement handoff"
 }
 
+test_dashboard_recovery_signal_exits_without_recording_attempts() {
+  local home="$TMP_ROOT/dashboard-recovery-signal" state_bin="$TMP_ROOT/dashboard-recovery-signal-state" agent_bin="$TMP_ROOT/dashboard-recovery-signal-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-signal-spawn" recovery_bin="$TMP_ROOT/dashboard-recovery-signal-runner" contract="$TMP_ROOT/dashboard-recovery-signal-contract.json" signal id fp recovery_pid attempts status expected release
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf started > "$FM_RECOVERY_SIGNAL_STARTED"' 'while [ ! -e "$FM_RECOVERY_SIGNAL_RELEASE" ]; do sleep 0.01; done' 'exit 1' > "$spawn_bin"
+  printf '%s\n' 'import os' 'import signal' 'import sys' 'for value in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):' '    signal.signal(value, signal.SIG_DFL)' 'command = os.environ["FM_RECOVERY_SIGNAL_BIN"]' 'os.execvpe(command, [command, *sys.argv[1:]], os.environ)' > "$recovery_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  for signal in HUP INT TERM; do
+    id="dash-signal-${signal,,}"
+    fp=$(publish_preflight_record "$home" "$id" "$contract" direct approved 100) || fail "could not prepare signal preflight"
+    printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/$id.meta"
+    release="$home/release-$signal"
+    FM_RECOVERY_SIGNAL_BIN="$ROOT/bin/fm-dashboard-recovery.sh" FM_RECOVERY_SIGNAL_STARTED="$home/started-$signal" FM_RECOVERY_SIGNAL_RELEASE="$release" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" python3 "$recovery_bin" observe "$id" > "$home/recovery-$signal.out" 2>&1 &
+    recovery_pid=$!
+    attempts=0
+    while [ ! -e "$home/started-$signal" ] && [ "$attempts" -lt 100 ]; do
+      sleep 0.01
+      attempts=$((attempts + 1))
+    done
+    if [ ! -e "$home/started-$signal" ]; then
+      : > "$release"
+      wait "$recovery_pid" || true
+      fail "recovery did not reach the signal handoff for $signal"
+    fi
+    case "$signal" in
+      HUP) expected=129 ;;
+      INT) expected=130 ;;
+      TERM) expected=143 ;;
+    esac
+    kill -s "$signal" "$recovery_pid" || fail "could not signal recovery for $signal"
+    : > "$release"
+    wait "$recovery_pid"
+    status=$?
+    [ "$status" -eq "$expected" ] || fail "$signal recovery continued after cleanup ($status): $(cat "$home/recovery-$signal.out")"
+    [ ! -e "$home/state/dashboard-recovery/$id.json" ] || fail "$signal recovery recorded an attempt"
+    [ ! -e "$home/data/$id/.ship-preflight.lock" ] && [ ! -L "$home/data/$id/.ship-preflight.lock" ] \
+      || fail "$signal recovery retained the preflight lock"
+  done
+  pass "dashboard recovery signals exit without recording attempts"
+}
+
 test_dashboard_recovery_relaunches_dead_endpoint() {
   local home="$TMP_ROOT/dashboard-recovery-dead" state_bin="$TMP_ROOT/dashboard-recovery-dead-state" agent_bin="$TMP_ROOT/dashboard-recovery-dead-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-dead-spawn"
   mkdir -p "$home/data" "$home/state/dashboard-transitions"
@@ -1450,6 +1493,7 @@ test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_serializes_preflight_publication
+test_dashboard_recovery_signal_exits_without_recording_attempts
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt
