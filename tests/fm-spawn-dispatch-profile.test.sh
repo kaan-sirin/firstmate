@@ -92,6 +92,12 @@ SH
   fm_fake_exit0 "$fakebin" treehouse
   cat > "$fakebin/timeout" <<'SH'
 #!/usr/bin/env bash
+# Mirror the timeout interface that fm-timeout-lib uses: `-k <seconds>` then
+# the command deadline. The fake deliberately runs the command without a
+# deadline; the dispatch test only needs the bounded probe's command result.
+if [ "${1:-}" = -k ]; then
+  shift 2
+fi
 shift
 exec "$@"
 SH
