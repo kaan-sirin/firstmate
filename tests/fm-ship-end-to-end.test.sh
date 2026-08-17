@@ -280,6 +280,39 @@ test_bridge_preserves_handoff_when_record_directories_are_unsafe() {
   pass "bridge preserves handoffs when record directories are unsafe"
 }
 
+test_bridge_claims_a_handoff_before_reading_it() {
+  local home="$TMP_ROOT/bridge-claim" id=claim-a1 original="$TMP_ROOT/bridge-claim-original.json" corrected="$TMP_ROOT/bridge-claim-corrected.json" handoff producer fakebin real_cat
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 >/dev/null || fail "could not prepare corrected producer handoff"
+  producer=$(umask 077; mktemp "${handoff%/*}/.producer.XXXXXX") || fail "could not reserve corrected producer handoff"
+  mv -f -- "$handoff" "$producer" || fail "could not stage corrected producer handoff"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 >/dev/null || fail "could not prepare original consumer handoff"
+
+  fakebin="$TMP_ROOT/bridge-claim-bin"
+  mkdir -p "$fakebin"
+  real_cat=$(command -v cat)
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  "$FM_BRIDGE_RACE_DIR"/*) mv -f -- "$FM_BRIDGE_RACE_REPLACEMENT" "$FM_BRIDGE_RACE_HANDOFF" ;;
+esac
+exec "$FM_BRIDGE_REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+  PATH="$fakebin:$PATH" FM_BRIDGE_RACE_DIR="${handoff%/*}" FM_BRIDGE_RACE_REPLACEMENT="$producer" FM_BRIDGE_RACE_HANDOFF="$handoff" FM_BRIDGE_REAL_CAT="$real_cat" \
+    bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not publish its claimed handoff"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "bridge did not publish the handoff it claimed"
+  jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$handoff" >/dev/null \
+    || fail "bridge consumed a newer producer handoff"
+  pass "bridge preserves a newer handoff published during record creation"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -811,6 +844,7 @@ test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals
 test_preflight_rejects_cross_task_records
 test_bridge_preserves_handoff_when_record_directories_are_unsafe
+test_bridge_claims_a_handoff_before_reading_it
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work

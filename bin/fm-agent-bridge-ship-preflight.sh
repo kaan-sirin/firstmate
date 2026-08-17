@@ -55,14 +55,34 @@ fi
 STATE="$REC_DIR" FM_STATE_OVERRIDE="$REC_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$REC_DIR/.ship-preflight.lock"
 fm_lock_acquire_wait "$LOCK" || die "could not lock preflight record"
-trap 'fm_lock_release "$LOCK" || true' EXIT
+CLAIM=
+restore_claim() {
+  [ -n "$CLAIM" ] && [ -f "$CLAIM" ] || return 0
+  if [ ! -e "$HANDOFF" ] && [ ! -L "$HANDOFF" ]; then
+    ln "$CLAIM" "$HANDOFF" 2>/dev/null && rm -f -- "$CLAIM" || true
+  fi
+  [ ! -e "$HANDOFF" ] && [ ! -L "$HANDOFF" ] || rm -f -- "$CLAIM" || true
+}
+cleanup() {
+  local status=$?
+  trap - EXIT
+  [ "$status" -eq 0 ] || restore_claim
+  fm_lock_release "$LOCK" || true
+  exit "$status"
+}
+trap cleanup EXIT
+
+CLAIM=$(umask 077; mktemp "$HANDOFF_DIR/.${ID}.claim.XXXXXX") || die "could not claim private bridge handoff"
+mv -f -- "$HANDOFF" "$CLAIM" || die "could not claim private bridge handoff"
+valid_private_file "$CLAIM" || die "invalid private bridge handoff"
 
 TMP=$(umask 077; mktemp "$REC_DIR/.ship-preflight.XXXXXX") || die "could not prepare preflight record"
-if ! cat "$HANDOFF" > "$TMP" || ! chmod 600 "$TMP" || ! valid_private_file "$TMP"; then
+if ! cat "$CLAIM" > "$TMP" || ! chmod 600 "$TMP" || ! valid_private_file "$TMP"; then
   rm -f -- "$TMP"
   die "could not prepare private preflight record"
 fi
 mv -f -- "$TMP" "$REC_DIR/ship-preflight.json"
 valid_private_file "$REC_DIR/ship-preflight.json" || die "preflight publication failed validation"
-rm -f -- "$HANDOFF"
+rm -f -- "$CLAIM"
+CLAIM=
 printf 'published\n'
