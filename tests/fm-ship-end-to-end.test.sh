@@ -549,7 +549,8 @@ test_bridge_rejects_unversioned_current_records() {
     || fail "delayed approval changed the unversioned correction"
   out=$(preflight_env "$home" 101 verify-recovery "$id" --fingerprint "$original_fp" 2>&1)
   status=$?
-  expect_code 4 "$status" "recovery accepted the delayed approval"
+  expect_code 1 "$status" "recovery accepted an unversioned preflight"
+  assert_contains "$out" "malformed preflight record" "unversioned recovery refusal was unclear"
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
   [ -f "$handoff" ] || fail "unversioned preflight refusal consumed the delayed handoff"
   find "$home/data/$id" -maxdepth 1 -type f -name '.ship-preflight.*' | grep -q . \
