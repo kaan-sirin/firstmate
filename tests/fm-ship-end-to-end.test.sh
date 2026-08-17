@@ -670,6 +670,139 @@ SH
   pass "spawn verifies the durable preflight without a brief marker"
 }
 
+test_recovery_submission_serializes_preflight_corrections() {
+  local home="$TMP_ROOT/recovery-serialization" project="$TMP_ROOT/recovery-serialization-project" worktree="$TMP_ROOT/recovery-serialization-worktree" remote="$TMP_ROOT/recovery-serialization-remote.git" contract="$TMP_ROOT/recovery-serialization-contract.json" corrected="$TMP_ROOT/recovery-serialization-corrected.json" fakebin="$TMP_ROOT/recovery-serialization-bin" id=recovery-serialization-a1 fp status attempts submitted_line published_line spawn_pid publisher_pid real_mktemp
+  mkdir -p "$home/data" "$home/state" "$home/config" "$project" "$fakebin"
+  real_mktemp=$(command -v mktemp) || fail "could not find mktemp"
+  make_contract "$contract"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  git init --bare -q "$remote" || fail "could not create recovery serialization remote"
+  git -C "$project" init -q || fail "could not create recovery serialization project"
+  git -C "$project" config user.email test@example.invalid || fail "could not configure recovery serialization author"
+  git -C "$project" config user.name Test || fail "could not configure recovery serialization author"
+  printf '%s\n' 'recovery serialization test' > "$project/README.md"
+  git -C "$project" add README.md || fail "could not stage recovery serialization project"
+  git -C "$project" commit -qm initial || fail "could not commit recovery serialization project"
+  git -C "$project" branch -M main || fail "could not name recovery serialization branch"
+  git -C "$project" remote add origin "$remote" || fail "could not configure recovery serialization remote"
+  git -C "$project" push -qu origin main || fail "could not publish recovery serialization base"
+  git --git-dir="$remote" symbolic-ref HEAD refs/heads/main || fail "could not set recovery serialization default branch"
+  git clone -q "$remote" "$worktree" || fail "could not create recovery serialization worktree"
+  fp=$(publish_preflight_record "$home" "$id" "$contract" direct approved 100) || fail "could not create recovery preflight"
+  printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/$id/brief.md"
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "could not stage recovery correction"
+  {
+    printf 'window=firstmate:fm-%s\n' "$id"
+    printf 'endpoint_task_id=%s\n' "$id"
+    printf 'worktree=%s\n' "$worktree"
+    printf 'project=%s\n' "$project"
+    printf '%s\n' 'harness=codex' 'kind=ship' 'mode=no-mistakes' 'yolo=off' 'tasktmp=/tmp/fm-recovery-serialization-a1' 'model=default' 'effort=default'
+    printf 'preflight_fingerprint=%s\n' "$fp"
+  } > "$home/state/$id.meta"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for arg in "$@"; do
+  case "$arg" in
+    "$FM_RACE_PREFLIGHT_LOCK".owner.*)
+      [ "${FM_RACE_BRIDGE_PROCESS:-}" != 1 ] || : > "$FM_RACE_LOCK_ATTEMPT"
+      ;;
+  esac
+done
+exec "$FM_RACE_REAL_MKTEMP" "$@"
+SH
+  cat > "$fakebin/tmux" <<'SH'
+#!/usr/bin/env bash
+set -eu
+case "$1" in
+  list-windows) printf 'fm-%s\n' "$FM_RACE_ID" ;;
+  display-message)
+    case "$*" in
+      *'#{pane_current_path}'*) printf '%s\n' "$FM_RACE_WORKTREE" ;;
+      *'#{pane_current_command}'*) printf '%s\n' bash ;;
+    esac
+    ;;
+  send-keys)
+    literal=0
+    for arg in "$@"; do
+      [ "$arg" != -l ] || literal=1
+    done
+    if [ "$literal" -eq 1 ]; then
+      : > "$FM_RACE_LAUNCH_LITERAL"
+      while [ ! -e "$FM_RACE_RELEASE_LITERAL" ]; do
+        sleep 0.01
+      done
+    elif [ "${!#}" = Enter ]; then
+      [ ! -e "$FM_RACE_LAUNCH_LITERAL" ] || printf '%s\n' submitted >> "$FM_RACE_EVENTS"
+    fi
+    ;;
+esac
+SH
+  chmod +x "$fakebin/mktemp" "$fakebin/tmux"
+  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$id" --relaunch > "$home/spawn.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while [ ! -e "$home/launch-literal" ] && [ "$attempts" -lt 500 ]; do
+    if ! kill -0 "$spawn_pid" 2>/dev/null; then
+      break
+    fi
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/launch-literal" ]; then
+    : > "$home/release-literal"
+    wait "$spawn_pid" || true
+    fail "recovery relaunch did not reach replacement command submission"
+  fi
+  (
+    if PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_BRIDGE_PROCESS=1 FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LOCK_ATTEMPT="$home/lock-attempt" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$BRIDGE" publish "$id" > "$home/publish.out" 2>&1; then
+      printf '%s\n' 0 > "$home/publish.status"
+    else
+      printf '%s\n' 1 > "$home/publish.status"
+    fi
+  ) &
+  publisher_pid=$!
+  attempts=0
+  while [ ! -e "$home/lock-attempt" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/lock-attempt" ]; then
+    : > "$home/release-literal"
+    wait "$spawn_pid" || true
+    wait "$publisher_pid" || true
+    fail "recovery correction did not attempt preflight publication"
+  fi
+  attempts=0
+  while [ ! -e "$home/publish.status" ] && [ "$attempts" -lt 20 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ -e "$home/publish.status" ]; then
+    : > "$home/release-literal"
+    wait "$spawn_pid" || true
+    wait "$publisher_pid" || true
+    fail "recovery correction published before replacement command submission"
+  fi
+  jq -e '.state == "approved"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || { : > "$home/release-literal"; wait "$spawn_pid" || true; wait "$publisher_pid" || true; fail "recovery correction replaced approval before submission"; }
+  : > "$home/release-literal"
+  wait "$spawn_pid"
+  status=$?
+  [ "$status" -eq 0 ] || fail "recovery relaunch did not submit the approved replacement: $(cat "$home/spawn.out")"
+  wait "$publisher_pid"
+  status=$?
+  [ "$status" -eq 0 ] && [ "$(cat "$home/publish.status")" = 0 ] || fail "recovery correction did not publish"
+  printf '%s\n' published >> "$home/events"
+  submitted_line=$(grep -n '^submitted$' "$home/events" | head -n 1 | cut -d: -f1)
+  published_line=$(grep -n '^published$' "$home/events" | head -n 1 | cut -d: -f1)
+  [ -n "$submitted_line" ] && [ -n "$published_line" ] && [ "$submitted_line" -lt "$published_line" ] \
+    || fail "recovery correction published before replacement command submission"
+  jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "recovery correction did not replace the consumed approval after submission"
+  pass "recovery holds preflight approval through replacement command submission"
+}
+
 write_snapshot() {
   local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-100} checkpoint=${8:-0} recovery=${9:-'{"state":"none"}'} json
   json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s,"active_seconds":%s},"recovery":%s,"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$checkpoint" "$recovery" "$decision")
@@ -1226,6 +1359,7 @@ test_bridge_preserves_approved_record_on_invalid_handoff
 test_bridge_rejects_stale_producer_revisions
 test_bridge_rejects_unversioned_current_records
 test_spawn_enforces_the_durable_preflight
+test_recovery_submission_serializes_preflight_corrections
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
 test_dashboard_recovers_stale_publication_lock

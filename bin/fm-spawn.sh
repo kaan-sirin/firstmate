@@ -1951,15 +1951,20 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 }
 
 W="fm-$ID"
-if [ "$KIND" = ship ] && [ "$RELAUNCH" -eq 0 ]; then
+if [ "$KIND" = ship ] && [ -n "${PREFLIGHT_FINGERPRINT:-}" ]; then
   SPAWN_PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
   fm_lock_acquire_wait "$SPAWN_PREFLIGHT_LOCK" || {
     echo "error: could not lock ship preflight record for $ID" >&2
     exit 1
   }
   SPAWN_PREFLIGHT_LOCK_HELD=1
-  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+  if [ "$RELAUNCH" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+  else
+    FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || exit 1
+  fi
 fi
 if [ "$RELAUNCH" -eq 1 ]; then
   if [ "$RECOVER_MISSING" -eq 1 ]; then
