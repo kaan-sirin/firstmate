@@ -824,9 +824,12 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
 }
 
 test_dashboard_recovery_defers_preflight_approval() {
-  local home="$TMP_ROOT/dashboard-recovery-preflight" state_bin="$TMP_ROOT/dashboard-recovery-preflight-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-spawn" record
+  local home="$TMP_ROOT/dashboard-recovery-preflight" state_bin="$TMP_ROOT/dashboard-recovery-preflight-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-spawn" record contract fp
   mkdir -p "$home/data" "$home/state"
-  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-preflight.meta"
+  contract="$home/contract.json"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" dash-preflight "$contract" direct awaiting_approval 100) || fail "could not prepare awaiting preflight"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/dash-preflight.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "fm-ship-end-to-end: preflight approval is missing\\n" >&2' 'exit 1' > "$spawn_bin"

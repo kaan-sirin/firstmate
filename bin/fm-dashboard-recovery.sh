@@ -65,11 +65,7 @@ if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   IFS=$'\t' read -r prior_state attempts reason < <(jq -r '[.state // "",(.attempts // 0 | tostring),(.reason // "")] | @tsv' "$RECORD" 2>/dev/null || true)
   case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
   if [ "$prior_state" = unrecoverable ]; then
-    case "$reason" in
-      *'preflight approval is missing'*|*'preflight is awaiting approval'*) legacy_awaiting=1 ;;
-      *) legacy_awaiting=0 ;;
-    esac
-    if preflight_awaiting_approval || [ "$legacy_awaiting" -eq 1 ]; then
+    if preflight_awaiting_approval; then
       attempts=0
       prior_state=pending
     else
