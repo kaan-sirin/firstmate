@@ -122,7 +122,7 @@ positive_number() {
 }
 
 command_executable() {  # <argv-zero>: print the executable's canonical path
-  local command=$1 found dir base target
+  local command=$1 found dir base target hops=0
   case "$command" in
     */*) found=$command ;;
     *) found=$(type -P -- "$command") || return 1 ;;
@@ -134,11 +134,13 @@ command_executable() {  # <argv-zero>: print the executable's canonical path
     dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
     found="$dir/$base"
     [ -L "$found" ] || break
+    [ "$hops" -lt 16 ] || return 1
     target=$(readlink "$found") || return 1
     case "$target" in
       /*) found=$target ;;
       *) found="$dir/$target" ;;
     esac
+    hops=$((hops + 1))
   done
   [ -f "$found" ] && [ -x "$found" ] || return 1
   printf '%s\n' "$found"

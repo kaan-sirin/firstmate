@@ -108,15 +108,13 @@ fm_cursor_probe_is_cursor() {  # <path>
 
 # True when executable $1 may be launched as Cursor.
 #
-# An executable whose own name is cursor-agent is accepted on the ordinary
-# executable check: the name is Cursor's and is specific enough to stand alone.
-# Anything else - which in practice means the legacy `agent` alias - must first
-# prove itself Cursor, structurally or by the bounded probe.
+# An executable must prove itself with Cursor's install path or by the bounded
+# probe before it can be launched as Cursor.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1
+  local path=$1 canonical
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  case "${path##*/}" in cursor-agent) return 0 ;; esac
-  fm_cursor_path_is_cursor "$path" && return 0
+  canonical=$(fm_cursor_canonical_path "$path") || return 1
+  case "$canonical" in */cursor-agent/versions/*/*) return 0 ;; esac
   fm_cursor_probe_is_cursor "$path"
 }
 

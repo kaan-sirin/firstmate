@@ -128,11 +128,14 @@ test_verify_executable_refuses_unrelated_agent() {
   tree="$TMP_ROOT/tree3"; bin=$(make_cursor_tree "$tree")
   mkdir -p "$odd"
   printf '#!/bin/sh\necho unrelated\n' > "$odd/agent"; chmod +x "$odd/agent"
+  printf '#!/bin/sh\necho unrelated\n' > "$odd/cursor-agent"; chmod +x "$odd/cursor-agent"
   fm_cursor_verify_executable "$bin/agent" \
     || fail "the alias inside cursor's install tree must verify"
   ! fm_cursor_verify_executable "$odd/agent" \
     || fail "an unrelated executable named agent must NOT verify as cursor"
-  pass "fm_cursor_verify_executable: the legacy alias is accepted only with cursor evidence"
+  ! fm_cursor_verify_executable "$odd/cursor-agent" \
+    || fail "an unrelated executable named cursor-agent must NOT verify as cursor"
+  pass "fm_cursor_verify_executable: only Cursor evidence permits a launch"
 }
 
 test_resolve_binary_prefers_stable_path() {

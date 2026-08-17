@@ -413,6 +413,30 @@ assert_absent "$H/state/procevent/when-interpreter-symlink.source" \
   "an interpreter symlink command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
+H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
+CYCLE_A="$TMP_ROOT/cycle-a"
+CYCLE_B="$TMP_ROOT/cycle-b"
+ln -s "$CYCLE_B" "$CYCLE_A"
+ln -s "$CYCLE_A" "$CYCLE_B"
+FM_HOME="$H" "$ROOT/bin/fm-procevent-when.sh" arm symlink-cycle \
+  --condition "$CYCLE_A" --action "$ACT" "$TMP_ROOT/symlink-cycle-act" \
+  >"$TMP_ROOT/symlink-cycle.out" 2>"$TMP_ROOT/symlink-cycle.err" &
+cycle_pid=$!
+for _ in $(seq 1 20); do
+  kill -0 "$cycle_pid" 2>/dev/null || break
+  sleep 0.1
+done
+if kill -0 "$cycle_pid" 2>/dev/null; then
+  kill -TERM "$cycle_pid" 2>/dev/null || true
+  wait "$cycle_pid" 2>/dev/null || true
+  fail "a cyclic command symlink must be rejected without hanging"
+fi
+wait "$cycle_pid" || cycle_rc=$?
+[ "${cycle_rc:-0}" -ne 0 ] || fail "a cyclic command symlink must be refused"
+assert_absent "$H/state/procevent/when-symlink-cycle.source" \
+  "a cyclic command symlink is never registered"
+pass "cyclic command symlinks are rejected within a fixed bound"
+
 # --- mutated condition bytes are refused before the next poll ----------------
 H="$TMP_ROOT/h-condition-tamper"; new_home "$H"
 CONDITION_TAMPER_LOG="$TMP_ROOT/condition-tamper-act"
