@@ -34,7 +34,7 @@ Do not provide Slack origin, contract, authority, evidence, identity, or approva
 
 ## Phase 2 - approved execution
 
-The durable preflight record declares this workflow. `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. It does not infer workflow use from brief text. A missing approval, corrected record, stale approval, or mismatch fails closed.
+The durable preflight record declares this workflow. On initial dispatch, `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. On recovery, it re-verifies a recorded fingerprint, but a legacy ship task with no recorded workflow fingerprint continues under its existing delivery contract. It does not infer workflow use from brief text. For a task declared in this workflow, a missing approval, corrected record, stale approval on initial dispatch, or fingerprint mismatch fails closed.
 
 Then execute autonomously in an isolated worktree.
 Keep normal engineering choices inside the approved contract.
