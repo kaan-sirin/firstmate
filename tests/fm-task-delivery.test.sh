@@ -13,6 +13,7 @@
 # ahead of backend creation, and a fake `tmux` that exits non-zero backstops the
 # cases that are meant to get past them, so no window or worktree is ever created.
 set -u
+umask 022
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -90,7 +91,7 @@ approve_preflight() {  # <home> <task-id>
 }
 
 stage_awaiting_preflight() {  # <home> <task-id>
-  local home=$1 id=$2 contract contract_json bound fingerprint handoff tmp
+  local home=$1 id=$2 contract contract_json bound fingerprint handoff tmp now
   contract='{"recommendation":"corrected promotion","outcome":"ship work","scope":"task","non_goals":"","delivery_boundary":"local","external_boundaries":"none","questions":[]}'
   contract_json=$(printf '%s\n' "$contract" | jq -cS .) || return 1
   bound=$(jq -cn --arg id "$id" --argjson contract "$contract_json" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
@@ -101,8 +102,9 @@ stage_awaiting_preflight() {  # <home> <task-id>
   fi
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
-  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:2}' \
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:2,created_at:$now}' \
     > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
     rm -f -- "$tmp"
