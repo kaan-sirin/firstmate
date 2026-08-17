@@ -227,6 +227,31 @@ test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
   pass "bounded status pages retain the main cursor until complete"
 }
 
+test_overlong_status_line_is_retained_without_event_splitting() {
+  local dir state out status cursor payload offset
+  dir=$(make_case overlong-status-page)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-overlong.status"
+  payload=$(printf '%09000d' 0)
+  printf 'note: %s\n' "$payload" > "$status"
+  append_wake "$state" signal task-overlong.status "signal: task-overlong.status" \
+    || fail "queueing the overlong status signal failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed for an overlong status line"
+  grep -F 'status line exceeds the bounded presentation cap: task-overlong.status' "$out" >/dev/null \
+    || fail "the overlong line was not reported as retained: $(cat "$out")"
+  if grep -F 'task-overlong note:' "$out" >/dev/null; then
+    fail "the overlong status line was emitted as a truncated event: $(cat "$out")"
+  fi
+  cursor="$state/.status-presentation-cursor"
+  offset=$(awk -F '\t' '$1 == "task-overlong" { print $3 }' "$cursor")
+  [ -z "$offset" ] || [ "$offset" -eq 0 ] \
+    || fail "the overlong status line advanced its main cursor to $offset"
+  pass "an overlong status line remains whole and unacknowledged"
+}
+
 test_snapshot_does_not_ack_a_later_append() {
   local dir state status first second
   dir=$(make_case snapshot-append)
@@ -359,6 +384,7 @@ test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_bounded_signal_annotations_keep_routine_status_unacknowledged
+test_overlong_status_line_is_retained_without_event_splitting
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged

@@ -1286,7 +1286,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end; do
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end snapshot_overlong; do
         if [ "$snapshot_task" = "$task" ]; then
           endpoint=$snapshot_endpoint
           [ -z "$snapshot_start" ] || offset=$snapshot_start
@@ -1297,7 +1297,12 @@ $snapshot
 EOF
       [ -n "$endpoint" ] || continue
     fi
-    if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then continue; fi
+    if [ -n "$endpoint" ] && [ "$offset" -ge "$endpoint" ]; then
+      if [ "${snapshot_overlong:-false}" = true ]; then
+        printf 'wake annotation: status line exceeds the bounded presentation cap: %s\n' "$status_key" || return 1
+      fi
+      continue
+    fi
     fm_wake_unread_events "$path" "$read_bytes" "$offset" "$endpoint" "$line_cap"
     event_rc=$?
     if [ "$event_rc" -ne 0 ] && [ "$event_rc" -ne 2 ]; then

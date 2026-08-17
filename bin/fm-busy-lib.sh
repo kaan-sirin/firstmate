@@ -692,17 +692,23 @@ fm_busy_cursor_turn_state() {  # <transcript>
   size=$(LC_ALL=C command -p wc -c < "$transcript" 2>/dev/null) || return 1
   size=${size//[[:space:]]/}
   case "$size" in ''|*[!0-9]*) return 1 ;; esac
-  if [ "$size" -gt 262144 ]; then
-    start=$((size - 262144))
-    exec 3< <(command -p perl -MFcntl=:DEFAULT -e '
-      my ($path, $start) = @ARGV;
+  start=0
+  if [ "$size" -gt 262144 ]; then start=$((size - 262144)); fi
+  exec 3< <(command -p perl -MFcntl=:DEFAULT -e '
+      my ($path, $start, $end) = @ARGV;
       sysopen(my $file, $path, O_RDONLY | O_NOFOLLOW) or exit 1;
+      my @stat = stat $file or exit 1;
+      exit 1 unless -f _ && $stat[7] == $end && $start <= $end;
       sysseek($file, $start, 0) == $start or exit 1;
-      while (read($file, my $chunk, 65536)) { print $chunk or exit 1; }
-    ' "$transcript" "$start")
-  else
-    exec 3< "$transcript"
-  fi
+      my $remaining = $end - $start;
+      while ($remaining > 0) {
+        my $want = $remaining > 65536 ? 65536 : $remaining;
+        my $read = sysread($file, my $chunk, $want);
+        defined($read) && $read > 0 or exit 1;
+        print $chunk or exit 1;
+        $remaining -= $read;
+      }
+    ' "$transcript" "$start" "$size")
   if command -v jq >/dev/null 2>&1; then
     LC_ALL=C jq -Rr '
       try (
