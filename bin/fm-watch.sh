@@ -480,7 +480,7 @@ dashboard_transition_reconcile() {
 
 dashboard_recovery_reconcile() {
   [ -x "$SCRIPT_DIR/fm-dashboard-recovery.sh" ] || return 0
-  FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-dashboard-recovery.sh" observe "$1" >/dev/null 2>&1 \
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-dashboard-recovery.sh" observe "$1" >/dev/null 2>&1 \
     || triage_log "dashboard recovery check failed for $1"
 }
 
