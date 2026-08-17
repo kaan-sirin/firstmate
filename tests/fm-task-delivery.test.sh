@@ -79,7 +79,7 @@ approve_preflight() {  # <home> <task-id>
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
   now=$(date +%s)
   jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
     rm -f -- "$tmp"
     return 1
@@ -102,7 +102,7 @@ stage_awaiting_preflight() {  # <home> <task-id>
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
   jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract}' \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:2}' \
     > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
     rm -f -- "$tmp"
@@ -258,7 +258,7 @@ EOF
 test_promote_requires_and_records_the_delivery_contract() {
   local home meta out status fingerprint
   home="$TMP_ROOT/promote/home"
-  mkdir -p "$home/state"
+  mkdir -p "$home/data" "$home/state"
   meta="$home/state/promote-d1.meta"
 
   write_scout_meta() {
@@ -306,7 +306,7 @@ test_promote_serializes_preflight_before_metadata_publication() {
   home="$TMP_ROOT/promote-preflight-lock/home"
   id=promote-lock-d2
   meta="$home/state/$id.meta"
-  mkdir -p "$home/state"
+  mkdir -p "$home/data" "$home/state"
   printf 'window=fm-promote-lock-d2\nkind=scout\nworktree=/tmp/wt\n' > "$meta"
   initial_fp=$(approve_preflight "$home" "$id") || fail "initial promotion preflight could not be created"
   corrected_fp=$(stage_awaiting_preflight "$home" "$id") || fail "corrected promotion preflight could not be staged"

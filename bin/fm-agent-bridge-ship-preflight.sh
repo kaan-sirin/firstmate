@@ -31,6 +31,25 @@ valid_private_dir() {
   case "$group$other" in *[2367]*) return 1 ;; esac
 }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
+valid_producer_revision() {
+  jq -e '
+    .producer_revision | type == "number" and floor == . and . >= 1 and . <= 9007199254740991
+  ' "$1" >/dev/null
+}
+record_producer_revision() {
+  jq -er '
+    if has("producer_revision") then
+      .producer_revision as $revision |
+      if ($revision | type == "number" and floor == . and . >= 1 and . <= 9007199254740991) then
+        $revision
+      else
+        empty
+      end
+    else
+      0
+    end
+  ' "$1"
+}
 recover_claim() {
   local claim claim_inode handoff_inode
   local -a claims
@@ -132,6 +151,15 @@ if ! cp "$TMP" "$VALIDATION_DATA/$ID/ship-preflight.json" || ! chmod 600 "$VALID
 fi
 rm -rf -- "$VALIDATION_DATA"
 VALIDATION_DATA=
+valid_producer_revision "$TMP" || die "preflight producer revision is malformed"
+if [ -e "$REC_DIR/ship-preflight.json" ] || [ -L "$REC_DIR/ship-preflight.json" ]; then
+  valid_private_file "$REC_DIR/ship-preflight.json" || die "existing preflight record is unsafe"
+  current_revision=$(record_producer_revision "$REC_DIR/ship-preflight.json") || die "existing preflight producer revision is malformed"
+else
+  current_revision=0
+fi
+jq -e --argjson current_revision "$current_revision" '.producer_revision > $current_revision' "$TMP" >/dev/null \
+  || die "preflight producer revision does not advance the current record"
 mv -f -- "$TMP" "$REC_DIR/ship-preflight.json"
 valid_private_file "$REC_DIR/ship-preflight.json" || die "preflight publication failed validation"
 rm -f -- "$CLAIM"

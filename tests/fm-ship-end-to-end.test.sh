@@ -29,7 +29,7 @@ bridge_env() {
 }
 
 write_bridge_handoff() {
-  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 contract_json bound fp handoff tmp bypass
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 revision=${7:-1} contract_json bound fp handoff tmp bypass
   chmod 755 "$home/data"
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
   mkdir -p "${handoff%/*}"
@@ -43,8 +43,8 @@ write_bridge_handoff() {
   fi
   bypass=$(jq -c '.complete_plan_approved == true' "$contract") || fail "could not read bypass state"
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || fail "could not prepare bridge record"
-  jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" '
-    {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract}
+  jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" --argjson revision "$revision" '
+    {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract,producer_revision:$revision}
     + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
   ' > "$tmp" || { rm -f -- "$tmp"; fail "could not write bridge record"; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
@@ -55,8 +55,8 @@ write_bridge_handoff() {
 }
 
 publish_preflight_record() {
-  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 fp
-  fp=$(write_bridge_handoff "$home" "$id" "$contract" "$origin" "$state" "$now") || return 1
+  local home=$1 id=$2 contract=$3 origin=$4 state=$5 now=$6 revision=${7:-1} fp
+  fp=$(write_bridge_handoff "$home" "$id" "$contract" "$origin" "$state" "$now" "$revision") || return 1
   bridge_env "$home" publish "$id" >/dev/null || fail "could not publish bridge record"
   printf '%s' "$fp"
 }
@@ -72,7 +72,7 @@ test_direct_and_bridge_owned_preflight_authority() {
   status=$?
   [ "$status" -ne 0 ] || fail "unapproved preflight must refuse verification"
   assert_contains "$out" "approval is missing" "unapproved refusal was unclear"
-  fp=$(publish_preflight_record "$home" direct-a1 "$contract" direct approved 102) || fail "direct approval should work"
+  fp=$(publish_preflight_record "$home" direct-a1 "$contract" direct approved 102 2) || fail "direct approval should work"
   preflight_env "$home" 103 verify direct-a1 --fingerprint "$fp" >/dev/null || fail "approved direct preflight should verify"
   out=$(preflight_env "$home" 103 preflight direct-a1 --contract "$contract" 2>&1)
   status=$?
@@ -147,9 +147,9 @@ test_correction_bypass_and_stale_refusal() {
   fp=$(publish_preflight_record "$home" correction-a1 "$contract" direct awaiting_approval 100) || fail "preflight create failed"
   make_contract "$changed"
   printf '%s\n' '{"recommendation":"Build it","outcome":"Changed tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$changed"
-  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct awaiting_approval 101) || fail "correction should replace unapproved contract"
+  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct awaiting_approval 101 2) || fail "correction should replace unapproved contract"
   [ "$fp" != "$fp2" ] || fail "correction should change the fingerprint"
-  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct approved 102) || fail "current approval failed"
+  fp2=$(publish_preflight_record "$home" correction-a1 "$changed" direct approved 102 3) || fail "current approval failed"
   out=$(preflight_env "$home" 102 verify correction-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "mismatched approval must refuse"
@@ -288,7 +288,7 @@ test_bridge_claims_a_handoff_before_reading_it() {
   printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
   handoff="$home/state/agent-bridge/ship-preflight/$id.json"
 
-  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 >/dev/null || fail "could not prepare corrected producer handoff"
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "could not prepare corrected producer handoff"
   producer=$(umask 077; mktemp "${handoff%/*}/.producer.XXXXXX") || fail "could not reserve corrected producer handoff"
   mv -f -- "$handoff" "$producer" || fail "could not stage corrected producer handoff"
   write_bridge_handoff "$home" "$id" "$original" direct approved 100 >/dev/null || fail "could not prepare original consumer handoff"
@@ -477,6 +477,35 @@ test_bridge_preserves_approved_record_on_invalid_handoff() {
   pass "bridge preserves approved records when a handoff is malformed"
 }
 
+test_bridge_rejects_stale_producer_revisions() {
+  local home="$TMP_ROOT/bridge-producer-revision" id=producer-revision-a1 original="$TMP_ROOT/bridge-producer-revision-original.json" corrected="$TMP_ROOT/bridge-producer-revision-corrected.json" original_fp corrected_fp handoff out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  original_fp=$(publish_preflight_record "$home" "$id" "$original" direct approved 100 1) || fail "could not publish initial producer revision"
+  corrected_fp=$(publish_preflight_record "$home" "$id" "$corrected" direct awaiting_approval 101 2) || fail "could not publish corrected producer revision"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 1 >/dev/null || fail "could not stage delayed producer handoff"
+  out=$(bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a delayed producer handoff replaced a correction"
+  assert_contains "$out" "does not advance" "stale producer handoff refusal was unclear"
+  jq -e --arg fp "$corrected_fp" '.producer_revision == 2 and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "stale producer handoff changed the durable preflight"
+  out=$(preflight_env "$home" 101 verify-recovery "$id" --fingerprint "$original_fp" 2>&1)
+  status=$?
+  expect_code 4 "$status" "recovery accepted the delayed producer approval"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  jq '.producer_revision = 2.5' "$handoff" > "$home/non-integer-revision.json" || fail "could not corrupt producer revision"
+  chmod 600 "$home/non-integer-revision.json" && mv -f "$home/non-integer-revision.json" "$handoff" || fail "could not stage a malformed producer revision"
+  out=$(bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a non-integer producer revision was accepted"
+  assert_contains "$out" "producer revision is malformed" "malformed producer revision refusal was unclear"
+  jq -e --arg fp "$corrected_fp" '.producer_revision == 2 and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "malformed producer revision changed the durable preflight"
+  pass "bridge preserves corrections against stale producer revisions"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -501,7 +530,7 @@ test_spawn_enforces_the_durable_preflight() {
   printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
   fp=$(publish_preflight_record "$home" race-a1 "$contract" direct approved 100) || fail "race preflight create failed"
   printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/race-a1/brief.md"
-  write_bridge_handoff "$home" race-a1 "$corrected" direct awaiting_approval 101 >/dev/null || fail "race correction handoff could not be prepared"
+  write_bridge_handoff "$home" race-a1 "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "race correction handoff could not be prepared"
   mkdir -p "$racebin"
   cat > "$racebin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -536,7 +565,7 @@ SH
   git clone -q "$submit_remote" "$submit_worktree" || fail "could not create submit test worktree"
   fp=$(publish_preflight_record "$home" race-submit-a1 "$contract" direct approved 100) || fail "submit race preflight create failed"
   printf '%s\n' 'Delivery contract: mode=no-mistakes' > "$home/data/race-submit-a1/brief.md"
-  write_bridge_handoff "$home" race-submit-a1 "$corrected" direct awaiting_approval 101 >/dev/null || fail "submit race correction handoff could not be prepared"
+  write_bridge_handoff "$home" race-submit-a1 "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "submit race correction handoff could not be prepared"
   mkdir -p "$submitbin"
   cat > "$submitbin/tmux" <<'SH'
 #!/usr/bin/env bash
@@ -1141,6 +1170,7 @@ test_bridge_restores_a_claim_interrupted_after_rename
 test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_serializes_concurrent_publish_claims
 test_bridge_preserves_approved_record_on_invalid_handoff
+test_bridge_rejects_stale_producer_revisions
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
