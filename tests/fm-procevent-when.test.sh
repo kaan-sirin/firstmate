@@ -480,6 +480,43 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the copied git dispatcher is classified by its executable identity"
 assert_absent "$H/state/procevent/when-interpreter-git-copy.source" \
   "a copied git dispatcher command form is never registered"
+XARGS_BIN=$(type -P xargs)
+XARGS_COPY="$TMP_ROOT/approved-runner-xargs-copy"
+XARGS_INPUT="$TMP_ROOT/xargs-input"
+cp "$XARGS_BIN" "$XARGS_COPY"
+chmod +x "$XARGS_COPY"
+printf '%s\n' "$INTERPRETED" > "$XARGS_INPUT"
+if when "$H" arm interpreter-xargs-copy --condition true --action "$XARGS_COPY" -a "$XARGS_INPUT" "$INTERPRETED" \
+  >"$TMP_ROOT/interpreter-xargs-copy.out" 2>"$TMP_ROOT/interpreter-xargs-copy.err"; then
+  fail "a renamed xargs dispatcher command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-xargs-copy.err" \
+  "the copied xargs dispatcher is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-xargs-copy.source" \
+  "a copied xargs dispatcher command form is never registered"
+OFF_PATH_BIN="$TMP_ROOT/off-path-bin"
+OFF_PATH_PYTHON=$(type -P python3)
+OFF_PATH_PYTHON_COPY="$TMP_ROOT/approved-runner-off-path-python"
+OFF_PATH_SCRIPT="$TMP_ROOT/mutable-off-path.py"
+mkdir -p "$OFF_PATH_BIN"
+while IFS= read -r OFF_PATH_COMMAND; do
+  case "$OFF_PATH_COMMAND" in python*) continue ;; esac
+  OFF_PATH_COMMAND_PATH=$(type -P -- "$OFF_PATH_COMMAND" 2>/dev/null || true)
+  [ -n "$OFF_PATH_COMMAND_PATH" ] || continue
+  ln -sf "$OFF_PATH_COMMAND_PATH" "$OFF_PATH_BIN/$OFF_PATH_COMMAND" 2>/dev/null || true
+done < <(compgen -c)
+cp "$OFF_PATH_PYTHON" "$OFF_PATH_PYTHON_COPY"
+chmod +x "$OFF_PATH_PYTHON_COPY"
+printf 'print("registered")\n' > "$OFF_PATH_SCRIPT"
+if PATH="$OFF_PATH_BIN" when "$H" arm interpreter-off-path-copy --condition true \
+  --action "$OFF_PATH_PYTHON_COPY" "$OFF_PATH_SCRIPT" \
+  >"$TMP_ROOT/interpreter-off-path-copy.out" 2>"$TMP_ROOT/interpreter-off-path-copy.err"; then
+  fail "an off-path renamed interpreter command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-off-path-copy.err" \
+  "an unrecognized native executable with argv is refused"
+assert_absent "$H/state/procevent/when-interpreter-off-path-copy.source" \
+  "an off-path renamed interpreter command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"

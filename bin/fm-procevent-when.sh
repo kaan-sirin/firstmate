@@ -148,7 +148,7 @@ command_executable() {  # <argv-zero>: print the executable's canonical path
 
 interpreter_name() {
   case "$1" in
-    sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi|make|gmake|bmake|find|git)
+    sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi|make|gmake|bmake|find|git|xargs)
       return 0
       ;;
     *) return 1 ;;
@@ -161,7 +161,7 @@ INTERPRETER_CANDIDATES=()
 interpreter_candidates_load() {
   local known candidate false_path
   [ "$INTERPRETER_CANDIDATES_READY" -eq 0 ] || return 0
-  INTERPRETER_CANDIDATES=(/bin/sh /bin/bash /bin/dash /usr/bin/awk /usr/bin/gawk /usr/bin/mawk /usr/bin/nawk /bin/make /usr/bin/make /usr/local/bin/make /bin/find /usr/bin/find /usr/local/bin/find /bin/git /usr/bin/git /usr/local/bin/git)
+  INTERPRETER_CANDIDATES=(/bin/sh /bin/bash /bin/dash /usr/bin/awk /usr/bin/gawk /usr/bin/mawk /usr/bin/nawk /bin/make /usr/bin/make /usr/local/bin/make /bin/find /usr/bin/find /usr/local/bin/find /bin/git /usr/bin/git /usr/local/bin/git /bin/xargs /usr/bin/xargs /usr/local/bin/xargs)
   false_path=$(type -P false 2>/dev/null || true)
   while IFS= read -r known; do
     interpreter_name "$known" || continue
@@ -181,6 +181,13 @@ command_is_interpreter() {  # <absolute-command-path>
     [ -x "$candidate" ] && cmp -s "$path" "$candidate" && return 0
   done
   return 1
+}
+
+command_is_unbound_argv_form() {  # <absolute-command-path> <argc>
+  local path=$1 argc=$2 line
+  [ "$argc" -gt 1 ] || return 1
+  IFS= read -r line < "$path" || true
+  case "$line" in '#!'*) return 1 ;; *) return 0 ;; esac
 }
 
 command_bytes_match() {  # <absolute-command-path> <registered-sha256>
@@ -294,6 +301,8 @@ cmd_arm() {
   condition_path=$(command_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
   command_is_interpreter "$condition_path" \
     && die "condition interpreter command forms are not supported; execute the approved script directly"
+  command_is_unbound_argv_form "$condition_path" "${#cond[@]}" \
+    && die "condition interpreter command forms are not supported; execute the approved script directly"
   condition_hash=$(fm_pr_sha256 "$condition_path") || die "cannot hash the condition executable"
   script_interpreter_binding "$condition_path" || die "condition script interpreter is unsupported"
   condition_interpreter_literal_path=$COMMAND_INTERPRETER_LITERAL_PATH
@@ -303,6 +312,8 @@ cmd_arm() {
   cond[0]=$condition_path
   action_path=$(command_executable "${act[0]}") || die "action executable is unavailable: ${act[0]}"
   command_is_interpreter "$action_path" \
+    && die "action interpreter command forms are not supported; execute the approved script directly"
+  command_is_unbound_argv_form "$action_path" "${#act[@]}" \
     && die "action interpreter command forms are not supported; execute the approved script directly"
   action_hash=$(fm_pr_sha256 "$action_path") || die "cannot hash the action executable"
   script_interpreter_binding "$action_path" || die "action script interpreter is unsupported"
