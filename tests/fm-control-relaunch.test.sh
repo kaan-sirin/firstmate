@@ -846,6 +846,24 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
+test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record() {
+  local dir out rc meta
+  dir=$(new_case legacy-preflight rl36)
+  add_ship_task "$dir" rl36 claude
+  meta="$dir/home/state/rl36.meta"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36 --relaunch); rc=$?
+  expect_code 0 "$rc" "a legacy ship relaunch without a workflow record should continue"
+  assert_contains "$out" "spawned rl36 harness=claude" \
+    "legacy ship recovery did not relaunch its recorded worker"
+  [ ! -e "$dir/home/data/rl36/ship-preflight.json" ] \
+    || fail "legacy recovery must not invent a ship workflow record"
+  ! grep -q '^preflight_fingerprint=' "$meta" \
+    || fail "legacy recovery must not invent a preflight fingerprint"
+  pass "fm-spawn --relaunch: legacy ships remain recoverable without workflow records"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1383,6 +1401,7 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
+test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_fast_repair_relaunch_refuses_before_stopping_anything
