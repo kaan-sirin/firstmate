@@ -20,7 +20,7 @@ The shared no-mistakes gate refusal for fleet lifecycle entrypoints is summarize
 | `fm-bearings-snapshot.sh` | Project the fleet snapshot to the compact TOON bearings view; local-only unless `--include-prs` |
 | `fm-dashboard.sh`        | Atomically refresh or show the private canonical active-work dashboard record         |
 | `fm-dashboard-transition.sh` | Maintain compact task-state transition checkpoints for the dashboard                |
-| `fm-dashboard-recovery.sh` | Attempt supported worker recovery and record only unrecoverable outcomes             |
+| `fm-dashboard-recovery.sh` | Attempt supported worker recovery and record recovery progress or unrecoverable outcomes |
 | `fm-dashboard-run-state.sh` | Reconcile active no-mistakes state into dashboard transition checkpoints             |
 | `fm-status-event.sh`     | Write classified task status events while maintaining dashboard transition state       |
 | `fm-update.sh`           | Fast-forward-only self-update of firstmate and local or remote secondmate homes       |
