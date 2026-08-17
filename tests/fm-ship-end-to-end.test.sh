@@ -904,7 +904,7 @@ test_dashboard_recovery_preserves_legacy_terminal_receipt() {
 }
 
 test_terminal_status_cancels_recovery_claim() {
-  local home="$TMP_ROOT/dashboard-recovery-claim" claim
+  local home="$TMP_ROOT/dashboard-recovery-claim" claim status
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' 'kind=ship' 'dashboard_incarnation=i-claim' > "$home/state/dash-claim.meta"
   claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$home/state" dash-claim 100) \
@@ -918,6 +918,11 @@ test_terminal_status_cancels_recovery_claim() {
     || fail "terminal status event did not cancel the recovery claim"
   jq -e '.state == "done"' "$home/state/dashboard-transitions/dash-claim.json" >/dev/null \
     || fail "terminal status event did not persist its transition"
+  status=0
+  "$ROOT/bin/fm-dashboard-transition.sh" recovery-working "$home/state" dash-claim 101 "$claim" || status=$?
+  [ "$status" -eq 3 ] || fail "terminal status event did not defeat the recovery launch claim"
+  jq -e '.state == "done"' "$home/state/dashboard-transitions/dash-claim.json" >/dev/null \
+    || fail "recovery launch state overwrote the terminal transition"
   pass "terminal status writer cancels a pending recovery launch"
 }
 

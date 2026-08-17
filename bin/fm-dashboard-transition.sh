@@ -7,6 +7,7 @@ usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
   echo "       fm-dashboard-transition.sh recovery-claim <state-dir> <task-id> <epoch>" >&2
   echo "       fm-dashboard-transition.sh recovery-claim-clear <state-dir> <task-id> <claim>" >&2
+  echo "       fm-dashboard-transition.sh recovery-working <state-dir> <task-id> <epoch> <claim>" >&2
   echo "       fm-dashboard-transition.sh barrier <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown>" >&2
   echo "       fm-dashboard-transition.sh append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
   echo "       fm-dashboard-transition.sh resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
@@ -38,7 +39,7 @@ if [ "$ACTION" = replay-busy ]; then
   esac
   exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
 fi
-[ "$ACTION" = record ] || [ "$ACTION" = recovery-claim ] || [ "$ACTION" = recovery-claim-clear ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
+[ "$ACTION" = record ] || [ "$ACTION" = recovery-claim ] || [ "$ACTION" = recovery-claim-clear ] || [ "$ACTION" = recovery-working ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
 if [ "$ACTION" = barrier ]; then
   CURRENT=${4:-}
   AT=
@@ -52,6 +53,11 @@ elif [ "$ACTION" = recovery-claim-clear ]; then
   AT=
   LINE=
   CLAIM=${4:-}
+elif [ "$ACTION" = recovery-working ]; then
+  CURRENT=working
+  AT=${4:-}
+  LINE=
+  CLAIM=${5:-}
 elif [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   CURRENT=working
   AT=${4:-}
@@ -65,6 +71,7 @@ case "$ACTION:$CURRENT" in
   record:working|record:parked|record:paused|record:blocked|record:failed|record:done|record:unknown) ;;
   recovery-claim:unknown) ;;
   recovery-claim-clear:) ;;
+  recovery-working:working) ;;
   barrier:working|barrier:parked|barrier:paused|barrier:blocked|barrier:failed|barrier:done|barrier:unknown) ;;
   append:|append:working|append:parked|append:paused|append:blocked|append:failed|append:done|append:unknown) ;;
   self-append:|self-append:working|self-append:parked|self-append:paused|self-append:blocked|self-append:failed|self-append:done|self-append:unknown) ;;
@@ -128,6 +135,15 @@ if [ "$ACTION" = recovery-claim ]; then
   case "$prior_state" in done|failed) exit 3 ;; esac
   terminal_status_receipt && exit 3
 fi
+if [ "$ACTION" = recovery-working ]; then
+  claim_incarnation=$(sed -n 's/^incarnation=//p' "$CLAIM_PATH" 2>/dev/null | tail -1)
+  claim_value=$(sed -n 's/^claim=//p' "$CLAIM_PATH" 2>/dev/null | tail -1)
+  if [ "$claim_incarnation" != "$incarnation" ] || [ "$claim_value" != "$CLAIM" ]; then
+    exit 3
+  fi
+  case "$prior_state" in done|failed) exit 3 ;; esac
+  terminal_status_receipt && exit 3
+fi
 if [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   case "$prior_state" in done|failed) CURRENT= ;; esac
 fi
@@ -164,6 +180,8 @@ if [ "$ACTION" = recovery-claim ]; then
 elif [ "$ACTION" = recovery-claim-clear ]; then
   claim=$(sed -n 's/^claim=//p' "$CLAIM_PATH" 2>/dev/null | tail -1)
   [ "$claim" = "$CLAIM" ] && rm -f -- "$CLAIM_PATH" || true
+elif [ "$ACTION" = recovery-working ]; then
+  rm -f -- "$CLAIM_PATH"
 else
   case "$CURRENT" in done|failed) rm -f -- "$CLAIM_PATH" || true ;; esac
 fi

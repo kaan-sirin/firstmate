@@ -183,7 +183,9 @@ replay_pending() {  # <current-gen>
     return 0
   fi
   dashboard_state_for "$PENDING_STATE"
-  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$dashboard_state" "$PENDING_AT" || return 1
+  if [ "${FM_DASHBOARD_RECOVERY_TRANSITION_LOCK:-0}" != 1 ]; then
+    "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" "$dashboard_state" "$PENDING_AT" || return 1
+  fi
   if [ "${FM_BUSY_EVENT_TESTING:-0}" = 1 ] && [ "${FM_BUSY_EVENT_TEST_INTERRUPT_AFTER_TRANSITION:-0}" = 1 ]; then
     return 1
   fi
