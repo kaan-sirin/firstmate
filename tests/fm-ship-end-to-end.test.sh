@@ -835,7 +835,7 @@ test_dashboard_recovery_relaunches_dead_endpoint() {
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
   # shellcheck disable=SC2016 # Positional parameters expand in the generated spawn fixture.
-  printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --relaunch ] || exit 2' 'exit 0' > "$spawn_bin"
+  printf '%s\n' '#!/usr/bin/env bash' '[ "$2" = --relaunch ] && [ "$3" = --dashboard-recovery ] || exit 2' 'exit 0' > "$spawn_bin"
   chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
   FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-dead \
     || fail "dead endpoint recovery did not relaunch"

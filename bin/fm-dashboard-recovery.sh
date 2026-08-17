@@ -79,7 +79,7 @@ case "$agent_state" in
   dead) recovery_action=--relaunch ;;
   missing) recovery_action=--recover-missing ;;
 esac
-out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" 2>&1) || recovery_status=$?
+out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
 recovery_status=${recovery_status:-0}
 if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"
