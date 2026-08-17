@@ -129,7 +129,7 @@ See [`trace-context.md`](trace-context.md) for carrier semantics, supported rout
 
 ## Gate defaults (.no-mistakes.yaml)
 
-The tracked `.no-mistakes.yaml` stores gate test evidence in the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
+The tracked `.no-mistakes.yaml` keeps gate test evidence outside the repo and pins `commands.lint` to `bin/fm-lint.sh` so local lint matches CI.
 The firstmate repo keeps its `.no-mistakes/` directory local, and CI rejects tracked entries under that path.
 It does not set `commands.test` to a complete `tests/*.test.sh` walk.
 See [CONTRIBUTING.md](../CONTRIBUTING.md) for the firstmate-specific local test policy and entry points.
