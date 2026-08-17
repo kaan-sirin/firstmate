@@ -99,8 +99,11 @@ fi
 shift
 exec "$@"
 SH
-  cat > "$fakebin/cursor-agent" <<'SH'
+cat > "$fakebin/cursor-agent" <<'SH'
 #!/usr/bin/env bash
+if [ "${1:-}" = --help ]; then
+  printf '%s\n' 'Start the Cursor Agent'
+fi
 if [ "${1:-}" = --list-models ]; then
   [ "${FM_FAKE_CURSOR_LIST_STATUS:-0}" -eq 0 ] || exit "${FM_FAKE_CURSOR_LIST_STATUS}"
   printf '%b\n' "${FM_FAKE_CURSOR_MODELS:-Available models\ncursor-grok-4.5-high - Grok 4.5 High}"
