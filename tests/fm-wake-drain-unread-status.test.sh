@@ -300,6 +300,45 @@ test_overlong_decision_is_folded_before_its_page_commits() {
   pass "a completed overlong decision reaches OPEN DECISIONS"
 }
 
+test_deferred_overlong_page_keeps_its_completed_line_ready() {
+  local dir state out status payload i filler
+  dir=$(make_case deferred-overlong-page)
+  state="$dir/state"
+  out="$dir/drain.out"
+  payload=$(printf '%09000d' 0)
+  status="$state/z-overlong.status"
+  printf 'working: %s\n' "$payload" > "$status"
+  printf 'note: reachable after deferred overlong line\n' >> "$status"
+  filler=$(printf '%00880d' 0)
+  for i in 1 2 3 4 5 6 7 8; do
+    printf 'note: initial filler %s %s\n' "$i" "$filler" > "$state/a-$i.status"
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while starting the deferred overlong scan"
+  for i in 1 2 3 4 5 6 7 8; do
+    printf 'note: later filler %s %s\n' "$i" "$filler" >> "$state/a-$i.status"
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while deferring the completed overlong line"
+  if grep -F 'reachable after deferred overlong line' "$out" >/dev/null; then
+    fail "the later event bypassed its completed overlong line: $(cat "$out")"
+  fi
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while acknowledging the deferred overlong line"
+  if grep -F 'reachable after deferred overlong line' "$out" >/dev/null; then
+    fail "the later event was combined with the deferred overlong line: $(cat "$out")"
+  fi
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while reaching the event after the deferred overlong line"
+  grep -F 'z-overlong note: reachable after deferred overlong line' "$out" >/dev/null \
+    || fail "a deferred completed overlong line re-blocked its later event: $(cat "$out")"
+  pass "a deferred overlong page keeps its completed line ready"
+}
+
 test_global_status_presentation_defers_pages_after_its_byte_budget() {
   local dir state out status i payload cursor offset
   dir=$(make_case global-status-page-budget)
@@ -468,6 +507,7 @@ test_unread_output_over_cap_remains_recoverable
 test_bounded_signal_annotations_keep_routine_status_unacknowledged
 test_overlong_status_line_advances_without_splitting_later_events
 test_overlong_decision_is_folded_before_its_page_commits
+test_deferred_overlong_page_keeps_its_completed_line_ready
 test_global_status_presentation_defers_pages_after_its_byte_budget
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
