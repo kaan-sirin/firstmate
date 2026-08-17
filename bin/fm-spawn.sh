@@ -689,6 +689,7 @@ SPAWN_META_PUBLISH_STARTED=0
 RECOVERY_ENDPOINT_PENDING=0
 SPAWN_PREFLIGHT_LOCK=
 SPAWN_PREFLIGHT_LOCK_HELD=0
+SPAWN_PREFLIGHT_LOCK_EXTERNAL=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -815,7 +816,7 @@ spawn_abort_cleanup() {
     SPAWN_META_LOCK_HELD=0
     fm_lock_release "$SPAWN_META_LOCK" || true
   fi
-  if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
+  if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ] && [ "$SPAWN_PREFLIGHT_LOCK_EXTERNAL" = 0 ]; then
     SPAWN_PREFLIGHT_LOCK_HELD=0
     fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || true
   fi
@@ -1953,10 +1954,16 @@ herdr_projection_existing_meta_allows_flat() {  # <meta>
 W="fm-$ID"
 if [ "$KIND" = ship ] && [ -n "${PREFLIGHT_FINGERPRINT:-}" ]; then
   SPAWN_PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
-  fm_lock_acquire_wait "$SPAWN_PREFLIGHT_LOCK" || {
-    echo "error: could not lock ship preflight record for $ID" >&2
-    exit 1
-  }
+  if [ "$DASHBOARD_RECOVERY" = 1 ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK:-}" = "$SPAWN_PREFLIGHT_LOCK" ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER:-}" = "$(cat "$SPAWN_PREFLIGHT_LOCK/pid" 2>/dev/null || true)" ]; then
+    SPAWN_PREFLIGHT_LOCK_EXTERNAL=1
+  else
+    fm_lock_acquire_wait "$SPAWN_PREFLIGHT_LOCK" || {
+      echo "error: could not lock ship preflight record for $ID" >&2
+      exit 1
+    }
+  fi
   SPAWN_PREFLIGHT_LOCK_HELD=1
   if [ "$RELAUNCH" -eq 1 ]; then
     FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
@@ -3082,7 +3089,7 @@ if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
     exit 1
   }
 fi
-if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
+if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ] && [ "$SPAWN_PREFLIGHT_LOCK_EXTERNAL" = 0 ]; then
   SPAWN_PREFLIGHT_LOCK_HELD=0
   fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
     echo "error: could not release ship preflight lock for $ID" >&2

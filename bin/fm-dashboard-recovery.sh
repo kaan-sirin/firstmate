@@ -31,7 +31,16 @@ else
 fi
 LOCK="$DIR/$ID.lock"
 fm_lock_acquire_wait "$LOCK"
-cleanup() { fm_lock_release "$LOCK" || true; }
+PREFLIGHT_LOCK=
+PREFLIGHT_LOCK_HELD=0
+PREFLIGHT_LOCK_OWNER=
+cleanup() {
+  if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
+    PREFLIGHT_LOCK_HELD=0
+    fm_lock_release "$PREFLIGHT_LOCK" || true
+  fi
+  fm_lock_release "$LOCK" || true
+}
 trap cleanup EXIT HUP INT TERM
 STATE_BIN=${FM_DASHBOARD_RECOVERY_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$STATE_BIN" "$ID" 2>/dev/null || true)
@@ -46,12 +55,18 @@ else
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
 fi
 case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
+PREFLIGHT_FINGERPRINT=$(fm_meta_get "$META" preflight_fingerprint)
+if [ -n "$PREFLIGHT_FINGERPRINT" ]; then
+  PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
+  fm_lock_acquire_wait "$PREFLIGHT_LOCK" || exit 1
+  PREFLIGHT_LOCK_HELD=1
+  PREFLIGHT_LOCK_OWNER=${BASHPID:-$$}
+fi
 preflight_awaiting_approval() {
-  local fingerprint rc=0
-  fingerprint=$(fm_meta_get "$META" preflight_fingerprint)
-  [ -n "$fingerprint" ] || return 1
+  local rc=0
+  [ -n "$PREFLIGHT_FINGERPRINT" ] || return 1
   FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-recovery "$ID" --fingerprint "$fingerprint" >/dev/null || rc=$?
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-recovery "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT" >/dev/null || rc=$?
   [ "$rc" -eq 4 ]
 }
 RECORD="$DIR/$ID.json"
@@ -103,7 +118,11 @@ case "$agent_state" in
   dead) recovery_action=--relaunch ;;
   missing) recovery_action=--recover-missing ;;
 esac
-out=$(FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
+out=$(FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
+if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
+  PREFLIGHT_LOCK_HELD=0
+  fm_lock_release "$PREFLIGHT_LOCK" || exit 1
+fi
 recovery_status=${recovery_status:-0}
 "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-claim-clear "$STATE" "$ID" "$recovery_claim" >/dev/null 2>&1 || true
 if [ "$recovery_status" -eq 0 ]; then

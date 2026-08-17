@@ -1063,6 +1063,84 @@ test_dashboard_recovery_defers_preflight_approval() {
   pass "dashboard defers awaiting preflight recovery without consuming attempts"
 }
 
+test_dashboard_recovery_serializes_preflight_publication() {
+  local home="$TMP_ROOT/dashboard-recovery-preflight-race" state_bin="$TMP_ROOT/dashboard-recovery-preflight-race-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-race-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-race-spawn" fakebin="$TMP_ROOT/dashboard-recovery-preflight-race-bin" contract="$TMP_ROOT/dashboard-recovery-preflight-race-contract.json" id=dash-preflight-race fp real_mktemp spawn_pid publisher_pid attempts status
+  mkdir -p "$home/data" "$home/state" "$fakebin"
+  real_mktemp=$(command -v mktemp) || fail "could not find mktemp"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" "$id" "$contract" direct approved 100) || fail "could not prepare approved preflight"
+  write_bridge_handoff "$home" "$id" "$contract" direct awaiting_approval 101 2 >/dev/null || fail "could not stage corrected preflight"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/$id.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf started >> "$FM_RACE_SPAWN_LOG"' 'while [ ! -e "$FM_RACE_RELEASE" ]; do sleep 0.01; done' 'exit 0' > "$spawn_bin"
+  cat > "$fakebin/mktemp" <<'SH'
+#!/usr/bin/env bash
+set -eu
+for arg in "$@"; do
+  case "$arg" in
+    "$FM_RACE_PREFLIGHT_LOCK".owner.*)
+      [ "${FM_RACE_BRIDGE_PROCESS:-}" != 1 ] || : > "$FM_RACE_LOCK_ATTEMPT"
+      ;;
+  esac
+done
+exec "$FM_RACE_REAL_MKTEMP" "$@"
+SH
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin" "$fakebin/mktemp"
+  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_SPAWN_LOG="$home/spawn.log" FM_RACE_RELEASE="$home/release" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe "$id" > "$home/recovery.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while [ ! -e "$home/spawn.log" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/spawn.log" ]; then
+    : > "$home/release"
+    wait "$spawn_pid" || true
+    fail "recovery did not reach the locked replacement handoff"
+  fi
+  (
+    if PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_BRIDGE_PROCESS=1 FM_RACE_LOCK_ATTEMPT="$home/lock-attempt" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$BRIDGE" publish "$id" > "$home/publish.out" 2>&1; then
+      printf '%s\n' 0 > "$home/publish.status"
+    else
+      printf '%s\n' 1 > "$home/publish.status"
+    fi
+  ) &
+  publisher_pid=$!
+  attempts=0
+  while [ ! -e "$home/lock-attempt" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/lock-attempt" ]; then
+    : > "$home/release"
+    wait "$spawn_pid" || true
+    wait "$publisher_pid" || true
+    fail "preflight publisher did not attempt the shared lock"
+  fi
+  attempts=0
+  while [ ! -e "$home/publish.status" ] && [ "$attempts" -lt 20 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ -e "$home/publish.status" ]; then
+    : > "$home/release"
+    wait "$spawn_pid" || true
+    wait "$publisher_pid" || true
+    fail "preflight correction published before recovery handoff completed"
+  fi
+  : > "$home/release"
+  wait "$spawn_pid"
+  status=$?
+  [ "$status" -eq 0 ] || fail "locked recovery did not complete: $(cat "$home/recovery.out")"
+  wait "$publisher_pid"
+  status=$?
+  [ "$status" -eq 0 ] && [ "$(cat "$home/publish.status")" = 0 ] || fail "preflight correction did not publish: $(cat "$home/publish.out")"
+  jq -e '.state == "awaiting_approval" and .producer_revision == 2' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "preflight correction did not publish after recovery handoff"
+  pass "dashboard recovery holds preflight approval through replacement handoff"
+}
+
 test_dashboard_recovery_relaunches_dead_endpoint() {
   local home="$TMP_ROOT/dashboard-recovery-dead" state_bin="$TMP_ROOT/dashboard-recovery-dead-state" agent_bin="$TMP_ROOT/dashboard-recovery-dead-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-dead-spawn"
   mkdir -p "$home/data" "$home/state/dashboard-transitions"
@@ -1371,6 +1449,7 @@ test_dashboard_busy_events_replay_interrupted_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
+test_dashboard_recovery_serializes_preflight_publication
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt
