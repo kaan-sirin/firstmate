@@ -184,7 +184,7 @@ test_unread_output_over_cap_remains_recoverable() {
 }
 
 test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
-  local dir state out status cursor page i payload offset
+  local dir state out status cursor page i payload offset next
   dir=$(make_case bounded-signal-annotation)
   state="$dir/state"
   out="$dir/drain.out"
@@ -201,8 +201,6 @@ test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed on oversized routine status annotations"
-  grep -F 'annotations omitted (global enrichment byte cap)' "$out" >/dev/null \
-    || fail "the bounded annotation did not report retained status context: $(cat "$out")"
   [ "$(wc -c < "$out")" -le 8500 ] \
     || fail "the bounded annotation exceeded its output limit: $(wc -c < "$out")"
   cursor="$state/.status-presentation-cursor"
@@ -211,8 +209,9 @@ test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
     || fail "a partially presented routine status advanced its cursor to $offset"
   page="$state/.task-bounded.status-presentation-page"
   [ -s "$page" ] || fail "the bounded routine page was not persisted"
-  grep -Fx 'next=8192' "$page" >/dev/null \
-    || fail "the bounded routine page did not advance to its next offset: $(cat "$page")"
+  next=$(sed -n 's/^next=//p' "$page")
+  [ "$next" -gt 0 ] && [ "$next" -lt "$(wc -c < "$status")" ] \
+    || fail "the bounded routine page did not retain a later status page: $(cat "$page")"
 
   append_wake "$state" signal task-bounded.status "signal: task-bounded.status" \
     || fail "queueing the next bounded status signal failed"
@@ -273,6 +272,66 @@ test_overlong_status_line_advances_without_splitting_later_events() {
   [ "$offset" -eq "$(wc -c < "$status")" ] \
     || fail "the main cursor did not advance after the later status event"
   pass "an overlong status line does not block later status events"
+}
+
+test_overlong_decision_is_folded_before_its_page_commits() {
+  local dir state out status payload
+  dir=$(make_case overlong-decision-page)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-overlong-decision.status"
+  payload=$(printf '%09000d' 0)
+  printf 'needs-decision [key=overlong-decision]: %s\n' "$payload" > "$status"
+  append_wake "$state" signal task-overlong-decision.status "signal: task-overlong-decision.status" \
+    || fail "queueing the overlong decision signal failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while scanning an overlong decision"
+  if grep -F 'overlong-decision' "$out" | grep -F 'needs-decision:' >/dev/null; then
+    fail "an incomplete overlong decision was emitted as an event: $(cat "$out")"
+  fi
+
+  append_wake "$state" signal task-overlong-decision.status "signal: task-overlong-decision.status" \
+    || fail "queueing the decision completion signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while folding an overlong decision"
+  grep -F 'task-overlong-decision [key=overlong-decision] needs-decision:' "$out" >/dev/null \
+    || fail "the completed overlong decision was not preserved: $(cat "$out")"
+  pass "a completed overlong decision reaches OPEN DECISIONS"
+}
+
+test_global_status_presentation_defers_pages_after_its_byte_budget() {
+  local dir state out status i payload cursor offset
+  dir=$(make_case global-status-page-budget)
+  state="$dir/state"
+  out="$dir/drain.out"
+  payload=$(printf '%03580d' 0)
+  for i in 1 2 3; do
+    status="$state/budget-$i.status"
+    printf 'note: budgeted status %s %s\n' "$i" "$payload" > "$status"
+  done
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while applying the global status budget"
+  [ "$(wc -c < "$out")" -le 8192 ] \
+    || fail "global status presentation exceeded its byte budget: $(wc -c < "$out")"
+  grep -F 'budget-1 note: budgeted status 1' "$out" >/dev/null \
+    || fail "the first budgeted status page was not presented: $(cat "$out")"
+  grep -F 'budget-2 note: budgeted status 2' "$out" >/dev/null \
+    || fail "the second budgeted status page was not presented: $(cat "$out")"
+  if grep -F 'budget-3 note: budgeted status 3' "$out" >/dev/null; then
+    fail "an unbudgeted status page was acknowledged in the first drain: $(cat "$out")"
+  fi
+  cursor="$state/.status-presentation-cursor"
+  offset=$(awk -F '\t' '$1 == "budget-3" { print $3 }' "$cursor")
+  [ -z "$offset" ] || [ "$offset" -eq 0 ] \
+    || fail "the deferred status page advanced its cursor to $offset"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while presenting the deferred status page"
+  grep -F 'budget-3 note: budgeted status 3' "$out" >/dev/null \
+    || fail "the deferred status page was not presented later: $(cat "$out")"
+  pass "global status presentation defers pages beyond its byte budget"
 }
 
 test_snapshot_does_not_ack_a_later_append() {
@@ -408,6 +467,8 @@ test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
 test_bounded_signal_annotations_keep_routine_status_unacknowledged
 test_overlong_status_line_advances_without_splitting_later_events
+test_overlong_decision_is_folded_before_its_page_commits
+test_global_status_presentation_defers_pages_after_its_byte_budget
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged

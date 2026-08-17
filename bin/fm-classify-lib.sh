@@ -437,7 +437,7 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=4
+FM_OPEN_DECISIONS_FOLD_VERSION=5
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -478,9 +478,9 @@ _fm_status_read_span() {  # <status-file> <start-offset> <byte-length>
   ' "$f" "$start" "$length"
 }
 
-status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
-  local f=$1 captured_end=${2:-} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
-  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0
+status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>] [<overlong-start-offset>] [<overlong-line>]
+  local f=$1 captured_end=${2:-} overlong_start=${3:-} overlong_line=${4:-false} cf offset ident open='' trusted_open='' cursor_data first rest offset_line ident_line
+  local version='' size actual_size cur_ident resolve held chunk_file chunk_size line cursor_dirty=0 prefix_size
   local target_cursor
   [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 0
   cf=$(_fm_open_decisions_cursor_path "$f")
@@ -545,6 +545,9 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
   else
     size=$actual_size
   fi
+  case "$overlong_line" in true|false) ;; *) printf '%s' "$trusted_open"; return 0 ;; esac
+  case "$overlong_start" in '') overlong_start=$size ;; *[!0-9]*) printf '%s' "$trusted_open"; return 0 ;; esac
+  [ "$overlong_start" -le "$size" ] || { printf '%s' "$trusted_open"; return 0; }
 
   if [ -z "$version" ] || [ -z "$ident" ] || [ "$ident" != "$cur_ident" ] || [ "$offset" -gt "$actual_size" ]; then
     offset=0
@@ -553,7 +556,32 @@ status_open_decisions_incremental() {  # <status-file> [<captured-end-offset>]
     cursor_dirty=1
   fi
 
-  if [ "$offset" -lt "$size" ]; then
+  if [ "$overlong_line" = true ] && [ "$offset" -le "$overlong_start" ] && [ "$overlong_start" -lt "$size" ]; then
+    if [ "$offset" -lt "$overlong_start" ]; then
+      chunk_file="$cf.read.$$"
+      _fm_status_read_span "$f" "$offset" "$((overlong_start - offset))" > "$chunk_file" 2>/dev/null \
+        || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+      resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+      held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+      while IFS= read -r line || [ -n "$line" ]; do
+        open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+      done < "$chunk_file"
+      rm -f "$chunk_file"
+    fi
+    prefix_size=$((size - overlong_start))
+    [ "$prefix_size" -le 7500 ] || prefix_size=7500
+    chunk_file="$cf.read.$$"
+    _fm_status_read_span "$f" "$overlong_start" "$prefix_size" > "$chunk_file" 2>/dev/null \
+      || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
+    resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
+    held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
+    while IFS= read -r line || [ -n "$line" ]; do
+      open=$(_fm_decision_fold_line "$open" "$line" "$resolve" "$held")
+    done < "$chunk_file"
+    rm -f "$chunk_file"
+    offset=$size
+    cursor_dirty=1
+  elif [ "$offset" -lt "$size" ]; then
     chunk_file="$cf.read.$$"
     _fm_status_read_span "$f" "$offset" "$((size - offset))" > "$chunk_file" 2>/dev/null \
       || { rm -f "$chunk_file"; printf '%s' "$trusted_open"; return 0; }
@@ -692,7 +720,7 @@ EOF
 
 status_presentation_page_snapshot() {  # <state> <snapshot>
   local state=$1 snapshot=$2 task endpoint ident f offset page page_data page_ident=''
-  local page_base='' page_end='' page_next='' page_scan='' page_limit=8192 page_overlong=false page_skip=false
+  local page_base='' page_end='' page_next='' page_scan='' page_limit=7500 page_overlong=false page_skip=false
   while IFS=$(printf '\t') read -r task endpoint ident; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
@@ -750,6 +778,28 @@ EOF
     page_skip=$FM_STATUS_PAGE_SKIP_LINE
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$task" "$endpoint" "$ident" "$page_next" "$page_end" "$page_overlong" "$FM_STATUS_PAGE_SCAN_NEXT" "$page_skip" || return 1
+  done <<EOF
+$snapshot
+EOF
+}
+
+status_presentation_page_limit() {  # <page-snapshot>
+  local snapshot=$1 task endpoint ident page_start page_end page_overlong page_scan page_skip
+  local global_bytes=7500 task_limit=8 used=0 shown=0 page_bytes visible
+  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip; do
+    [ -n "$task" ] || continue
+    case "$endpoint:$page_start:$page_scan" in *[!0-9:]*) return 1 ;; esac
+    page_bytes=$((endpoint - page_start))
+    if [ "$page_overlong" = true ]; then page_bytes=$((page_scan - page_start)); fi
+    if [ "$page_skip" = true ]; then page_bytes=0; fi
+    visible=false
+    if [ "$shown" -lt "$task_limit" ] && [ $((used + page_bytes)) -le "$global_bytes" ]; then
+      visible=true
+      used=$((used + page_bytes))
+      shown=$((shown + 1))
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$task" "$endpoint" "$ident" "$page_start" "$page_end" "$page_overlong" "$page_scan" "$page_skip" "$visible" || return 1
   done <<EOF
 $snapshot
 EOF
@@ -865,9 +915,9 @@ EOF
 }
 
 status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<presented-task-ids>]
-  local state=$1 snapshot=$2 presented=${3:-} task endpoint ident page_start page_end page_overlong page_scan page_skip
+  local state=$1 snapshot=$2 presented=${3:-} task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible
   local f offset lines line safe next scan main_endpoint
-  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip; do
+  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible; do
     [ -n "$task" ] || continue
     f="$state/$task.status"
     offset=$(status_presentation_cursor_offset "$f") || return 1
@@ -877,6 +927,16 @@ status_acknowledge_presented_snapshot() {  # <state> <snapshot> [<presented-task
     case "$endpoint:$page_start:$page_end:$page_scan" in *[!0-9:]*) return 1 ;; esac
     [ "$page_start" -le "$endpoint" ] && [ "$endpoint" -le "$page_end" ] \
       && [ "$page_start" -le "$page_scan" ] && [ "$page_scan" -le "$page_end" ] || return 1
+    case "$page_visible" in
+      ''|true) ;;
+      false)
+        scan=$page_start
+        if [ "$page_overlong" = true ]; then scan=$page_scan; fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$task" "$offset" "$ident" "$page_start" "$scan" || return 1
+        continue
+        ;;
+      *) return 1 ;;
+    esac
     safe=false
     case "
 $presented
@@ -916,11 +976,12 @@ EOF
 }
 
 status_commit_presentation_snapshot() {  # <state> <snapshot>
-  local state=$1 snapshot=$2 task endpoint ident page_next f cur_ident size tmp
+  local state=$1 snapshot=$2 task endpoint ident page_next page_scan extra f cur_ident size tmp
   tmp="$state/.status-presentation-cursor.tmp.$$"
   : > "$tmp" || return 1
-  while IFS=$(printf '\t') read -r task endpoint ident page_next; do
+  while IFS=$(printf '\t') read -r task endpoint ident page_next page_scan extra; do
     [ -n "$task" ] || continue
+    [ -z "$extra" ] || { rm -f "$tmp"; return 1; }
     case "$endpoint" in ''|*[!0-9]*) rm -f "$tmp"; return 1 ;; esac
     [ -n "$ident" ] || { rm -f "$tmp"; return 1; }
     f="$state/$task.status"
@@ -940,9 +1001,9 @@ EOF
 }
 
 status_commit_presentation_pages() {  # <state> <page-snapshot> <acknowledged-snapshot>
-  local state=$1 snapshot=$2 acknowledged=$3 task endpoint ident page_start page_end page_overlong page_scan page_skip
+  local state=$1 snapshot=$2 acknowledged=$3 task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible
   local ack_task ack_endpoint ack_ident next scan page tmp
-  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip; do
+  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible; do
     [ -n "$task" ] || continue
     next=$page_start
     scan=$page_start
@@ -973,12 +1034,12 @@ EOF
 }
 
 scan_open_decisions_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip f open line
-  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip; do
+  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible f open line
+  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible; do
     [ -n "$task" ] || continue
-    [ "$page_skip" != true ] || continue
+    [ "$page_visible" != false ] || continue
     f="$state/$task.status"
-    open=$(status_open_decisions_incremental "$f" "$endpoint") || return 1
+    open=$(status_open_decisions_incremental "$f" "$endpoint" "$page_start" "$page_skip") || return 1
     [ -n "$open" ] || continue
     while IFS= read -r line; do
       [ -n "$line" ] || continue
@@ -1164,9 +1225,10 @@ EOF
 }
 
 scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip f lines line
-  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip; do
+  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible f lines line
+  while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible; do
     [ -n "$task" ] || continue
+    [ "$page_visible" != false ] || continue
     [ "$page_skip" != true ] || continue
     f="$state/$task.status"
     lines=$(status_new_lines_since_cursor "$f" "$endpoint" "$page_start") || return 1

@@ -1230,7 +1230,7 @@ fm_wake_latest_event() {  # <validated-status-path> <tail-byte-cap>
 # raw queue consumption and released the append lock.
 fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local rows=$1 snapshot=${2:-} manifest status_key mode path prefix line task endpoint
-  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line event_rc snapshot_skip=false
+  local snapshot_task snapshot_endpoint _snapshot_ident offset last_event event_line event_rc snapshot_skip=false snapshot_visible=true
   local output='' used=0 omitted=0 read_omitted=0 task_complete line_bytes
   local read_bytes=8192 line_cap=8 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0 marker_reserve=256
   local LC_ALL=C
@@ -1286,7 +1286,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end snapshot_overlong _snapshot_scan snapshot_skip; do
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end snapshot_overlong _snapshot_scan snapshot_skip snapshot_visible; do
         if [ "$snapshot_task" = "$task" ]; then
           endpoint=$snapshot_endpoint
           [ -z "$snapshot_start" ] || offset=$snapshot_start
@@ -1297,6 +1297,7 @@ $snapshot
 EOF
       [ -n "$endpoint" ] || continue
     fi
+    [ "${snapshot_visible:-true}" != false ] || continue
     if [ "${snapshot_skip:-false}" = true ]; then
       if [ "$mode" = direct ]; then
         task=${status_key%.status}

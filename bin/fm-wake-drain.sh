@@ -190,6 +190,7 @@ print_status_presentation() {  # [<deduped-raw-rows>]
   snapshot=$(status_presentation_snapshot "$STATE") || rc=1
   if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
     page_snapshot=$(status_presentation_page_snapshot "$STATE" "$snapshot") || rc=1
+    if [ "$rc" -eq 0 ]; then page_snapshot=$(status_presentation_page_limit "$page_snapshot") || rc=1; fi
   fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
     fm_wake_print_annotations "$rows" "$page_snapshot" || rc=1

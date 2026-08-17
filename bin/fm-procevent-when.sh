@@ -376,8 +376,11 @@ cmd_run() {
         "the condition never held for $SPEC_STABLE consecutive polls within ${SPEC_DEADLINE}s of arming" "$polls" '' ''
       exit 0
     fi
-    bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"
-    rc=$?
+    if bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"; then
+      rc=0
+    else
+      rc=$?
+    fi
     polls=$((polls + 1))
     now=$(date +%s)
     if [ $(( now - SPEC_ARMED )) -ge "$SPEC_DEADLINE" ]; then
@@ -433,8 +436,11 @@ cmd_run() {
     exit 0
   fi
 
-  bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"
-  rc=$?
+  if bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"; then
+    rc=0
+  else
+    rc=$?
+  fi
   if [ "$rc" -eq 0 ]; then
     emit_doc "$sid" fired "the condition held and the action exited 0" "$polls" "$rc" "$out"
   else
