@@ -851,8 +851,9 @@ test_dashboard_recovery_defers_preflight_approval() {
 
 test_dashboard_recovery_relaunches_dead_endpoint() {
   local home="$TMP_ROOT/dashboard-recovery-dead" state_bin="$TMP_ROOT/dashboard-recovery-dead-state" agent_bin="$TMP_ROOT/dashboard-recovery-dead-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-dead-spawn"
-  mkdir -p "$home/data" "$home/state"
-  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-dead.meta"
+  mkdir -p "$home/data" "$home/state/dashboard-transitions"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' 'dashboard_incarnation=i-current' > "$home/state/dash-dead.meta"
+  printf '%s\n' '{"schema_version":1,"id":"dash-dead","incarnation":"i-prior","state":"done","transition_at":100,"active_seconds":1}' > "$home/state/dashboard-transitions/dash-dead.json"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
   # shellcheck disable=SC2016 # Positional parameters expand in the generated spawn fixture.
@@ -862,6 +863,25 @@ test_dashboard_recovery_relaunches_dead_endpoint() {
     || fail "dead endpoint recovery did not relaunch"
   [ ! -e "$home/state/dashboard-recovery/dash-dead.json" ] || fail "successful dead-endpoint relaunch left a recovery failure"
   pass "dashboard relaunches a confirmed dead endpoint"
+}
+
+test_dashboard_recovery_preserves_terminal_transition() {
+  local home="$TMP_ROOT/dashboard-recovery-terminal" state_bin="$TMP_ROOT/dashboard-recovery-terminal-state" agent_bin="$TMP_ROOT/dashboard-recovery-terminal-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-terminal-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-terminal-spawn-log" record
+  mkdir -p "$home/data" "$home/state/dashboard-transitions"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' 'dashboard_incarnation=i-terminal' > "$home/state/dash-terminal.meta"
+  record="$home/state/dashboard-transitions/dash-terminal.json"
+  printf '%s\n' '{"schema_version":1,"id":"dash-terminal","incarnation":"i-terminal","state":"done","transition_at":100,"active_seconds":1}' > "$record"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-terminal \
+    || fail "terminal recovery check failed"
+  [ ! -e "$spawn_log" ] || fail "terminal dashboard transition launched a replacement"
+  jq -e '.state == "done" and .incarnation == "i-terminal" and .transition_at == 100' "$record" >/dev/null \
+    || fail "terminal dashboard transition was overwritten"
+  [ ! -e "$home/state/dashboard-recovery/dash-terminal.json" ] || fail "terminal dashboard transition recorded a recovery failure"
+  pass "dashboard preserves a terminal task instead of relaunching it"
 }
 
 test_dashboard_recovery_defers_control_lock_contention() {
@@ -1041,6 +1061,7 @@ test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_relaunches_dead_endpoint
+test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_defers_control_lock_contention
 test_dashboard_recovery_rechecks_eligibility_under_lock
 test_missing_recovery_control_lock_is_retryable

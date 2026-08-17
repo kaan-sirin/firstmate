@@ -864,6 +864,30 @@ test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record() {
   pass "fm-spawn --relaunch: legacy ships remain recoverable without workflow records"
 }
 
+test_fast_repair_relaunch_refuses_before_stopping_anything() {
+  local dir out rc before_meta before_brief meta
+  dir=$(new_case fast-repair rl11b)
+  add_ship_task "$dir" rl11b claude
+  meta="$dir/home/state/rl11b.meta"
+  sed 's/^mode=no-mistakes$/mode=fast-repair/' "$meta" > "$meta.tmp" \
+    && mv "$meta.tmp" "$meta" || fail "could not prepare a legacy Fast Repair task"
+  before_meta=$(cat "$meta")
+  before_brief=$(cat "$dir/home/data/rl11b/brief.md")
+
+  out=$(run_control "$dir" rl11b relaunch --note "x"); rc=$?
+  expect_code 1 "$rc" "a legacy Fast Repair relaunch should refuse"
+  assert_contains "$out" "uses the removed fast-repair delivery mode" \
+    "the relaunch refusal did not name the removed delivery mode"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a rejected Fast Repair relaunch must not stop the agent"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "a rejected Fast Repair relaunch must send no exit command"
+  [ "$before_meta" = "$(cat "$meta")" ] || fail "a rejected Fast Repair relaunch changed task metadata"
+  [ "$before_brief" = "$(cat "$dir/home/data/rl11b/brief.md")" ] \
+    || fail "a rejected Fast Repair relaunch changed task instructions"
+  [ ! -e "$dir/home/state/rl11b.control-relaunch" ] \
+    || fail "a rejected Fast Repair relaunch recorded a checkpoint transaction"
+  pass "fm-control relaunch: Fast Repair refuses before checkpoint and exit"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1378,6 +1402,7 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record
+test_fast_repair_relaunch_refuses_before_stopping_anything
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

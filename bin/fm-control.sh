@@ -766,10 +766,13 @@ record_note() {
 }
 
 do_relaunch() {
-  local exit_result state note_line
+  local exit_result state note_line mode
   local -a spawn_args
 
   require_state_verified_backend relaunch
+  mode=$(fm_meta_get "$META" mode)
+  [ "$mode" != fast-repair ] \
+    || die "task $ID uses the removed fast-repair delivery mode and cannot relaunch"
   resolve_relaunch_profile
 
   case "$KIND" in
