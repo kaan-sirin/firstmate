@@ -100,6 +100,13 @@ usage() { sed -n '2,72p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; exit 2; }
 spec_file()  { printf '%s/%s.spec\n' "$WHEN_DIR" "$1"; }
 trust_file() { printf '%s/%s.trust\n' "$WHEN_DIR" "$1"; }
 fired_file() { printf '%s/%s.fired\n' "$WHEN_DIR" "$1"; }
+command_snapshot_file() { printf '%s/%s.%s.command\n' "$WHEN_DIR" "$1" "$2"; }
+interpreter_snapshot_file() { printf '%s/%s.%s.interpreter\n' "$WHEN_DIR" "$1" "$2"; }
+
+remove_command_snapshots() {
+  rm -f -- "$(command_snapshot_file "$1" condition)" "$(interpreter_snapshot_file "$1" condition)" \
+    "$(command_snapshot_file "$1" action)" "$(interpreter_snapshot_file "$1" action)"
+}
 
 when_name_valid() {
   local name=${1-}
@@ -198,6 +205,28 @@ command_bytes_match() {  # <absolute-command-path> <registered-sha256>
   [ "$actual" = "$expected" ]
 }
 
+stage_private_command() {  # <source> <sha256> <destination> <device>
+  local source=$1 expected=$2 destination=$3 device=$4 tmp actual
+  fm_pr_regular_destination_on_device_or_absent "$destination" "$device" || return 1
+  tmp=$(umask 077; mktemp "$WHEN_DIR/.command.XXXXXX") || return 1
+  cp -- "$source" "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 0500 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  actual=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; return 1; }
+  [ "$actual" = "$expected" ] || { rm -f -- "$tmp"; return 1; }
+  mv -f -- "$tmp" "$destination" || { rm -f -- "$tmp"; return 1; }
+  fm_pr_private_file_valid "$destination" 500 "$device"
+}
+
+command_snapshots_match() {  # <source-id> <condition|action> <command-sha256> <interpreter-sha256-or-dash>
+  local sid=$1 role=$2 command_hash=$3 interpreter_hash=$4 device
+  device=$(fm_pr_file_device "$WHEN_DIR") || return 1
+  fm_pr_private_file_valid "$(command_snapshot_file "$sid" "$role")" 500 "$device" \
+    && command_bytes_match "$(command_snapshot_file "$sid" "$role")" "$command_hash" || return 1
+  [ "$interpreter_hash" = - ] && return 0
+  fm_pr_private_file_valid "$(interpreter_snapshot_file "$sid" "$role")" 500 "$device" \
+    && command_bytes_match "$(interpreter_snapshot_file "$sid" "$role")" "$interpreter_hash"
+}
+
 script_interpreter_binding() {  # <command-path>
   local command=$1 line interpreter_literal interpreter_target interpreter_path interpreter_hash
   COMMAND_INTERPRETER_LITERAL_PATH=-
@@ -287,6 +316,8 @@ cmd_arm() {
   trap 'fm_procevent_source_lock_release "$sid"' EXIT
   local leftover
   for leftover in "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")" \
+    "$(command_snapshot_file "$sid" condition)" "$(interpreter_snapshot_file "$sid" condition)" \
+    "$(command_snapshot_file "$sid" action)" "$(interpreter_snapshot_file "$sid" action)" \
     "$(fm_procevent_registry_dir "$STATE")/$sid.source"; do
     if [ -e "$leftover" ] || [ -L "$leftover" ]; then
       die "watch already exists or left state behind: $leftover (retire it first)"
@@ -298,7 +329,7 @@ cmd_arm() {
 
   (umask 077; mkdir -p "$WHEN_DIR") || die "cannot create the watch directory"
   [ -d "$WHEN_DIR" ] && [ ! -L "$WHEN_DIR" ] || die "watch directory is unavailable"
-  local tmp trust_tmp hash device condition_path condition_hash condition_interpreter_literal_path condition_interpreter_literal_target condition_interpreter_path condition_interpreter_hash action_path action_hash action_interpreter_literal_path action_interpreter_literal_target action_interpreter_path action_interpreter_hash
+  local tmp trust_tmp hash device stage_failed=0 condition_path condition_hash condition_interpreter_literal_path condition_interpreter_literal_target condition_interpreter_path condition_interpreter_hash action_path action_hash action_interpreter_literal_path action_interpreter_literal_target action_interpreter_path action_interpreter_hash
   condition_path=$(command_executable "${cond[0]}") || die "condition executable is unavailable: ${cond[0]}"
   command_is_interpreter "$condition_path" \
     && die "condition interpreter command forms are not supported; execute the approved script directly"
@@ -324,7 +355,15 @@ cmd_arm() {
   action_interpreter_hash=$COMMAND_INTERPRETER_SHA256
   act[0]=$action_path
   device=$(fm_pr_file_device "$WHEN_DIR") || die "cannot inspect the watch directory"
-  tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || die "cannot stage the spec"
+  stage_private_command "$condition_path" "$condition_hash" "$(command_snapshot_file "$sid" condition)" "$device" || stage_failed=1
+  [ "$condition_interpreter_hash" = - ] || stage_private_command "$condition_interpreter_path" "$condition_interpreter_hash" "$(interpreter_snapshot_file "$sid" condition)" "$device" || stage_failed=1
+  stage_private_command "$action_path" "$action_hash" "$(command_snapshot_file "$sid" action)" "$device" || stage_failed=1
+  [ "$action_interpreter_hash" = - ] || stage_private_command "$action_interpreter_path" "$action_interpreter_hash" "$(interpreter_snapshot_file "$sid" action)" "$device" || stage_failed=1
+  if [ "$stage_failed" -ne 0 ]; then
+    remove_command_snapshots "$sid"
+    die "cannot stage immutable command copies"
+  fi
+  tmp=$(umask 077; mktemp "$WHEN_DIR/.spec.XXXXXX") || { remove_command_snapshots "$sid"; die "cannot stage the spec"; }
   {
     printf 'fm-when-spec-v1\n'
     printf 'armed=%s\n' "$(date +%s)"
@@ -349,23 +388,25 @@ cmd_arm() {
     printf 'argv:\n'
     printf '%s\n' "${cond[@]}"
     printf '%s\n' "${act[@]}"
-  } > "$tmp" || { rm -f -- "$tmp"; die "cannot write the spec"; }
-  chmod 0600 "$tmp" || { rm -f -- "$tmp"; die "cannot secure the spec"; }
-  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; die "cannot hash the spec"; }
-  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; die "cannot stage the trust record"; }
-  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot write the trust record"; }
-  chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot secure the trust record"; }
-  mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; die "cannot publish the spec"; }
-  mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; die "cannot publish the trust record"; }
+  } > "$tmp" || { rm -f -- "$tmp"; remove_command_snapshots "$sid"; die "cannot write the spec"; }
+  chmod 0600 "$tmp" || { rm -f -- "$tmp"; remove_command_snapshots "$sid"; die "cannot secure the spec"; }
+  hash=$(fm_pr_sha256 "$tmp") || { rm -f -- "$tmp"; remove_command_snapshots "$sid"; die "cannot hash the spec"; }
+  trust_tmp=$(umask 077; mktemp "$WHEN_DIR/.trust.XXXXXX") || { rm -f -- "$tmp"; remove_command_snapshots "$sid"; die "cannot stage the trust record"; }
+  printf 'fm-when-trust-v1\n%s\n' "$hash" > "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; remove_command_snapshots "$sid"; die "cannot write the trust record"; }
+  chmod 0600 "$trust_tmp" || { rm -f -- "$tmp" "$trust_tmp"; remove_command_snapshots "$sid"; die "cannot secure the trust record"; }
+  mv -f -- "$tmp" "$(spec_file "$sid")" || { rm -f -- "$tmp" "$trust_tmp"; remove_command_snapshots "$sid"; die "cannot publish the spec"; }
+  mv -f -- "$trust_tmp" "$(trust_file "$sid")" || { rm -f -- "$(spec_file "$sid")" "$trust_tmp"; remove_command_snapshots "$sid"; die "cannot publish the trust record"; }
   if ! fm_pr_private_file_valid "$(spec_file "$sid")" 600 "$device" \
     || ! fm_pr_private_file_valid "$(trust_file "$sid")" 600 "$device"; then
     rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
+    remove_command_snapshots "$sid"
     die "published spec failed validation"
   fi
 
   if ! fm_procevent_registration_publish_locked "$STATE" when "$sid" \
     "$SCRIPT_DIR/fm-procevent-when.sh" run "$sid"; then
     rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")"
+    remove_command_snapshots "$sid"
     die "cannot register the watch source"
   fi
   fm_procevent_source_lock_release "$sid"
@@ -484,6 +525,19 @@ bounded_run() {
   return "$rc"
 }
 
+bounded_snapshot_run() {  # <source-id> <condition|action> <interpreter-sha256-or-dash> <timeout-secs> <output-file> <argv>...
+  local sid=$1 role=$2 interpreter_hash=$3 secs=$4 out=$5
+  local -a argv
+  shift 5
+  argv=("$@")
+  argv[0]=$(command_snapshot_file "$sid" "$role")
+  if [ "$interpreter_hash" = - ]; then
+    bounded_run "$secs" "$out" "${argv[@]}"
+  else
+    bounded_run "$secs" "$out" "$(interpreter_snapshot_file "$sid" "$role")" "${argv[@]}"
+  fi
+}
+
 # emit_doc <source-id> <status> <detail> <polls> <action-exit-or-empty> <output-file-or-empty>
 # The single stdout writer of `run`: everything the generic runner captures.
 emit_doc() {
@@ -546,7 +600,12 @@ cmd_run() {
         "refused without executing the condition: its script interpreter does not match the registered trust binding" "$polls" '' ''
       exit 0
     fi
-    if bounded_run "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"; then
+    if ! command_snapshots_match "$sid" condition "$SPEC_CONDITION_SHA256" "$SPEC_CONDITION_INTERPRETER_SHA256"; then
+      emit_doc "$sid" rejected \
+        "refused without executing the condition: its immutable command copy does not match the registered trust binding" "$polls" '' ''
+      exit 0
+    fi
+    if bounded_snapshot_run "$sid" condition "$SPEC_CONDITION_INTERPRETER_SHA256" "$SPEC_CONDITION_TIMEOUT" "$out" "${COND_ARGV[@]}"; then
       rc=0
     else
       rc=$?
@@ -600,6 +659,11 @@ cmd_run() {
       "refused without executing the action: its script interpreter does not match the registered trust binding" "$polls" '' ''
     exit 0
   fi
+  if ! command_snapshots_match "$sid" action "$SPEC_ACTION_SHA256" "$SPEC_ACTION_INTERPRETER_SHA256"; then
+    emit_doc "$sid" rejected \
+      "refused without executing the action: its immutable command copy does not match the registered trust binding" "$polls" '' ''
+    exit 0
+  fi
 
   # Claim the fire durably and exclusively BEFORE the action, so no restart or
   # concurrent runner can ever run the action a second time.
@@ -609,7 +673,7 @@ cmd_run() {
     exit 0
   fi
 
-  if bounded_run "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"; then
+  if bounded_snapshot_run "$sid" action "$SPEC_ACTION_INTERPRETER_SHA256" "$SPEC_ACTION_TIMEOUT" "$out" "${ACT_ARGV[@]}"; then
     rc=0
   else
     rc=$?
@@ -668,6 +732,7 @@ cmd_retire() {
   fi
   "$SCRIPT_DIR/fm-procevent.sh" retire "$sid" || die "cannot retire the watch source: $sid"
   rm -f -- "$(spec_file "$sid")" "$(trust_file "$sid")" "$(fired_file "$sid")"
+  remove_command_snapshots "$sid"
   printf 'retired: %s\n' "$sid"
 }
 

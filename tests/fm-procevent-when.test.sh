@@ -100,6 +100,8 @@ out=$(when "$H" arm arm-test --interval 0.1 \
 assert_contains "$out" "armed: when-arm-test" "arm reports the canonical source id"
 assert_present "$H/state/when/when-arm-test.spec" "arm writes the private spec"
 assert_present "$H/state/when/when-arm-test.trust" "arm writes the trust binding"
+assert_present "$H/state/when/when-arm-test.condition.command" "arm stages the private condition copy"
+assert_present "$H/state/when/when-arm-test.action.command" "arm stages the private action copy"
 assert_present "$H/state/procevent/when-arm-test.source" "arm registers the process-event source"
 mode=$(PATH="${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}" bash -c \
   '. "$1/bin/fm-pr-lib.sh"; fm_pr_file_mode "$2"' _ "$ROOT" "$H/state/when/when-arm-test.spec")
@@ -114,6 +116,8 @@ out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire reports the source"
 assert_absent "$H/state/when/when-arm-test.spec" "retire removes the spec"
 assert_absent "$H/state/when/when-arm-test.trust" "retire removes the trust binding"
+assert_absent "$H/state/when/when-arm-test.condition.command" "retire removes the condition copy"
+assert_absent "$H/state/when/when-arm-test.action.command" "retire removes the action copy"
 assert_absent "$H/state/procevent/when-arm-test.source" "retire drops the registration"
 out=$(when "$H" retire arm-test)
 assert_contains "$out" "retired: when-arm-test" "retire is idempotent"
@@ -676,5 +680,42 @@ assert_grep 'trust binding' "$RESULT" "the refusal names the action trust bindin
 assert_absent "$ACTION_TAMPER_LOG" "the mutated action was not executed"
 assert_absent "$H/state/when/when-action-tamper.fired" "no fire was claimed for mutated action bytes"
 pass "mutated action bytes are refused before claiming the fire"
+
+H="$TMP_ROOT/h-action-race"; new_home "$H"
+RACE_ACTION="$TMP_ROOT/race-action.sh"
+RACE_EVIL="$TMP_ROOT/race-action-evil.sh"
+RACE_LOG="$TMP_ROOT/race-action.log"
+RACE_SHA_BIN="$TMP_ROOT/race-sha-bin"
+REAL_SHASUM=$(type -P shasum)
+cat > "$RACE_ACTION" <<'SH'
+#!/bin/bash
+printf 'registered action ran\n' >> "$1"
+SH
+cat > "$RACE_EVIL" <<'SH'
+#!/bin/bash
+printf 'replacement action ran\n' >> "$1"
+SH
+chmod +x "$RACE_ACTION" "$RACE_EVIL"
+mkdir -p "$RACE_SHA_BIN"
+cat > "$RACE_SHA_BIN/shasum" <<'SH'
+#!/bin/bash
+last=${!#}
+"$REAL_SHASUM" "$@"
+if [ "$last" = "$RACE_ACTION" ]; then
+  cp "$RACE_EVIL" "$RACE_ACTION"
+  chmod +x "$RACE_ACTION"
+fi
+SH
+chmod +x "$RACE_SHA_BIN/shasum"
+when "$H" arm action-race --stable 1 --condition true --action "$RACE_ACTION" "$RACE_LOG" >/dev/null
+export RACE_ACTION RACE_EVIL REAL_SHASUM
+PATH="$RACE_SHA_BIN:$PATH" pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-action-race || fail "no outcome was captured for the action replacement race"
+RESULT=$(first_result "$H" when-action-race)
+assert_grep 'status: fired' "$RESULT" "the verified action copy still fires"
+assert_grep 'registered action ran' "$RACE_LOG" "the registered action copy ran"
+assert_not_contains "$(cat "$RACE_LOG")" 'replacement action ran' \
+  "the replacement action did not run after verification"
+pass "action execution uses the verified private copy"
 
 printf 'all fm-procevent-when tests passed\n'
