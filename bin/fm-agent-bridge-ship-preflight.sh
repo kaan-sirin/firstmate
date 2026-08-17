@@ -29,6 +29,23 @@ valid_private_dir() {
   case "$group$other" in *[2367]*) return 1 ;; esac
 }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
+recover_claim() {
+  local claim
+  local -a claims
+  shopt -s nullglob
+  claims=("$HANDOFF_DIR/.${ID}.claim."*)
+  shopt -u nullglob
+  [ "${#claims[@]}" -le 1 ] || die "multiple private bridge handoff claims"
+  [ "${#claims[@]}" -eq 1 ] || return 0
+  claim=${claims[0]}
+  valid_private_file "$claim" || die "invalid private bridge handoff claim"
+  if [ -e "$HANDOFF" ] || [ -L "$HANDOFF" ]; then
+    valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
+  elif ! ln "$claim" "$HANDOFF"; then
+    valid_private_file "$HANDOFF" || die "could not recover private bridge handoff"
+  fi
+  rm -f -- "$claim" || die "could not recover private bridge handoff"
+}
 
 [ "${1:-}" = publish ] && [ "$#" = 2 ] || { usage >&2; exit 2; }
 ID=$2
@@ -40,6 +57,7 @@ if ! valid_private_dir "$BRIDGE_ROOT" || ! valid_private_dir "$HANDOFF_DIR"; the
   die "unsafe bridge handoff directory"
 fi
 HANDOFF="$HANDOFF_DIR/$ID.json"
+recover_claim
 valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
 
 valid_private_dir "$DATA" || die "unsafe task record directory"

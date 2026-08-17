@@ -313,6 +313,23 @@ SH
   pass "bridge preserves a newer handoff published during record creation"
 }
 
+test_bridge_recovers_a_claim_after_interruption() {
+  local home="$TMP_ROOT/bridge-claim-recovery" id=claim-recovery-a1 contract="$TMP_ROOT/bridge-claim-recovery-contract.json" handoff claim
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  write_bridge_handoff "$home" "$id" "$contract" direct approved 100 >/dev/null || fail "could not prepare interrupted bridge handoff"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  claim="${handoff%/*}/.${id}.claim.interrupted"
+  mv -f -- "$handoff" "$claim" || fail "could not stage interrupted bridge claim"
+  assert_absent "$home/data/$id/ship-preflight.json" "interruption published a preflight record"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not recover its interrupted claim"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "recovered bridge handoff did not publish its original record"
+  assert_absent "$home/state/agent-bridge/ship-preflight/$id.json" "recovered bridge handoff remained pending"
+  assert_absent "$claim" "recovered bridge claim remained stranded"
+  pass "bridge recovers a claimed handoff after interruption"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -845,6 +862,7 @@ test_preflight_rejects_tampering_and_future_approvals
 test_preflight_rejects_cross_task_records
 test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_bridge_claims_a_handoff_before_reading_it
+test_bridge_recovers_a_claim_after_interruption
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
