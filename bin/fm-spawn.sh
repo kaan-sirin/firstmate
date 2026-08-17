@@ -701,8 +701,8 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 spawn_busy_event() {
-  if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
-    FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 "$FM_ROOT/bin/fm-busy-event.sh" "$@"
+  if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+    FM_DASHBOARD_TRANSITION_DEFER=1 "$FM_ROOT/bin/fm-busy-event.sh" "$@"
   else
     "$FM_ROOT/bin/fm-busy-event.sh" "$@"
   fi
@@ -2426,31 +2426,6 @@ mkdir -p "$TASK_TMP/gotmp"
 mkdir -p "$STATE"
 STATE_REAL=$(cd "$STATE" && pwd -P)
 TURNEND="$STATE_REAL/$ID.turn-ended"
-if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
-  RECOVERY_CLAIM_LOCK="$STATE/dashboard-transitions/$ID.lock"
-  fm_lock_acquire_wait "$RECOVERY_CLAIM_LOCK"
-  RECOVERY_CLAIM_LOCK_HELD=1
-  claim_path="$STATE/dashboard-transitions/$ID.recovery-claim"
-  claim_incarnation=$(sed -n 's/^incarnation=//p' "$claim_path" 2>/dev/null | tail -1)
-  claim_value=$(sed -n 's/^claim=//p' "$claim_path" 2>/dev/null | tail -1)
-  current_incarnation=$(fm_meta_get "$STATE/$ID.meta" dashboard_incarnation)
-  case "$current_incarnation" in ''|*[!A-Za-z0-9._-]*) current_incarnation="legacy-$ID" ;; esac
-  terminal_state=$(jq -r '.state // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
-  terminal_incarnation=$(jq -r '.incarnation // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
-  terminal_line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
-  terminal_verb=${terminal_line%%:*}
-  terminal_verb=${terminal_verb%%\[*}
-  terminal_verb=${terminal_verb#"${terminal_verb%%[![:space:]]*}"}
-  terminal_verb=${terminal_verb%"${terminal_verb##*[![:space:]]}"}
-  if [ "$claim_value" != "$FM_DASHBOARD_RECOVERY_CLAIM" ] \
-     || [ "$claim_incarnation" != "$current_incarnation" ] \
-     || { [ "$terminal_incarnation" = "$current_incarnation" ] && { [ "$terminal_state" = done ] || [ "$terminal_state" = failed ]; }; } \
-     || [ "$terminal_verb" = done ] || [ "$terminal_verb" = failed ]; then
-    echo "error: dashboard recovery claim for $ID is no longer valid" >&2
-    exit 4
-  fi
-  RECOVERY_CLAIM_VALUE=$claim_value
-fi
 exclude_path() {
   local rel=$1 EXCL
   EXCL=$(git -C "$WT" rev-parse --git-path info/exclude 2>/dev/null || true)
@@ -2891,7 +2866,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
-if [ "$RECOVERY_CLAIM_LOCK_HELD" != 1 ]; then
+if [ "$DASHBOARD_RECOVERY" -eq 0 ] || [ -z "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
   "$SCRIPT_DIR/fm-dashboard-transition.sh" replay-busy "$STATE" "$ID" || {
     echo "error: could not publish dashboard timing for $ID" >&2
     exit 1
@@ -3040,6 +3015,34 @@ sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
+fi
+if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+  RECOVERY_CLAIM_LOCK="$STATE/dashboard-transitions/$ID.lock"
+  fm_lock_acquire_wait "$RECOVERY_CLAIM_LOCK" || {
+    echo "error: could not acquire dashboard recovery claim for $ID" >&2
+    exit 1
+  }
+  RECOVERY_CLAIM_LOCK_HELD=1
+  claim_path="$STATE/dashboard-transitions/$ID.recovery-claim"
+  claim_incarnation=$(sed -n 's/^incarnation=//p' "$claim_path" 2>/dev/null | tail -1)
+  claim_value=$(sed -n 's/^claim=//p' "$claim_path" 2>/dev/null | tail -1)
+  current_incarnation=$(fm_meta_get "$STATE/$ID.meta" dashboard_incarnation)
+  case "$current_incarnation" in ''|*[!A-Za-z0-9._-]*) current_incarnation="legacy-$ID" ;; esac
+  terminal_state=$(jq -r '.state // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_incarnation=$(jq -r '.incarnation // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
+  terminal_verb=${terminal_line%%:*}
+  terminal_verb=${terminal_verb%%\[*}
+  terminal_verb=${terminal_verb#"${terminal_verb%%[![:space:]]*}"}
+  terminal_verb=${terminal_verb%"${terminal_verb##*[![:space:]]}"}
+  if [ "$claim_value" != "$FM_DASHBOARD_RECOVERY_CLAIM" ] \
+     || [ "$claim_incarnation" != "$current_incarnation" ] \
+     || { [ "$terminal_incarnation" = "$current_incarnation" ] && { [ "$terminal_state" = done ] || [ "$terminal_state" = failed ]; }; } \
+     || [ "$terminal_verb" = done ] || [ "$terminal_verb" = failed ]; then
+    echo "error: dashboard recovery claim for $ID is no longer valid" >&2
+    exit 4
+  fi
+  RECOVERY_CLAIM_VALUE=$claim_value
 fi
 if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
   recovery_working_status=0

@@ -129,6 +129,24 @@ SH
   chmod +x "$fb/sleep"
 }
 
+make_recovery_busy_probe() {  # <case-dir>
+  local root="$1/fm-root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-busy-event.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = apply ] && [ "${10:-}" = replacement-start ]; then
+  if [ -d "$2/dashboard-transitions/$3.lock" ]; then
+    printf 'locked\n' > "$FM_BUSY_LOCK_PROBE"
+  else
+    printf 'unlocked\n' > "$FM_BUSY_LOCK_PROBE"
+  fi
+fi
+exec "$FM_REAL_BUSY_EVENT" "$@"
+SH
+  chmod +x "$root/bin/fm-busy-event.sh"
+}
+
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
 new_case() {
   local id=${2:-t1} dir="$TMP_ROOT/$1-$RANDOM"
@@ -1302,19 +1320,25 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
 }
 
 test_dashboard_recovery_marks_launch_before_submit() {
-  local dir id claim out rc state
+  local dir id claim out rc state root busy_probe
   id=rl41
   dir=$(new_case dashboard-launch "$id")
   add_ship_task "$dir" "$id" claude
   printf 'dashboard_incarnation=i-dashboard-launch\n' >> "$dir/home/state/$id.meta"
   printf 'zsh' > "$dir/fake/command"
+  make_recovery_busy_probe "$dir"
+  root="$dir/fm-root"
+  busy_probe="$dir/fake/busy-lock-at-replacement-start"
   claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
     || fail "dashboard recovery claim was not created"
-  out=$(FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+  out=$(FM_ROOT_OVERRIDE="$root" FM_REAL_BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
+    FM_BUSY_LOCK_PROBE="$busy_probe" FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
     FM_FAKE_DASHBOARD_STATE="$dir/home/state/dashboard-transitions/$id.json" \
     run_spawn "$dir" "$id" --relaunch --dashboard-recovery --harness claude)
   rc=$?
   expect_code 0 "$rc" "dashboard recovery relaunch should succeed"
+  [ "$(cat "$busy_probe")" = unlocked ] \
+    || fail "dashboard recovery held the transition lock while applying busy state"
   state=$(cat "$dir/fake/dashboard-state-on-enter")
   [ "$state" = working ] || fail "dashboard recovery submitted a launch before recording working state"
   pass "fm-spawn dashboard recovery records launch state before submit"
