@@ -528,6 +528,23 @@ assert_absent "$SHEBANG_CONDITION_LOG" "the changed condition interpreter was no
 assert_absent "$SHEBANG_CONDITION_ACTION" "a changed condition interpreter never reaches the action"
 pass "changed shebang interpreters are refused before execution"
 
+H="$TMP_ROOT/h-shebang-symlink"; new_home "$H"
+SHEBANG_SYMLINK_RUNNER="$TMP_ROOT/shebang-symlink-runner"
+SHEBANG_SYMLINK_ACTION="$TMP_ROOT/shebang-symlink-action.sh"
+SHEBANG_SYMLINK_LOG="$TMP_ROOT/shebang-symlink.log"
+ln -s /bin/sh "$SHEBANG_SYMLINK_RUNNER"
+printf '#!%s\nprintf "registered symlink action ran\\n" >> "$1"\n' "$SHEBANG_SYMLINK_RUNNER" > "$SHEBANG_SYMLINK_ACTION"
+chmod +x "$SHEBANG_SYMLINK_ACTION"
+when "$H" arm shebang-symlink --stable 1 --condition true \
+  --action "$SHEBANG_SYMLINK_ACTION" "$SHEBANG_SYMLINK_LOG" >/dev/null
+ln -sfn /bin/false "$SHEBANG_SYMLINK_RUNNER"
+pe "$H" reconcile >/dev/null
+wait_for_result "$H" when-shebang-symlink || fail "no outcome was captured for the retargeted shebang symlink"
+RESULT=$(first_result "$H" when-shebang-symlink)
+assert_grep 'status: rejected' "$RESULT" "a retargeted shebang symlink is rejected"
+assert_absent "$SHEBANG_SYMLINK_LOG" "the retargeted shebang symlink was not executed"
+pass "retargeted shebang symlinks are refused before execution"
+
 # --- mutated condition bytes are refused before the next poll ----------------
 H="$TMP_ROOT/h-condition-tamper"; new_home "$H"
 CONDITION_TAMPER_LOG="$TMP_ROOT/condition-tamper-act"
