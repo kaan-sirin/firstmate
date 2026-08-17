@@ -104,6 +104,7 @@ STATE="$REC_DIR" FM_STATE_OVERRIDE="$REC_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$REC_DIR/.ship-preflight.lock"
 fm_lock_acquire_wait "$LOCK" || die "could not lock preflight record"
 CLAIM=
+TMP=
 VALIDATION_DATA=
 restore_claim() {
   [ -f "$CLAIM" ] && [ -s "$CLAIM" ] || return 0
@@ -117,6 +118,7 @@ cleanup() {
   trap - EXIT
   [ "$status" -eq 0 ] || restore_claim
   [ -z "$VALIDATION_DATA" ] || rm -rf -- "$VALIDATION_DATA" || true
+  [ -z "$TMP" ] || rm -f -- "$TMP" || true
   [ ! -f "$CLAIM" ] || [ -s "$CLAIM" ] || rm -f -- "$CLAIM" 2>/dev/null || true
   fm_lock_release "$LOCK" || true
   exit "$status"

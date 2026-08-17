@@ -491,6 +491,8 @@ test_bridge_rejects_stale_producer_revisions() {
   assert_contains "$out" "does not advance" "stale producer handoff refusal was unclear"
   jq -e --arg fp "$corrected_fp" '.producer_revision == 2 and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
     || fail "stale producer handoff changed the durable preflight"
+  find "$home/data/$id" -maxdepth 1 -type f -name '.ship-preflight.*' | grep -q . \
+    && fail "stale producer handoff left an unpublished preflight record"
   out=$(preflight_env "$home" 101 verify-recovery "$id" --fingerprint "$original_fp" 2>&1)
   status=$?
   expect_code 4 "$status" "recovery accepted the delayed producer approval"
@@ -503,6 +505,8 @@ test_bridge_rejects_stale_producer_revisions() {
   assert_contains "$out" "producer revision is malformed" "malformed producer revision refusal was unclear"
   jq -e --arg fp "$corrected_fp" '.producer_revision == 2 and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
     || fail "malformed producer revision changed the durable preflight"
+  find "$home/data/$id" -maxdepth 1 -type f -name '.ship-preflight.*' | grep -q . \
+    && fail "malformed producer revision left an unpublished preflight record"
   pass "bridge preserves corrections against stale producer revisions"
 }
 

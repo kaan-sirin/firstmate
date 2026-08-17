@@ -9,7 +9,8 @@
 #   fm-ship-end-to-end.sh validate <task-id>
 #
 # The record is data/<task-id>/ship-preflight.json, mode 0600. Its schema is
-# `{schema_version,workflow,task_id,fingerprint,origin,state,contract,created_at|approval}`.
+# `{schema_version,workflow,task_id,fingerprint,origin,state,contract,producer_revision,created_at|approval}`.
+# Bridge-published records require a positive integer producer_revision that advances each record.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
