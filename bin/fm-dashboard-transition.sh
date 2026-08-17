@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
+  echo "       fm-dashboard-transition.sh recovery-unknown <state-dir> <task-id> <epoch>" >&2
   echo "       fm-dashboard-transition.sh barrier <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown>" >&2
   echo "       fm-dashboard-transition.sh append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
   echo "       fm-dashboard-transition.sh resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
@@ -21,6 +22,8 @@ ID=${3:-}
 case "$ID" in ''|*[!A-Za-z0-9._-]*) usage ;; esac
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 if [ "$ACTION" = replay-busy ]; then
   # shellcheck source=bin/fm-busy-lib.sh
   . "$SCRIPT_DIR/fm-busy-lib.sh"
@@ -34,10 +37,14 @@ if [ "$ACTION" = replay-busy ]; then
   esac
   exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
 fi
-[ "$ACTION" = record ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
+[ "$ACTION" = record ] || [ "$ACTION" = recovery-unknown ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
 if [ "$ACTION" = barrier ]; then
   CURRENT=${4:-}
   AT=
+  LINE=
+elif [ "$ACTION" = recovery-unknown ]; then
+  CURRENT=unknown
+  AT=${4:-}
   LINE=
 elif [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   CURRENT=working
@@ -50,6 +57,7 @@ else
 fi
 case "$ACTION:$CURRENT" in
   record:working|record:parked|record:paused|record:blocked|record:failed|record:done|record:unknown) ;;
+  recovery-unknown:unknown) ;;
   barrier:working|barrier:parked|barrier:paused|barrier:blocked|barrier:failed|barrier:done|barrier:unknown) ;;
   append:|append:working|append:parked|append:paused|append:blocked|append:failed|append:done|append:unknown) ;;
   self-append:|self-append:working|self-append:parked|self-append:paused|self-append:blocked|self-append:failed|self-append:done|self-append:unknown) ;;
@@ -101,6 +109,17 @@ if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ -f "$RECORD" ] && [ ! -L "$RECO
 fi
 case "$prior_at" in ''|*[!0-9]*) prior_at= ;; esac
 case "$prior_active" in ''|*[!0-9]*) prior_active=0 ;; esac
+terminal_status_receipt() {
+  local line
+  [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] || return 1
+  line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
+  case "$(status_line_verb "$line")" in done|failed) return 0 ;; esac
+  return 1
+}
+if [ "$ACTION" = recovery-unknown ]; then
+  case "$prior_state" in done|failed) exit 3 ;; esac
+  terminal_status_receipt && exit 3
+fi
 if [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   case "$prior_state" in done|failed) CURRENT= ;; esac
 fi

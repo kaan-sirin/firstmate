@@ -36,20 +36,6 @@ trap cleanup EXIT HUP INT TERM
 STATE_BIN=${FM_DASHBOARD_RECOVERY_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$STATE_BIN" "$ID" 2>/dev/null || true)
 case "$line" in state:\ unknown\ *) ;; *) exit 0 ;; esac
-terminal_transition_recorded() {
-  local record expected_incarnation terminal_state terminal_incarnation
-  record="$STATE/dashboard-transitions/$ID.json"
-  [ -f "$record" ] && [ ! -L "$record" ] || return 1
-  expected_incarnation=$(fm_meta_get "$META" dashboard_incarnation)
-  case "$expected_incarnation" in ''|*[!A-Za-z0-9._-]*) expected_incarnation="legacy-$ID" ;; esac
-  IFS=$'\t' read -r terminal_state terminal_incarnation < <(
-    jq -r '[(.state // "" | tostring),(.incarnation // "" | tostring)] | @tsv' "$record" 2>/dev/null || true
-  ) || return 1
-  [ "$terminal_incarnation" = "$expected_incarnation" ] || return 1
-  case "$terminal_state" in done|failed) return 0 ;; esac
-  return 1
-}
-terminal_transition_recorded && exit 0
 backend=$(fm_backend_of_meta "$META")
 target=$(fm_backend_target_of_meta "$META")
 [ -n "$target" ] || exit 0
@@ -62,7 +48,13 @@ fi
 case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
 recovery_at=$(date +%s)
 case "$recovery_at" in ''|*[!0-9]*) exit 1 ;; esac
-"$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" unknown "$recovery_at"
+transition_status=0
+"$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-unknown "$STATE" "$ID" "$recovery_at" || transition_status=$?
+case "$transition_status" in
+  0) ;;
+  3) exit 0 ;;
+  *) exit "$transition_status" ;;
+esac
 RECORD="$DIR/$ID.json"
 attempts=0
 prior_state=
