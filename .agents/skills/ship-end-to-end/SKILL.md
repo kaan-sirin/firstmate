@@ -1,7 +1,7 @@
 ---
 name: ship-end-to-end
 description: >-
-  Run FirstMate's approved two-phase end-to-end software shipping workflow. Use before dispatching a direct or Relay-originated software ship task: one read-only preflight, one explicit approval, then autonomous implementation, review, CI, and a PR.
+  Run FirstMate's approved two-phase end-to-end software shipping workflow. Use before dispatching a direct or Relay-originated software ship task: one read-only preflight, one explicit approval, then autonomous execution through the selected delivery path.
 metadata:
   internal: true
 ---
@@ -38,7 +38,7 @@ The durable preflight record declares this workflow. On initial dispatch, `fm-sp
 
 Then execute autonomously in an isolated worktree.
 Keep normal engineering choices inside the approved contract.
-Use the already selected delivery mode, yolo posture, review path, tests, CI monitoring, and PR flow.
+Use the already selected delivery mode and its review, test, CI-monitoring, and delivery steps.
 Do not merge.
 
 Ask again only for a new authority requirement, serious irreversible risk, agreed-outcome change, or a security, privacy, legal, or data-loss decision.
