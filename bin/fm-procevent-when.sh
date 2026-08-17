@@ -121,17 +121,25 @@ positive_number() {
   [ "$n" != 0 ] && [[ ! "$n" =~ ^0+(\.0+)?$ ]]
 }
 
-command_executable() {  # <argv-zero>: print the executable's absolute path
-  local command=$1 found dir base
+command_executable() {  # <argv-zero>: print the executable's canonical path
+  local command=$1 found dir base target
   case "$command" in
     */*) found=$command ;;
     *) found=$(type -P -- "$command") || return 1 ;;
   esac
-  dir=${found%/*}
-  base=${found##*/}
-  [ "$dir" != "$found" ] || dir=.
-  dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
-  found="$dir/$base"
+  while :; do
+    dir=${found%/*}
+    base=${found##*/}
+    [ "$dir" != "$found" ] || dir=.
+    dir=$(cd "$dir" 2>/dev/null && pwd -P) || return 1
+    found="$dir/$base"
+    [ -L "$found" ] || break
+    target=$(readlink "$found") || return 1
+    case "$target" in
+      /*) found=$target ;;
+      *) found="$dir/$target" ;;
+    esac
+  done
   [ -f "$found" ] && [ -x "$found" ] || return 1
   printf '%s\n' "$found"
 }

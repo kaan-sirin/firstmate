@@ -401,6 +401,16 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the action refusal explains the safe invocation form"
 assert_absent "$H/state/procevent/when-interpreter-action.source" \
   "a refused action command form is never registered"
+INTERPRETER_LINK="$TMP_ROOT/approved-runner"
+ln -s /bin/sh "$INTERPRETER_LINK"
+if when "$H" arm interpreter-symlink --condition true --action "$INTERPRETER_LINK" "$INTERPRETED" "$TMP_ROOT/interpreter-symlink-act" \
+  >"$TMP_ROOT/interpreter-symlink.out" 2>"$TMP_ROOT/interpreter-symlink.err"; then
+  fail "a symlink to an interpreter command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-symlink.err" \
+  "the symlink target is classified as an interpreter"
+assert_absent "$H/state/procevent/when-interpreter-symlink.source" \
+  "an interpreter symlink command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 # --- mutated condition bytes are refused before the next poll ----------------
