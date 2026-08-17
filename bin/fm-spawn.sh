@@ -295,6 +295,7 @@ YOLO_SET=0
 TRACEPARENT_SET=0
 RELAUNCH=0
 RECOVER_MISSING=0
+DASHBOARD_RECOVERY=0
 POS=()
 want_value=
 for a in "$@"; do
@@ -320,6 +321,7 @@ for a in "$@"; do
     --secondmate) KIND=secondmate; KIND_SET=1 ;;
     --relaunch) RELAUNCH=1 ;;
     --recover-missing) RECOVER_MISSING=1 ;;
+    --dashboard-recovery) DASHBOARD_RECOVERY=1 ;;
     --harness) want_value=harness ;;
     --harness=*) HARNESS_ARG=${a#--harness=}; HARNESS_SET=1 ;;
     --model) want_value=model ;;
@@ -1733,42 +1735,41 @@ if [ "$KIND" = ship ]; then
     echo "error: delivery mismatch for $ID: the brief says mode=$BRIEF_MODE but this spawn passed --mode $MODE; correct the flag or re-scaffold the brief so the worker's instructions and the task record agree" >&2
     exit 1
   fi
-  if [ "$MODE" = fast-repair ]; then
-    "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" >/dev/null || {
-      echo "error: Fast Repair spawn refused because its typed eligibility evidence is absent or incomplete; use the normal delivery path" >&2
-      exit 1
-    }
-    if [ "${RAW_LAUNCH:-0}" = 1 ] || [ "$HARNESS" != codex ] || [ "$MODEL" != gpt-5.6-luna ] || [ "$EFFORT" != medium ]; then
-      echo "error: Fast Repair requires the built-in profile --harness codex --model gpt-5.6-luna --effort medium; an explicit conflicting per-task profile is not overridden" >&2
-      exit 1
-    fi
-  fi
-  PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
-  [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
-    echo "error: ship preflight record for $ID is missing or unsafe" >&2
-    exit 1
-  }
   if [ "$RELAUNCH" -eq 1 ]; then
     PREFLIGHT_FINGERPRINT=$(fm_meta_get "$RELAUNCH_META" preflight_fingerprint)
+    if [ -n "$PREFLIGHT_FINGERPRINT" ]; then
+      case "$PREFLIGHT_FINGERPRINT" in
+        ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+        *) false ;;
+      esac || {
+        echo "error: task $ID has no valid recorded preflight fingerprint" >&2
+        exit 1
+      }
+      PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+      [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+        echo "error: ship preflight record for $ID is missing or unsafe" >&2
+        exit 1
+      }
+      PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
+    fi
+  else
+    PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+      echo "error: ship preflight record for $ID is missing or unsafe" >&2
+      exit 1
+    }
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
+  fi
+  if [ -n "${PREFLIGHT_RESULT:-}" ]; then
+    PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
     case "$PREFLIGHT_FINGERPRINT" in
       ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
       *) false ;;
     esac || {
-      echo "error: task $ID has no valid recorded preflight fingerprint" >&2
+      echo "error: ship preflight verification returned an invalid fingerprint" >&2
       exit 1
     }
-    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
-  else
-    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-current "$ID") || exit 1
   fi
-  PREFLIGHT_FINGERPRINT=${PREFLIGHT_RESULT#fingerprint=}
-  case "$PREFLIGHT_FINGERPRINT" in
-    ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
-    *) false ;;
-  esac || {
-    echo "error: ship preflight verification returned an invalid fingerprint" >&2
-    exit 1
-  }
   # The registry holds the captain's standing posture, so dropping below it is
   # allowed (a current explicit captain instruction wins) but never silent. An
   # unregistered project resolves to the same no-mistakes standing default, which

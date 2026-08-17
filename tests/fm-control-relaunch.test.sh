@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -118,6 +120,7 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  new-window) printf '@1\n'; exit 0 ;;
 esac
 exit 0
 SH
@@ -893,6 +896,24 @@ test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record() {
   pass "fm-spawn --relaunch: legacy ships remain recoverable without workflow records"
 }
 
+test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record() {
+  local dir out rc meta
+  dir=$(new_case legacy-missing-preflight rl37)
+  add_ship_task "$dir" rl37 claude
+  meta="$dir/home/state/rl37.meta"
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl37 --recover-missing); rc=$?
+  expect_code 0 "$rc" "a legacy ship missing-endpoint recovery without a workflow record should continue"
+  assert_contains "$out" "spawned rl37 harness=claude" \
+    "legacy missing-endpoint recovery did not launch the recorded worker"
+  [ ! -e "$dir/home/data/rl37/ship-preflight.json" ] \
+    || fail "legacy missing-endpoint recovery must not invent a ship workflow record"
+  ! grep -q '^preflight_fingerprint=' "$meta" \
+    || fail "legacy missing-endpoint recovery must not invent a preflight fingerprint"
+  pass "fm-spawn --recover-missing: legacy ships remain recoverable without workflow records"
+}
+
 test_fast_repair_relaunch_refuses_before_stopping_anything() {
   local dir out rc before_meta before_brief meta
   dir=$(new_case fast-repair rl11b)
@@ -1461,6 +1482,7 @@ test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record
+test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record
 test_fast_repair_relaunch_refuses_before_stopping_anything
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
