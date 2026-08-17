@@ -21,7 +21,8 @@
 #            unbound script cannot be supplied as an argument. The runner
 #            refuses a mutated spec or command without executing it. Both argv
 #            vectors are executed directly with no shell, so nothing is
-#            re-split or interpreted.
+#            re-split or interpreted. Native commands must have no arguments;
+#            use an approved direct script when a native command needs them.
 #            Options, before --condition:
 #              --interval <secs>           poll cadence, decimals allowed (default 60)
 #              --stable <n>                consecutive true polls required to fire (default 2)

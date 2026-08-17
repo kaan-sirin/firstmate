@@ -519,6 +519,22 @@ assert_absent "$H/state/procevent/when-interpreter-off-path-copy.source" \
   "an off-path renamed interpreter command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
+# --- native commands have no argument vector --------------------------------
+H="$TMP_ROOT/h-native-argv"; new_home "$H"
+when "$H" arm native-zero --condition true --action true >/dev/null
+assert_present "$H/state/procevent/when-native-zero.source" \
+  "a zero-argument native command can register"
+when "$H" retire native-zero >/dev/null
+if when "$H" arm native-argv --condition true --action true --help \
+  >"$TMP_ROOT/native-argv.out" 2>"$TMP_ROOT/native-argv.err"; then
+  fail "a native command with arguments must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/native-argv.err" \
+  "the native argument refusal directs callers to a direct script"
+assert_absent "$H/state/procevent/when-native-argv.source" \
+  "a native command with arguments is never registered"
+pass "native commands accept no arguments"
+
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
 CYCLE_A="$TMP_ROOT/cycle-a"
 CYCLE_B="$TMP_ROOT/cycle-b"
