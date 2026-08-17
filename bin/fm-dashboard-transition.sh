@@ -102,8 +102,16 @@ else
 fi
 
 LOCK="$DIR/$ID.lock"
-fm_lock_acquire_wait "$LOCK"
-cleanup() { fm_lock_release "$LOCK" || true; }
+LOCK_HELD=0
+if [ "${FM_DASHBOARD_RECOVERY_TRANSITION_LOCK:-0}" = 1 ]; then
+  [ "$ACTION" = recovery-working ] || exit 1
+else
+  fm_lock_acquire_wait "$LOCK"
+  LOCK_HELD=1
+fi
+cleanup() {
+  [ "$LOCK_HELD" = 1 ] && fm_lock_release "$LOCK" || true
+}
 trap cleanup EXIT HUP INT TERM
 
 RECORD="$DIR/$ID.json"

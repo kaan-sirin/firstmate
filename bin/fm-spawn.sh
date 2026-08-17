@@ -3041,6 +3041,16 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+  recovery_working_status=0
+  FM_DASHBOARD_RECOVERY_TRANSITION_LOCK=1 \
+    "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$(date +%s)" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
+  case "$recovery_working_status" in
+    0) ;;
+    3) exit 4 ;;
+    *) echo "error: could not publish dashboard recovery launch for $ID" >&2; exit 1 ;;
+  esac
+fi
 spawn_send_key "$T" Enter
 if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
   RECOVERY_CLAIM_LOCK_HELD=0
@@ -3048,12 +3058,6 @@ if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
     echo "error: could not release dashboard recovery claim for $ID" >&2
     exit 1
   }
-  recovery_working_status=0
-  "$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-working "$STATE" "$ID" "$(date +%s)" "$RECOVERY_CLAIM_VALUE" || recovery_working_status=$?
-  case "$recovery_working_status" in
-    0|3) ;;
-    *) echo "error: could not publish dashboard recovery launch for $ID" >&2; exit 1 ;;
-  esac
 fi
 if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
   SPAWN_PREFLIGHT_LOCK_HELD=0

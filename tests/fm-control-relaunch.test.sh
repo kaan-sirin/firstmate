@@ -83,6 +83,11 @@ case "${1:-}" in
     else
       printf '%s\n' "$payload" >> "$D/keys"
       case "$payload" in
+        Enter)
+          if [ -n "${FM_FAKE_DASHBOARD_STATE:-}" ]; then
+            jq -r '.state // "absent"' "$FM_FAKE_DASHBOARD_STATE" > "$D/dashboard-state-on-enter"
+          fi
+          ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
@@ -1296,6 +1301,25 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
 }
 
+test_dashboard_recovery_marks_launch_before_submit() {
+  local dir id claim out rc state
+  id=rl41
+  dir=$(new_case dashboard-launch "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'dashboard_incarnation=i-dashboard-launch\n' >> "$dir/home/state/$id.meta"
+  printf 'zsh' > "$dir/fake/command"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+  out=$(FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+    FM_FAKE_DASHBOARD_STATE="$dir/home/state/dashboard-transitions/$id.json" \
+    run_spawn "$dir" "$id" --relaunch --dashboard-recovery --harness claude)
+  rc=$?
+  expect_code 0 "$rc" "dashboard recovery relaunch should succeed"
+  state=$(cat "$dir/fake/dashboard-state-on-enter")
+  [ "$state" = working ] || fail "dashboard recovery submitted a launch before recording working state"
+  pass "fm-spawn dashboard recovery records launch state before submit"
+}
+
 # shellcheck disable=SC2031
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution() {
   local dir out rc lock holder i=0
@@ -1419,6 +1443,7 @@ test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
+test_dashboard_recovery_marks_launch_before_submit
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags
