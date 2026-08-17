@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Behavior tests for the two-phase ship preflight record and private dashboard.
 set -u
+umask 022
 
 # shellcheck source=tests/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
@@ -328,6 +329,22 @@ test_bridge_recovers_a_claim_after_interruption() {
   assert_absent "$home/state/agent-bridge/ship-preflight/$id.json" "recovered bridge handoff remained pending"
   assert_absent "$claim" "recovered bridge claim remained stranded"
   pass "bridge recovers a claimed handoff after interruption"
+}
+
+test_bridge_recovers_a_hard_linked_claim_after_interruption() {
+  local home="$TMP_ROOT/bridge-hard-link-recovery" id=hard-link-recovery-a1 contract="$TMP_ROOT/bridge-hard-link-recovery-contract.json" handoff claim
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  write_bridge_handoff "$home" "$id" "$contract" direct approved 100 >/dev/null || fail "could not prepare hard-linked bridge handoff"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  claim="${handoff%/*}/.${id}.claim.hard-link"
+  ln "$handoff" "$claim" || fail "could not stage hard-linked interrupted claim"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not recover its hard-linked claim"
+  jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "hard-linked bridge claim did not publish its original record"
+  assert_absent "$claim" "recovered hard-linked bridge claim remained stranded"
+  assert_absent "$handoff" "recovered hard-linked bridge handoff remained pending"
+  pass "bridge recovers a hard-linked claim after interruption"
 }
 
 test_bridge_serializes_concurrent_publish_claims() {
@@ -895,6 +912,17 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
   mkdir -p "$home/data" "$home/state"
   write_snapshot "$mock" working '[]'
   record="$home/data/dashboard.json"
+  chmod 733 "$home/data"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" "$DASHBOARD" show 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "dashboard must reject a writable data directory when reading"
+  assert_contains "$out" "unsafe data directory" "unsafe dashboard read refusal was unclear"
+  out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "dashboard must reject a writable data directory when publishing"
+  assert_contains "$out" "unsafe data directory" "unsafe dashboard publication refusal was unclear"
+  assert_absent "$record" "unsafe dashboard directory received a private record"
+  chmod 755 "$home/data"
   printf '%s\n' '{"schema_version":1,"technical":{"tasks":[]}}' > "$record"
   chmod 644 "$record"
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh 2>&1)
@@ -918,6 +946,7 @@ test_preflight_rejects_cross_task_records
 test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_bridge_claims_a_handoff_before_reading_it
 test_bridge_recovers_a_claim_after_interruption
+test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_serializes_concurrent_publish_claims
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time

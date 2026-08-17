@@ -15,8 +15,10 @@ usage() { sed -n '2,5p' "$0" | sed 's/^# //'; }
 die() { echo "fm-agent-bridge-ship-preflight: $*" >&2; exit 1; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 links_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %l "$1"; else stat -c %h "$1"; fi; }
+inode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %i "$1"; else stat -c %i "$1"; fi; }
 owner_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi; }
-valid_private_file() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ] && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
+valid_private_metadata() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ]; }
+valid_private_file() { valid_private_metadata "$1" && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
 valid_private_dir() {
   local path=$1 mode owner group other
   [ -d "$path" ] && [ ! -L "$path" ] || return 1
@@ -30,7 +32,7 @@ valid_private_dir() {
 }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
 recover_claim() {
-  local claim
+  local claim claim_inode handoff_inode
   local -a claims
   shopt -s nullglob
   claims=("$HANDOFF_DIR/.${ID}.claim."*)
@@ -38,11 +40,22 @@ recover_claim() {
   [ "${#claims[@]}" -le 1 ] || die "multiple private bridge handoff claims"
   [ "${#claims[@]}" -eq 1 ] || return 0
   claim=${claims[0]}
-  valid_private_file "$claim" || die "invalid private bridge handoff claim"
   if [ -e "$HANDOFF" ] || [ -L "$HANDOFF" ]; then
-    valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
-  elif ! ln "$claim" "$HANDOFF"; then
-    valid_private_file "$HANDOFF" || die "could not recover private bridge handoff"
+    claim_inode=$(inode_of "$claim" 2>/dev/null || true)
+    handoff_inode=$(inode_of "$HANDOFF" 2>/dev/null || true)
+    if valid_private_metadata "$claim" && valid_private_metadata "$HANDOFF" \
+      && [ "$(links_of "$claim" 2>/dev/null || true)" = 2 ] \
+      && [ "$(links_of "$HANDOFF" 2>/dev/null || true)" = 2 ] \
+      && [ -n "$claim_inode" ] && [ "$claim_inode" = "$handoff_inode" ]; then
+      rm -f -- "$claim" || die "could not recover private bridge handoff"
+      return 0
+    fi
+    valid_private_file "$claim" && valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
+  else
+    valid_private_file "$claim" || die "invalid private bridge handoff claim"
+    if ! ln "$claim" "$HANDOFF"; then
+      valid_private_file "$HANDOFF" || die "could not recover private bridge handoff"
+    fi
   fi
   rm -f -- "$claim" || die "could not recover private bridge handoff"
 }

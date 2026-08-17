@@ -46,14 +46,29 @@ command -v jq >/dev/null 2>&1 || { echo "fm-dashboard: jq not found" >&2; exit 1
 mode_of() {
   if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi
 }
+owner_of() {
+  if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi
+}
 valid_record() {
   [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ]
 }
+valid_private_data_dir() {
+  local mode owner group other
+  [ -d "$DATA" ] && [ ! -L "$DATA" ] || return 1
+  owner=$(owner_of "$DATA" 2>/dev/null || true)
+  [ "$owner" = "$(id -u)" ] || return 1
+  mode=$(mode_of "$DATA" 2>/dev/null || true)
+  case "$mode" in [0-7][0-7][0-7]) ;; *) return 1 ;; esac
+  group=${mode#?}; group=${group%?}
+  other=${mode#??}
+  case "$group$other" in *[2367]*) return 1 ;; esac
+}
 prepare_data() {
   if [ -e "$DATA" ] || [ -L "$DATA" ]; then
-    [ -d "$DATA" ] && [ ! -L "$DATA" ] || { echo "fm-dashboard: unsafe data directory" >&2; return 1; }
+    valid_private_data_dir || { echo "fm-dashboard: unsafe data directory" >&2; return 1; }
   else
     (umask 077; mkdir -p "$DATA") || return 1
+    valid_private_data_dir || { echo "fm-dashboard: unsafe data directory" >&2; return 1; }
   fi
 }
 
