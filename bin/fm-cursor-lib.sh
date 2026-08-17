@@ -56,7 +56,7 @@ fm_cursor_canonical_path() {  # <path>
   # not guaranteed on macOS, and this needs no new dependency.
   local hops=0 target
   while [ -L "$dir/$base" ] && [ "$hops" -lt 16 ]; do
-    target=$(readlink -- "$dir/$base") || break
+    target=$(readlink "$dir/$base") || break
     case "$target" in
       /*) dir=$(CDPATH='' cd -- "$(dirname -- "$target")" 2>/dev/null && pwd -P) || break
           base=$(basename -- "$target") ;;
@@ -84,14 +84,14 @@ fm_cursor_path_is_cursor() {  # <path>
 # fail-closed: a timeout, a non-zero exit, or output without a Cursor-specific
 # marker is a refusal. Never called during a process scan.
 fm_cursor_bounded_output() {  # <path> <args...>
-  local path=$1 runner=
+  local path=$1
   shift
   [ -n "$path" ] && [ -x "$path" ] || return 1
-  if command -v timeout >/dev/null 2>&1; then runner=timeout
-  elif command -v gtimeout >/dev/null 2>&1; then runner=gtimeout
+  if ! declare -F fm_run_timed >/dev/null 2>&1; then
+    # shellcheck source=bin/fm-timeout-lib.sh
+    . "$(dirname -- "${BASH_SOURCE[0]}")/fm-timeout-lib.sh" || return 1
   fi
-  [ -n "$runner" ] || return 1
-  "$runner" "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
+  fm_run_timed "$FM_CURSOR_PROBE_TIMEOUT" "$path" "$@" 2>/dev/null
 }
 
 fm_cursor_probe_is_cursor() {  # <path>

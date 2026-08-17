@@ -157,6 +157,26 @@ test_resolve_binary_prefers_stable_path() {
   pass "fm_cursor_resolve_binary: prints the stable launcher, not the versioned target"
 }
 
+test_portable_canonicalization_and_probe_timeout() {
+  local tree bin fakebin canonical
+  tree="$TMP_ROOT/tree-portable"; bin=$(make_cursor_tree "$tree")
+  fakebin="$TMP_ROOT/fakebin-portable"; mkdir -p "$fakebin"
+  cat > "$fakebin/readlink" <<'SH'
+#!/bin/sh
+[ "$1" != -- ] || exit 64
+exec /usr/bin/readlink "$@"
+SH
+  chmod +x "$fakebin/readlink"
+
+  canonical=$(PATH="$fakebin:$PATH" fm_cursor_canonical_path "$bin/agent") \
+    || fail "canonicalization must work when readlink rejects GNU's -- argument"
+  [ "$canonical" = "$tree/share/cursor-agent/versions/2026.08.11-e8db854/cursor-agent" ] \
+    || fail "the agent alias must resolve through a portable readlink, got '$canonical'"
+  FM_TIMEOUT_MECHANISM_OVERRIDE=bash fm_cursor_probe_is_cursor "$bin/agent" \
+    || fail "the Cursor help probe must use the shared timeout fallback"
+  pass "Cursor path resolution and help probing work without GNU readlink or timeout"
+}
+
 # --- 2. tmux pane liveness ---------------------------------------------------
 
 test_tmux_classifies_cursor_pane_without_inferring_dead() {
@@ -413,6 +433,7 @@ test_identity_accepts_cursor_shapes_rejects_lookalikes
 test_identity_signals_diverge
 test_verify_executable_refuses_unrelated_agent
 test_resolve_binary_prefers_stable_path
+test_portable_canonicalization_and_probe_timeout
 test_tmux_classifies_cursor_pane_without_inferring_dead
 test_cursor_marker_outranks_inherited_claudecode
 test_harness_ancestry_rejects_cursor_named_node_script
