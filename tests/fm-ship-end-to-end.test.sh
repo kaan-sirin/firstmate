@@ -1038,7 +1038,7 @@ test_dashboard_recovery_surfaces_only_exhausted_loss() {
 }
 
 test_dashboard_recovery_defers_preflight_approval() {
-  local home="$TMP_ROOT/dashboard-recovery-preflight" state_bin="$TMP_ROOT/dashboard-recovery-preflight-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-spawn" record contract fp
+  local home="$TMP_ROOT/dashboard-recovery-preflight" state_bin="$TMP_ROOT/dashboard-recovery-preflight-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-preflight-spawn-log" record contract fp
   mkdir -p "$home/data" "$home/state"
   contract="$home/contract.json"
   make_contract "$contract"
@@ -1046,21 +1046,21 @@ test_dashboard_recovery_defers_preflight_approval() {
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/dash-preflight.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "fm-ship-end-to-end: preflight approval is missing\\n" >&2' 'exit 1' > "$spawn_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 1' > "$spawn_bin"
   chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "initial preflight recovery attempt failed"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "terminal preflight recovery attempt failed"
   record="$home/state/dashboard-recovery/dash-preflight.json"
-  jq -e '.state == "unrecoverable" and .attempts == 2' "$record" >/dev/null || fail "legacy preflight recovery did not become terminal"
-  printf '%s\n' '#!/usr/bin/env bash' 'printf "ship preflight is awaiting approval\\n" >&2' 'exit 4' > "$spawn_bin"
+  FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "awaiting approval recovery must defer"
+  [ ! -e "$record" ] || fail "awaiting approval recorded a recovery attempt"
+  [ ! -e "$spawn_log" ] || fail "awaiting approval launched a replacement"
+  [ ! -e "$home/state/dashboard-transitions/dash-preflight.recovery-claim" ] \
+    || fail "awaiting approval created a recovery claim"
+  fp=$(publish_preflight_record "$home" dash-preflight "$contract" direct approved 101 2) || fail "could not approve preflight"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
   chmod +x "$spawn_bin"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "awaiting approval recovery must defer"
-  jq -e '.state == "pending" and .attempts == 0' "$record" >/dev/null || fail "awaiting approval consumed recovery attempts"
-  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$spawn_bin"
-  chmod +x "$spawn_bin"
-  FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "approved correction did not resume recovery"
-  [ ! -e "$record" ] || fail "approved correction left recovery terminal"
-  pass "dashboard defers corrected preflight recovery without consuming attempts"
+  FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS=2 "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-preflight || fail "approved preflight did not resume recovery"
+  [ "$(cat "$spawn_log")" = invoked ] || fail "approved preflight did not launch recovery"
+  [ ! -e "$record" ] || fail "successful recovery left a failure record"
+  pass "dashboard defers awaiting preflight recovery without consuming attempts"
 }
 
 test_dashboard_recovery_relaunches_dead_endpoint() {

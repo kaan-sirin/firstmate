@@ -46,6 +46,39 @@ else
   agent_state=$(fm_backend_agent_state "$backend" "$target" 2>/dev/null || true)
 fi
 case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
+preflight_awaiting_approval() {
+  local fingerprint rc=0
+  fingerprint=$(fm_meta_get "$META" preflight_fingerprint)
+  [ -n "$fingerprint" ] || return 1
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-recovery "$ID" --fingerprint "$fingerprint" >/dev/null || rc=$?
+  [ "$rc" -eq 4 ]
+}
+RECORD="$DIR/$ID.json"
+attempts=0
+prior_state=
+reason=
+if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
+  IFS=$'\t' read -r prior_state attempts reason < <(jq -r '[.state // "",(.attempts // 0 | tostring),(.reason // "")] | @tsv' "$RECORD" 2>/dev/null || true)
+  case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
+fi
+if preflight_awaiting_approval; then
+  if [ "$prior_state" = unrecoverable ]; then
+    attempts=0
+    prior_state=pending
+    tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
+    if ! jq -n --arg id "$ID" --arg state pending --arg reason "$reason" --argjson attempts 0 --argjson confirmed_at "$(date +%s)" \
+      '{schema_version:1,id:$id,state:$state,attempts:$attempts,confirmed_at:$confirmed_at,reason:$reason}' > "$tmp" \
+      || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
+      rm -f -- "$tmp"
+      exit 1
+    fi
+  fi
+  exit 0
+fi
+if [ "$prior_state" = unrecoverable ]; then
+  exit 0
+fi
 recovery_at=$(date +%s)
 case "$recovery_at" in ''|*[!0-9]*) exit 1 ;; esac
 transition_status=0
@@ -56,30 +89,6 @@ case "$transition_status" in
   *) exit "$transition_status" ;;
 esac
 [ -n "$recovery_claim" ] || exit 1
-RECORD="$DIR/$ID.json"
-attempts=0
-prior_state=
-reason=
-preflight_awaiting_approval() {
-  local fingerprint rc=0
-  fingerprint=$(fm_meta_get "$META" preflight_fingerprint)
-  [ -n "$fingerprint" ] || return 1
-  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
-    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-recovery "$ID" --fingerprint "$fingerprint" >/dev/null || rc=$?
-  [ "$rc" -eq 4 ]
-}
-if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
-  IFS=$'\t' read -r prior_state attempts reason < <(jq -r '[.state // "",(.attempts // 0 | tostring),(.reason // "")] | @tsv' "$RECORD" 2>/dev/null || true)
-  case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
-  if [ "$prior_state" = unrecoverable ]; then
-    if preflight_awaiting_approval; then
-      attempts=0
-      prior_state=pending
-    else
-      exit 0
-    fi
-  fi
-fi
 if [ "$prior_state" = pending ] && [ "$attempts" -eq 0 ] && [ -n "$reason" ]; then
   tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
   if ! jq -n --arg id "$ID" --arg state pending --arg reason "$reason" --argjson attempts 0 --argjson confirmed_at "$(date +%s)" \
