@@ -263,7 +263,7 @@ test_preflight_rejects_cross_task_records() {
   mkdir -p "$home/data/empty-a1"
   chmod 700 "$home/data/empty-a1"
   jq -n --arg id empty-a1 \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:"0000000000000000000000000000000000000000000000000000000000000000",origin:"bridge",state:"approved",contract:{},approval:{authority:"agent-bridge",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$home/data/empty-a1/ship-preflight.json"
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:"0000000000000000000000000000000000000000000000000000000000000000",origin:"bridge",state:"approved",contract:{},producer_revision:1,approval:{authority:"agent-bridge",evidence:"bridge-submission",approved_at:100,complete_plan_bypass:false}}' > "$home/data/empty-a1/ship-preflight.json"
   chmod 600 "$home/data/empty-a1/ship-preflight.json"
   out=$(preflight_env "$home" 101 verify-current empty-a1 2>&1)
   status=$?
@@ -523,7 +523,7 @@ test_bridge_rejects_stale_producer_revisions() {
   out=$(bridge_env "$home" publish "$id" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "a non-integer producer revision was accepted"
-  assert_contains "$out" "producer revision is malformed" "malformed producer revision refusal was unclear"
+  assert_contains "$out" "invalid typed private bridge handoff" "malformed producer revision refusal was unclear"
   jq -e --arg fp "$corrected_fp" '.producer_revision == 2 and .state == "awaiting_approval" and .fingerprint == $fp' "$home/data/$id/ship-preflight.json" >/dev/null \
     || fail "malformed producer revision changed the durable preflight"
   find "$home/data/$id" -maxdepth 1 -type f -name '.ship-preflight.*' | grep -q . \
