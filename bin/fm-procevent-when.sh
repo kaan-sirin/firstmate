@@ -148,7 +148,7 @@ command_executable() {  # <argv-zero>: print the executable's canonical path
 
 interpreter_name() {
   case "$1" in
-    sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi)
+    sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi|make|gmake|bmake)
       return 0
       ;;
     *) return 1 ;;
@@ -161,7 +161,7 @@ INTERPRETER_CANDIDATES=()
 interpreter_candidates_load() {
   local known candidate false_path
   [ "$INTERPRETER_CANDIDATES_READY" -eq 0 ] || return 0
-  INTERPRETER_CANDIDATES=(/bin/sh /bin/bash /bin/dash /usr/bin/awk /usr/bin/gawk /usr/bin/mawk /usr/bin/nawk)
+  INTERPRETER_CANDIDATES=(/bin/sh /bin/bash /bin/dash /usr/bin/awk /usr/bin/gawk /usr/bin/mawk /usr/bin/nawk /bin/make /usr/bin/make /usr/local/bin/make)
   false_path=$(type -P false 2>/dev/null || true)
   while IFS= read -r known; do
     interpreter_name "$known" || continue

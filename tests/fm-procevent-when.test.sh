@@ -435,6 +435,26 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the copied non-shell interpreter is classified by its executable identity"
 assert_absent "$H/state/procevent/when-interpreter-awk-copy.source" \
   "a copied non-shell interpreter command form is never registered"
+MAKE_BIN_DIR="$TMP_ROOT/make-bin"
+MAKEFILE="$TMP_ROOT/mutable.mk"
+RENAMED_MAKE="$TMP_ROOT/approved-runner-make-copy"
+mkdir -p "$MAKE_BIN_DIR"
+cat > "$MAKE_BIN_DIR/make" <<'SH'
+#!/usr/bin/env bash
+exit 0
+SH
+chmod +x "$MAKE_BIN_DIR/make"
+printf 'all:\n\t@true\n' > "$MAKEFILE"
+cp "$MAKE_BIN_DIR/make" "$RENAMED_MAKE"
+chmod +x "$RENAMED_MAKE"
+if PATH="$MAKE_BIN_DIR:$PATH" when "$H" arm interpreter-make-copy --condition true --action "$RENAMED_MAKE" -f "$MAKEFILE" \
+  >"$TMP_ROOT/interpreter-make-copy.out" 2>"$TMP_ROOT/interpreter-make-copy.err"; then
+  fail "a renamed make command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-make-copy.err" \
+  "the copied make executable is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-make-copy.source" \
+  "a copied make command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"
