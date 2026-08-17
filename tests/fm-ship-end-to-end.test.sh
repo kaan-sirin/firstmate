@@ -129,6 +129,27 @@ test_preflight_requires_typed_authority_evidence() {
   pass "preflight requires typed authority and bridge evidence"
 }
 
+test_preflight_requires_a_bounded_producer_revision() {
+  local home="$TMP_ROOT/preflight-producer-revision" contract="$TMP_ROOT/preflight-producer-revision-contract.json" out status record valid tmp transform
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  publish_preflight_record "$home" producer-revision-a1 "$contract" direct approved 100 >/dev/null || fail "could not publish approved preflight"
+  record="$home/data/producer-revision-a1/ship-preflight.json"
+  valid="$home/valid-preflight.json"
+  cp "$record" "$valid" || fail "could not preserve valid preflight"
+  for transform in 'del(.producer_revision)' '.producer_revision = 0' '.producer_revision = 2.5' '.producer_revision = 9007199254740992'; do
+    tmp=$(mktemp "$home/data/producer-revision-a1/.producer-revision.XXXXXX") || fail "could not prepare malformed preflight"
+    if ! jq "$transform" "$valid" > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$record"; then
+      fail "could not publish malformed producer revision"
+    fi
+    out=$(preflight_env "$home" 101 verify-current producer-revision-a1 2>&1)
+    status=$?
+    [ "$status" -ne 0 ] || fail "a malformed producer revision authorized fresh dispatch"
+    assert_contains "$out" "malformed preflight record" "malformed producer revision refusal was unclear"
+  done
+  pass "preflight requires a bounded producer revision"
+}
+
 test_grouped_questions_and_bounded_contract() {
   local home="$TMP_ROOT/grouped" contract="$TMP_ROOT/grouped-contract.json" out status
   mkdir -p "$home/data"
@@ -1189,6 +1210,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 
 test_direct_and_bridge_owned_preflight_authority
 test_preflight_requires_typed_authority_evidence
+test_preflight_requires_a_bounded_producer_revision
 test_grouped_questions_and_bounded_contract
 test_correction_bypass_and_stale_refusal
 test_preflight_rejects_tampering_and_future_approvals

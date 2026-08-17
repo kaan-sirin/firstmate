@@ -10,7 +10,7 @@
 #
 # The record is data/<task-id>/ship-preflight.json, mode 0600. Its schema is
 # `{schema_version,workflow,task_id,fingerprint,origin,state,contract,producer_revision,created_at|approval}`.
-# Bridge-published records require a positive integer producer_revision that advances each record.
+# Records require a positive integer producer_revision that advances each bridge publication.
 set -eu
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -102,7 +102,8 @@ read_record() {
     (.fingerprint | type == "string" and test("^[0-9a-f]{64}$")) and
     (.origin == "direct" or .origin == "bridge") and
     (.state == "awaiting_approval" or .state == "approved") and
-    (.contract | type == "object")
+    (.contract | type == "object") and
+    (.producer_revision | type == "number" and floor == . and . >= 1 and . <= 9007199254740991)
   ' "$RECORD" >/dev/null || die "malformed preflight record"
   record_contract=$(jq -cS '.contract' "$RECORD") || die "malformed preflight contract"
   printf '%s\n' "$record_contract" | contract_valid || die "malformed preflight contract"
