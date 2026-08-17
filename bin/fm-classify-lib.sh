@@ -1217,6 +1217,15 @@ status_line_is_unread_surface() {  # <status-line>
   return 1
 }
 
+status_overlong_unread_surface_marker() {  # <status-file> <line-start-offset>
+  local f=$1 start=$2 prefix
+  case "$start" in ''|*[!0-9]*) return 2 ;; esac
+  [ -f "$f" ] && [ -r "$f" ] && [ ! -L "$f" ] || return 2
+  prefix=$(_fm_status_read_span "$f" "$start" 512 2>/dev/null) || return 2
+  status_line_is_unread_surface "$prefix" || return 1
+  printf 'status line exceeds the bounded presentation cap; full text was not printed'
+}
+
 # Fleet-wide unread informational lines: one "<task>\t<status-line>" row per
 # still-unread `note:` or pending-reply resolution, in glob (task id) order.
 # Prints nothing when none are unread. Directory scan rejects status symlinks
@@ -1240,12 +1249,21 @@ EOF
 }
 
 scan_unread_surface_snapshot() {  # <state> <task-and-endpoint-snapshot>
-  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible f lines line
+  local state=$1 snapshot=$2 task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible f lines line marker marker_rc
   while IFS=$(printf '\t') read -r task endpoint ident page_start page_end page_overlong page_scan page_skip page_visible; do
     [ -n "$task" ] || continue
     [ "$page_visible" != false ] || continue
-    [ "$page_skip" != true ] || continue
     f="$state/$task.status"
+    if [ "$page_skip" = true ]; then
+      marker=$(status_overlong_unread_surface_marker "$f" "$page_start")
+      marker_rc=$?
+      case "$marker_rc" in
+        0) printf '%s\t%s\n' "$task" "$marker" || return 1 ;;
+        1) ;;
+        *) return 1 ;;
+      esac
+      continue
+    fi
     lines=$(status_new_lines_since_cursor "$f" "$endpoint" "$page_start") || return 1
     [ -n "$lines" ] || continue
     while IFS= read -r line; do

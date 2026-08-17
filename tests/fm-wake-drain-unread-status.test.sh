@@ -300,6 +300,41 @@ test_overlong_decision_is_folded_before_its_page_commits() {
   pass "a completed overlong decision reaches OPEN DECISIONS"
 }
 
+test_completed_overlong_note_uses_a_bounded_marker() {
+  local dir state out status payload cursor offset
+  dir=$(make_case overlong-note-marker)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-overlong-note.status"
+  payload=$(printf '%09000d' 0)
+  printf 'note: %s\n' "$payload" > "$status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while scanning an overlong note"
+  [ ! -s "$out" ] || fail "an incomplete overlong note was printed: $(cat "$out")"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while completing an overlong note"
+  grep -F 'task-overlong-note status line exceeds the bounded presentation cap; full text was not printed' "$out" >/dev/null \
+    || fail "a completed overlong note had no bounded marker: $(cat "$out")"
+  if grep -F "$payload" "$out" >/dev/null; then
+    fail "a completed overlong note emitted its full text: $(cat "$out")"
+  fi
+  [ "$(wc -c < "$out")" -le 512 ] \
+    || fail "an overlong note marker exceeded its bound: $(wc -c < "$out")"
+  cursor="$state/.status-presentation-cursor"
+  offset=$(awk -F '\t' '$1 == "task-overlong-note" { print $3 }' "$cursor")
+  [ "$offset" -eq "$(wc -c < "$status")" ] \
+    || fail "the bounded marker did not acknowledge the completed note"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed after presenting an overlong note marker"
+  if grep -F 'status line exceeds the bounded presentation cap' "$out" >/dev/null; then
+    fail "an acknowledged overlong note marker was replayed: $(cat "$out")"
+  fi
+  pass "a completed overlong note uses a bounded marker"
+}
+
 test_deferred_overlong_page_keeps_its_completed_line_ready() {
   local dir state out status payload i filler
   dir=$(make_case deferred-overlong-page)
@@ -507,6 +542,7 @@ test_unread_output_over_cap_remains_recoverable
 test_bounded_signal_annotations_keep_routine_status_unacknowledged
 test_overlong_status_line_advances_without_splitting_later_events
 test_overlong_decision_is_folded_before_its_page_commits
+test_completed_overlong_note_uses_a_bounded_marker
 test_deferred_overlong_page_keeps_its_completed_line_ready
 test_global_status_presentation_defers_pages_after_its_byte_budget
 test_snapshot_does_not_ack_a_later_append
