@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Own the durable two-phase approval record for a material software ship task.
-#
 # Usage:
 #   fm-ship-end-to-end.sh verify <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-current <task-id>
