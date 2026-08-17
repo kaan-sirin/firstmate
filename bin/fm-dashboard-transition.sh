@@ -126,8 +126,9 @@ case "$prior_active" in ''|*[!0-9]*) prior_active=0 ;; esac
 terminal_status_receipt() {
   local line
   [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] || return 1
-  line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
-  case "$(status_line_verb "$line")" in done|failed) return 0 ;; esac
+  while IFS= read -r line; do
+    case "$(status_line_verb "$line")" in done|failed) return 0 ;; esac
+  done < <(tail -c 65536 -- "$STATE/$ID.status" 2>/dev/null | tail -n 64)
   return 1
 }
 CLAIM_PATH="$DIR/$ID.recovery-claim"

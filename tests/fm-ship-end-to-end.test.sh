@@ -903,6 +903,25 @@ test_dashboard_recovery_preserves_legacy_terminal_receipt() {
   pass "dashboard preserves a legacy terminal receipt instead of relaunching it"
 }
 
+test_dashboard_recovery_preserves_resolved_legacy_terminal_receipt() {
+  local home="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved" state_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-state" agent_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn-log"
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-legacy-terminal-resolved.meta"
+  printf '%s\n' 'done: legacy task completed' 'resolved [key=review]: captain acknowledged completion' > "$home/state/dash-legacy-terminal-resolved.status"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-legacy-terminal-resolved \
+    || fail "resolved legacy terminal recovery check failed"
+  [ ! -e "$spawn_log" ] || fail "resolved legacy terminal receipt launched a replacement"
+  [ ! -e "$home/state/dashboard-transitions/dash-legacy-terminal-resolved.json" ] \
+    || fail "resolved legacy terminal receipt was overwritten with unknown"
+  [ ! -e "$home/state/dashboard-recovery/dash-legacy-terminal-resolved.json" ] \
+    || fail "resolved legacy terminal receipt recorded a recovery failure"
+  pass "dashboard preserves a resolved legacy terminal receipt instead of relaunching it"
+}
+
 test_terminal_status_cancels_recovery_claim() {
   local home="$TMP_ROOT/dashboard-recovery-claim" claim status
   mkdir -p "$home/data" "$home/state"
@@ -1105,6 +1124,7 @@ test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt
+test_dashboard_recovery_preserves_resolved_legacy_terminal_receipt
 test_terminal_status_cancels_recovery_claim
 test_dashboard_recovery_defers_control_lock_contention
 test_dashboard_recovery_rechecks_eligibility_under_lock
