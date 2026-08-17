@@ -5,7 +5,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
   echo "usage: fm-dashboard-transition.sh record <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown> <epoch>" >&2
-  echo "       fm-dashboard-transition.sh recovery-unknown <state-dir> <task-id> <epoch>" >&2
+  echo "       fm-dashboard-transition.sh recovery-claim <state-dir> <task-id> <epoch>" >&2
+  echo "       fm-dashboard-transition.sh recovery-claim-clear <state-dir> <task-id> <claim>" >&2
   echo "       fm-dashboard-transition.sh barrier <state-dir> <task-id> <working|parked|paused|blocked|failed|done|unknown>" >&2
   echo "       fm-dashboard-transition.sh append <state-dir> <task-id> [state] <epoch> <status-line>" >&2
   echo "       fm-dashboard-transition.sh resolve <state-dir> <task-id> <epoch> <resolved-status-line>" >&2
@@ -37,15 +38,20 @@ if [ "$ACTION" = replay-busy ]; then
   esac
   exec "$0" record "$STATE" "$ID" "$CURRENT" "$busy_at"
 fi
-[ "$ACTION" = record ] || [ "$ACTION" = recovery-unknown ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
+[ "$ACTION" = record ] || [ "$ACTION" = recovery-claim ] || [ "$ACTION" = recovery-claim-clear ] || [ "$ACTION" = barrier ] || [ "$ACTION" = append ] || [ "$ACTION" = resolve ] || [ "$ACTION" = self-append ] || [ "$ACTION" = self-resolve ] || usage
 if [ "$ACTION" = barrier ]; then
   CURRENT=${4:-}
   AT=
   LINE=
-elif [ "$ACTION" = recovery-unknown ]; then
+elif [ "$ACTION" = recovery-claim ]; then
   CURRENT=unknown
   AT=${4:-}
   LINE=
+elif [ "$ACTION" = recovery-claim-clear ]; then
+  CURRENT=
+  AT=
+  LINE=
+  CLAIM=${4:-}
 elif [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   CURRENT=working
   AT=${4:-}
@@ -57,7 +63,8 @@ else
 fi
 case "$ACTION:$CURRENT" in
   record:working|record:parked|record:paused|record:blocked|record:failed|record:done|record:unknown) ;;
-  recovery-unknown:unknown) ;;
+  recovery-claim:unknown) ;;
+  recovery-claim-clear:) ;;
   barrier:working|barrier:parked|barrier:paused|barrier:blocked|barrier:failed|barrier:done|barrier:unknown) ;;
   append:|append:working|append:parked|append:paused|append:blocked|append:failed|append:done|append:unknown) ;;
   self-append:|self-append:working|self-append:parked|self-append:paused|self-append:blocked|self-append:failed|self-append:done|self-append:unknown) ;;
@@ -65,7 +72,7 @@ case "$ACTION:$CURRENT" in
   self-resolve:working) ;;
   *) usage ;;
 esac
-if [ "$ACTION" != barrier ]; then
+if [ "$ACTION" != barrier ] && [ "$ACTION" != recovery-claim-clear ]; then
   case "$AT" in ''|*[!0-9]*) usage ;; esac
 fi
 case "$ACTION" in append|resolve|self-append|self-resolve) [ -n "$LINE" ] || usage ;; esac
@@ -116,7 +123,8 @@ terminal_status_receipt() {
   case "$(status_line_verb "$line")" in done|failed) return 0 ;; esac
   return 1
 }
-if [ "$ACTION" = recovery-unknown ]; then
+CLAIM_PATH="$DIR/$ID.recovery-claim"
+if [ "$ACTION" = recovery-claim ]; then
   case "$prior_state" in done|failed) exit 3 ;; esac
   terminal_status_receipt && exit 3
 fi
@@ -141,6 +149,23 @@ elif [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && { [ "$prior_state" != "$CURRENT
     rm -f -- "$tmp"
     exit 1
   fi
+fi
+if [ "$ACTION" = recovery-claim ]; then
+  CLAIM="r${AT}.${BASHPID:-$$}.${RANDOM}"
+  tmp=$(umask 077; mktemp "$DIR/.${ID}.recovery-claim.XXXXXX")
+  if ! {
+    printf 'incarnation=%s\n' "$incarnation"
+    printf 'claim=%s\n' "$CLAIM"
+  } > "$tmp" || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$CLAIM_PATH"; then
+    rm -f -- "$tmp"
+    exit 1
+  fi
+  printf '%s\n' "$CLAIM"
+elif [ "$ACTION" = recovery-claim-clear ]; then
+  claim=$(sed -n 's/^claim=//p' "$CLAIM_PATH" 2>/dev/null | tail -1)
+  [ "$claim" = "$CLAIM" ] && rm -f -- "$CLAIM_PATH" || true
+else
+  case "$CURRENT" in done|failed) rm -f -- "$CLAIM_PATH" || true ;; esac
 fi
 case "$ACTION" in
   append|resolve)

@@ -903,6 +903,24 @@ test_dashboard_recovery_preserves_legacy_terminal_receipt() {
   pass "dashboard preserves a legacy terminal receipt instead of relaunching it"
 }
 
+test_terminal_status_cancels_recovery_claim() {
+  local home="$TMP_ROOT/dashboard-recovery-claim" claim
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'dashboard_incarnation=i-claim' > "$home/state/dash-claim.meta"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$home/state" dash-claim 100) \
+    || fail "recovery claim was not created"
+  [ -n "$claim" ] || fail "recovery claim did not return an identity"
+  [ -f "$home/state/dashboard-transitions/dash-claim.recovery-claim" ] \
+    || fail "recovery claim was not persisted"
+  "$ROOT/bin/fm-status-event.sh" append "$home/state" dash-claim 'done: terminal writer won' \
+    || fail "terminal status event failed"
+  [ ! -e "$home/state/dashboard-transitions/dash-claim.recovery-claim" ] \
+    || fail "terminal status event did not cancel the recovery claim"
+  jq -e '.state == "done"' "$home/state/dashboard-transitions/dash-claim.json" >/dev/null \
+    || fail "terminal status event did not persist its transition"
+  pass "terminal status writer cancels a pending recovery launch"
+}
+
 test_dashboard_recovery_defers_control_lock_contention() {
   local home="$TMP_ROOT/dashboard-recovery-contention" state_bin="$TMP_ROOT/dashboard-recovery-contention-state" agent_bin="$TMP_ROOT/dashboard-recovery-contention-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-contention-spawn" record
   mkdir -p "$home/data" "$home/state"
@@ -1082,6 +1100,7 @@ test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt
+test_terminal_status_cancels_recovery_claim
 test_dashboard_recovery_defers_control_lock_contention
 test_dashboard_recovery_rechecks_eligibility_under_lock
 test_missing_recovery_control_lock_is_retryable

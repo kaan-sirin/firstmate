@@ -49,12 +49,13 @@ case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
 recovery_at=$(date +%s)
 case "$recovery_at" in ''|*[!0-9]*) exit 1 ;; esac
 transition_status=0
-"$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-unknown "$STATE" "$ID" "$recovery_at" || transition_status=$?
+recovery_claim=$("$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-claim "$STATE" "$ID" "$recovery_at") || transition_status=$?
 case "$transition_status" in
   0) ;;
   3) exit 0 ;;
   *) exit "$transition_status" ;;
 esac
+[ -n "$recovery_claim" ] || exit 1
 RECORD="$DIR/$ID.json"
 attempts=0
 prior_state=
@@ -93,8 +94,9 @@ case "$agent_state" in
   dead) recovery_action=--relaunch ;;
   missing) recovery_action=--recover-missing ;;
 esac
-out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
+out=$(FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
 recovery_status=${recovery_status:-0}
+"$SCRIPT_DIR/fm-dashboard-transition.sh" recovery-claim-clear "$STATE" "$ID" "$recovery_claim" >/dev/null 2>&1 || true
 if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"
   exit 0

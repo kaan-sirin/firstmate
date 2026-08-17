@@ -694,6 +694,8 @@ RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
 RELAUNCH_REPLACEMENT_STATE=
 RELAUNCH_REPLACEMENT_WT=
+RECOVERY_CLAIM_LOCK=
+RECOVERY_CLAIM_LOCK_HELD=0
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
@@ -716,6 +718,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+    RECOVERY_CLAIM_LOCK_HELD=0
+    fm_lock_release "$RECOVERY_CLAIM_LOCK" || true
+  fi
   if [ "$RECOVERY_ENDPOINT_PENDING" = 1 ] && [ "${BACKEND:-}" = tmux ] && [ -n "${T:-}" ]; then
     fm_backend_kill tmux "$T" 2>/dev/null || true
   fi
@@ -2988,6 +2994,30 @@ if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
     exit 1
   }
 fi
+if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
+  RECOVERY_CLAIM_LOCK="$STATE/dashboard-transitions/$ID.lock"
+  fm_lock_acquire_wait "$RECOVERY_CLAIM_LOCK"
+  RECOVERY_CLAIM_LOCK_HELD=1
+  claim_path="$STATE/dashboard-transitions/$ID.recovery-claim"
+  claim_incarnation=$(sed -n 's/^incarnation=//p' "$claim_path" 2>/dev/null | tail -1)
+  claim_value=$(sed -n 's/^claim=//p' "$claim_path" 2>/dev/null | tail -1)
+  current_incarnation=$(fm_meta_get "$STATE/$ID.meta" dashboard_incarnation)
+  case "$current_incarnation" in ''|*[!A-Za-z0-9._-]*) current_incarnation="legacy-$ID" ;; esac
+  terminal_state=$(jq -r '.state // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_incarnation=$(jq -r '.incarnation // ""' "$STATE/dashboard-transitions/$ID.json" 2>/dev/null || true)
+  terminal_line=$(grep -v '^[[:space:]]*$' "$STATE/$ID.status" 2>/dev/null | tail -n 1 || true)
+  terminal_verb=${terminal_line%%:*}
+  terminal_verb=${terminal_verb%%\[*}
+  terminal_verb=${terminal_verb#"${terminal_verb%%[![:space:]]*}"}
+  terminal_verb=${terminal_verb%"${terminal_verb##*[![:space:]]}"}
+  if [ "$claim_value" != "$FM_DASHBOARD_RECOVERY_CLAIM" ] \
+     || [ "$claim_incarnation" != "$current_incarnation" ] \
+     || { [ "$terminal_incarnation" = "$current_incarnation" ] && { [ "$terminal_state" = done ] || [ "$terminal_state" = failed ]; }; } \
+     || [ "$terminal_verb" = done ] || [ "$terminal_verb" = failed ]; then
+    echo "error: dashboard recovery claim for $ID is no longer valid" >&2
+    exit 4
+  fi
+fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
   if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
     "$FM_ROOT/bin/fm-busy-event.sh" apply "$STATE_REAL" "$ID" unknown --gen "$BUSY_GEN" --source fm-recovery --event replacement-send-failed || true
@@ -3000,6 +3030,13 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   spawn_herdr_presentation_order_lock_release
 fi
 spawn_send_key "$T" Enter
+if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
+  RECOVERY_CLAIM_LOCK_HELD=0
+  fm_lock_release "$RECOVERY_CLAIM_LOCK" || {
+    echo "error: could not release dashboard recovery claim for $ID" >&2
+    exit 1
+  }
+fi
 if [ "$SPAWN_PREFLIGHT_LOCK_HELD" = 1 ]; then
   SPAWN_PREFLIGHT_LOCK_HELD=0
   fm_lock_release "$SPAWN_PREFLIGHT_LOCK" || {
