@@ -111,30 +111,65 @@ prior_state=
 prior_incarnation=
 prior_at=
 prior_active=0
+prior_terminal_state=
+prior_terminal_at=
 if [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
-  IFS=$'\t' read -r prior_state prior_incarnation prior_at prior_active < <(
-    jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at | if type == "number" then tostring else "-" end),(.active_seconds // 0 | tostring)] | @tsv' "$RECORD" 2>/dev/null || true
+  IFS=$'\t' read -r prior_state prior_incarnation prior_at prior_active prior_terminal_state prior_terminal_at < <(
+    jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at | if type == "number" then tostring else "-" end),(.active_seconds // 0 | tostring),(.terminal_receipt.state // ""),(.terminal_receipt.recorded_at | if type == "number" then tostring else "-" end)] | @tsv' "$RECORD" 2>/dev/null || true
   )
   if [ "$prior_incarnation" != "$incarnation" ]; then
     prior_state=
     prior_at=
     prior_active=0
+    prior_terminal_state=
+    prior_terminal_at=
   fi
 fi
 case "$prior_at" in ''|*[!0-9]*) prior_at= ;; esac
 case "$prior_active" in ''|*[!0-9]*) prior_active=0 ;; esac
-terminal_status_receipt() {
-  local line
+case "$prior_terminal_state:$prior_terminal_at" in
+  done:[0-9]*|failed:[0-9]*) ;;
+  *) prior_terminal_state=; prior_terminal_at= ;;
+esac
+terminal_receipt_state=$prior_terminal_state
+terminal_receipt_at=$prior_terminal_at
+case "$ACTION" in
+  append|self-append)
+    case "$(status_line_verb "$LINE")" in
+      done|failed)
+        terminal_receipt_state=$(status_line_verb "$LINE")
+        terminal_receipt_at=$AT
+        [ -n "$CURRENT" ] || CURRENT=$terminal_receipt_state
+        ;;
+    esac
+    ;;
+esac
+legacy_terminal_status_receipt() {
   [ -f "$STATE/$ID.status" ] && [ ! -L "$STATE/$ID.status" ] || return 1
-  while IFS= read -r line; do
-    case "$(status_line_verb "$line")" in done|failed) return 0 ;; esac
-  done < <(tail -c 65536 -- "$STATE/$ID.status" 2>/dev/null | tail -n 64)
-  return 1
+  LC_ALL=C awk '
+    length($0) > 4096 { next }
+    {
+      verb = $0
+      sub(/:.*/, "", verb)
+      sub(/\[.*/, "", verb)
+      sub(/^[[:space:]]*/, "", verb)
+      sub(/[[:space:]]*$/, "", verb)
+      if (verb == "done" || verb == "failed") {
+        found = 1
+        exit
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$STATE/$ID.status"
+}
+terminal_recovery_receipt() {
+  case "$terminal_receipt_state:$terminal_receipt_at" in done:[0-9]*|failed:[0-9]*) return 0 ;; esac
+  case "$prior_state" in done|failed) return 0 ;; esac
+  legacy_terminal_status_receipt
 }
 CLAIM_PATH="$DIR/$ID.recovery-claim"
 if [ "$ACTION" = recovery-claim ]; then
-  case "$prior_state" in done|failed) exit 3 ;; esac
-  terminal_status_receipt && exit 3
+  terminal_recovery_receipt && exit 3
 fi
 if [ "$ACTION" = recovery-working ]; then
   claim_incarnation=$(sed -n 's/^incarnation=//p' "$CLAIM_PATH" 2>/dev/null | tail -1)
@@ -142,26 +177,31 @@ if [ "$ACTION" = recovery-working ]; then
   if [ "$claim_incarnation" != "$incarnation" ] || [ "$claim_value" != "$CLAIM" ]; then
     exit 3
   fi
-  case "$prior_state" in done|failed) exit 3 ;; esac
-  terminal_status_receipt && exit 3
+  terminal_recovery_receipt && exit 3
 fi
 if [ "$ACTION" = resolve ] || [ "$ACTION" = self-resolve ]; then
   case "$prior_state" in done|failed) CURRENT= ;; esac
 fi
+receipt_changed=0
+if [ "$terminal_receipt_state:$terminal_receipt_at" != "$prior_terminal_state:$prior_terminal_at" ]; then
+  receipt_changed=1
+fi
 if [ "$has_meta" = 1 ] && [ "$ACTION" = barrier ]; then
   tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
-  if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --argjson active_seconds "$prior_active" '
-    {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:null,active_seconds:$active_seconds}' > "$tmp" \
+  if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --arg terminal_state "$terminal_receipt_state" --argjson terminal_at "${terminal_receipt_at:-0}" --argjson active_seconds "$prior_active" '
+    {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:null,active_seconds:$active_seconds}
+    + (if $terminal_state == "" then {} else {terminal_receipt:{state:$terminal_state,recorded_at:$terminal_at}} end)' > "$tmp" \
     || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
     rm -f -- "$tmp"
     exit 1
   fi
-elif [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && { [ "$prior_state" != "$CURRENT" ] || [ -z "$prior_at" ]; }; then
+elif [ "$has_meta" = 1 ] && [ -n "$CURRENT" ] && { [ "$prior_state" != "$CURRENT" ] || [ -z "$prior_at" ] || [ "$receipt_changed" -eq 1 ]; }; then
   if [ -n "$prior_at" ] && [ "$AT" -lt "$prior_at" ]; then exit 1; fi
   tmp=$(umask 077; mktemp "$DIR/.${ID}.XXXXXX")
-  if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --argjson transition_at "$AT" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
+  if ! jq -n --arg id "$ID" --arg state "$CURRENT" --arg incarnation "$incarnation" --arg terminal_state "$terminal_receipt_state" --argjson terminal_at "${terminal_receipt_at:-0}" --argjson transition_at "$AT" --arg prior_state "$prior_state" --argjson prior_at "${prior_at:-$AT}" --argjson active_seconds "$prior_active" '
     ($active_seconds + (if $prior_state == "working" then ($transition_at - $prior_at) else 0 end)) as $active_seconds
-    | {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:$transition_at,active_seconds:$active_seconds}' > "$tmp" \
+    | {schema_version:1,id:$id,incarnation:$incarnation,state:$state,transition_at:$transition_at,active_seconds:$active_seconds}
+    + (if $terminal_state == "" then {} else {terminal_receipt:{state:$terminal_state,recorded_at:$terminal_at}} end)' > "$tmp" \
     || ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$RECORD"; then
     rm -f -- "$tmp"
     exit 1

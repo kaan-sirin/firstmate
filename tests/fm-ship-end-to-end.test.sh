@@ -738,7 +738,7 @@ test_status_event_persists_transition_before_status() {
   PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=200 "$ROOT/bin/fm-status-event.sh" append "$home/state" status-terminal-a1 'done: implementation finished' || fail "terminal status event failed"
   PATH="$TMP_ROOT/status-event-bin:$PATH" FM_FAKE_NOW=210 "$ROOT/bin/fm-status-event.sh" resolve "$home/state" status-terminal-a1 'resolved [key=late]: captain answered' || fail "late resolution status event failed"
   terminal_record="$home/state/dashboard-transitions/status-terminal-a1.json"
-  jq -e '.state == "done" and .transition_at == 200' "$terminal_record" >/dev/null \
+  jq -e '.state == "done" and .transition_at == 200 and .terminal_receipt == {state:"done",recorded_at:200}' "$terminal_record" >/dev/null \
     || fail "late resolution reactivated a terminal task"
   pass "status events persist canonical transitions with status output"
 }
@@ -904,10 +904,15 @@ test_dashboard_recovery_preserves_legacy_terminal_receipt() {
 }
 
 test_dashboard_recovery_preserves_resolved_legacy_terminal_receipt() {
-  local home="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved" state_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-state" agent_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn-log"
+  local home="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved" state_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-state" agent_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-legacy-terminal-resolved-spawn-log" i
   mkdir -p "$home/data" "$home/state"
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-legacy-terminal-resolved.meta"
-  printf '%s\n' 'done: legacy task completed' 'resolved [key=review]: captain acknowledged completion' > "$home/state/dash-legacy-terminal-resolved.status"
+  printf '%s\n' 'done: legacy task completed' > "$home/state/dash-legacy-terminal-resolved.status"
+  i=0
+  while [ "$i" -lt 65 ]; do
+    printf 'resolved [key=review]: captain acknowledged completion %s\n' "$i" >> "$home/state/dash-legacy-terminal-resolved.status"
+    i=$((i + 1))
+  done
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
@@ -920,6 +925,33 @@ test_dashboard_recovery_preserves_resolved_legacy_terminal_receipt() {
   [ ! -e "$home/state/dashboard-recovery/dash-legacy-terminal-resolved.json" ] \
     || fail "resolved legacy terminal receipt recorded a recovery failure"
   pass "dashboard preserves a resolved legacy terminal receipt instead of relaunching it"
+}
+
+test_dashboard_recovery_preserves_persisted_terminal_receipt() {
+  local home="$TMP_ROOT/dashboard-recovery-persisted-terminal" state_bin="$TMP_ROOT/dashboard-recovery-persisted-terminal-state" agent_bin="$TMP_ROOT/dashboard-recovery-persisted-terminal-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-persisted-terminal-spawn" spawn_log="$TMP_ROOT/dashboard-recovery-persisted-terminal-spawn-log" record i
+  mkdir -p "$home/data" "$home/state"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' 'dashboard_incarnation=i-persisted-terminal' > "$home/state/dash-persisted-terminal.meta"
+  "$ROOT/bin/fm-dashboard-transition.sh" append "$home/state" dash-persisted-terminal done 100 'done: task completed' \
+    || fail "terminal status append failed"
+  "$ROOT/bin/fm-dashboard-transition.sh" record "$home/state" dash-persisted-terminal unknown 101 \
+    || fail "later state transition failed"
+  i=0
+  while [ "$i" -lt 65 ]; do
+    "$ROOT/bin/fm-dashboard-transition.sh" append "$home/state" dash-persisted-terminal '' "$((102 + i))" "resolved [key=review]: captain acknowledged completion $i" \
+      || fail "later status append failed"
+    i=$((i + 1))
+  done
+  record="$home/state/dashboard-transitions/dash-persisted-terminal.json"
+  jq -e '.state == "unknown" and .incarnation == "i-persisted-terminal" and .terminal_receipt == {state:"done",recorded_at:100}' "$record" >/dev/null \
+    || fail "later state transition lost the terminal receipt"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_RECOVERY_SPAWN_LOG="$spawn_log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-persisted-terminal \
+    || fail "persisted terminal recovery check failed"
+  [ ! -e "$spawn_log" ] || fail "persisted terminal receipt launched a replacement"
+  pass "dashboard preserves a terminal receipt after later transitions"
 }
 
 test_terminal_status_cancels_recovery_claim() {
@@ -1125,6 +1157,7 @@ test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt
 test_dashboard_recovery_preserves_resolved_legacy_terminal_receipt
+test_dashboard_recovery_preserves_persisted_terminal_receipt
 test_terminal_status_cancels_recovery_claim
 test_dashboard_recovery_defers_control_lock_contention
 test_dashboard_recovery_rechecks_eligibility_under_lock
