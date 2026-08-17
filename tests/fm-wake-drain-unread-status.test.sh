@@ -184,23 +184,24 @@ test_unread_output_over_cap_remains_recoverable() {
 }
 
 test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
-  local dir state out status cursor i payload offset
+  local dir state out status cursor page i payload offset
   dir=$(make_case bounded-signal-annotation)
   state="$dir/state"
   out="$dir/drain.out"
   status="$state/task-bounded.status"
-  payload=$(printf '%09000d' 0)
+  payload=$(printf '%01014d' 0)
   i=1
-  while [ "$i" -le 10 ]; do
-    printf 'working: bounded-%02d %s\n' "$i" "$payload" >> "$status"
+  while [ "$i" -le 8 ]; do
+    printf 'working: %s\n' "$payload" >> "$status"
     i=$((i + 1))
   done
+  printf 'note: reached after bounded routine pages\n' >> "$status"
   append_wake "$state" signal task-bounded.status "signal: task-bounded.status" \
     || fail "queueing the oversized routine status signal failed"
 
   FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
     || fail "drain failed on oversized routine status annotations"
-  grep -F 'wake annotation: 1 status contexts remain unread (enrichment read cap)' "$out" >/dev/null \
+  grep -F 'annotations omitted (global enrichment byte cap)' "$out" >/dev/null \
     || fail "the bounded annotation did not report retained status context: $(cat "$out")"
   [ "$(wc -c < "$out")" -le 8500 ] \
     || fail "the bounded annotation exceeded its output limit: $(wc -c < "$out")"
@@ -208,7 +209,22 @@ test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
   offset=$(awk -F '\t' '$1 == "task-bounded" { print $3 }' "$cursor")
   [ -z "$offset" ] || [ "$offset" -eq 0 ] \
     || fail "a partially presented routine status advanced its cursor to $offset"
-  pass "bounded signal annotations retain routine status until presentation completes"
+  page="$state/.task-bounded.status-presentation-page"
+  [ -s "$page" ] || fail "the bounded routine page was not persisted"
+  grep -Fx 'next=8192' "$page" >/dev/null \
+    || fail "the bounded routine page did not advance to its next offset: $(cat "$page")"
+
+  append_wake "$state" signal task-bounded.status "signal: task-bounded.status" \
+    || fail "queueing the next bounded status signal failed"
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed while presenting the next bounded status page"
+  grep -F 'task-bounded note: reached after bounded routine pages' "$out" >/dev/null \
+    || fail "a later bounded page did not reach its informational status: $(cat "$out")"
+  [ ! -e "$page" ] || fail "the completed bounded page was not retired"
+  offset=$(awk -F '\t' '$1 == "task-bounded" { print $3 }' "$cursor")
+  [ "$offset" -eq "$(wc -c < "$status")" ] \
+    || fail "the main cursor did not advance after all bounded pages were presented"
+  pass "bounded status pages retain the main cursor until complete"
 }
 
 test_snapshot_does_not_ack_a_later_append() {

@@ -326,6 +326,18 @@ test_transcript_fold_handles_partially_appended_records() {
   pass "cursor transcript fold: partial appends never make an active turn idle"
 }
 
+test_transcript_fold_bounds_unproven_history() {
+  local state out payload
+  payload=$(printf '%0263000d' 0)
+  state=$(make_cursor_binding bounded-history conv-bounded "{\"role\":\"user\"}
+{\"type\":\"session_meta\",\"payload\":\"$payload\"}
+")
+  out=$(fm_busy_classify tmux none cursor task "$state")
+  [ "$out" = "unknown cursor-transcript" ] \
+    || fail "a turn outside the bounded transcript tail must be unknown, got '$out'"
+  pass "cursor transcript fold: bounded history is unknown when it cannot prove state"
+}
+
 test_transcript_fold_is_unknown_never_idle_when_unresolvable() {
   local state out empty_state
   # A record-free transcript proves nothing either way.
@@ -399,6 +411,7 @@ test_harness_ancestry_rejects_cursor_named_node_script
 test_transcript_fold_brackets_a_turn
 test_transcript_fold_ignores_lifecycle_tokens_in_message_text
 test_transcript_fold_handles_partially_appended_records
+test_transcript_fold_bounds_unproven_history
 test_transcript_fold_is_unknown_never_idle_when_unresolvable
 test_transcript_binding_matches_workspace_exactly
 test_transcript_fold_excludes_prior_conversations

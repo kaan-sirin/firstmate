@@ -174,26 +174,30 @@ EOF
 }
 
 print_status_sections() {
-  local snapshot=${1:-} fully_presented=${2:-} acknowledged
+  local snapshot=${1:-} presented=${2:-} acknowledged
   if [ -z "$snapshot" ]; then snapshot=$(status_presentation_snapshot "$STATE") || return 1; fi
   [ -n "$snapshot" ] || return 0
-  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$fully_presented") || return 1
+  acknowledged=$(status_acknowledge_presented_snapshot "$STATE" "$snapshot" "$presented") || return 1
   print_unread_status_section "$snapshot" || return 1
   print_open_decisions_section "$snapshot" || return 1
+  status_commit_presentation_pages "$STATE" "$snapshot" "$acknowledged" || return 1
   status_commit_presentation_snapshot "$STATE" "$acknowledged"
 }
 
 print_status_presentation() {  # [<deduped-raw-rows>]
-  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot fully_presented='' rc=0
+  local rows=${1:-} lock="$STATE/.status-presentation-lock" snapshot page_snapshot presented='' rc=0
   fm_lock_acquire_wait "$lock" || return 1
   snapshot=$(status_presentation_snapshot "$STATE") || rc=1
+  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then
+    page_snapshot=$(status_presentation_page_snapshot "$STATE" "$snapshot") || rc=1
+  fi
   if [ "$rc" -eq 0 ] && [ -n "$rows" ]; then
-    fm_wake_print_annotations "$rows" "$snapshot" || rc=1
+    fm_wake_print_annotations "$rows" "$page_snapshot" || rc=1
     if [ "$rc" -eq 0 ]; then
-      fully_presented=${FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS:-}
+      presented=${FM_WAKE_ANNOTATION_PAGED_TASKS:-}
     fi
   fi
-  if [ "$rc" -eq 0 ] && [ -n "$snapshot" ]; then print_status_sections "$snapshot" "$fully_presented" || rc=1; fi
+  if [ "$rc" -eq 0 ] && [ -n "$page_snapshot" ]; then print_status_sections "$page_snapshot" "$presented" || rc=1; fi
   fm_lock_release "$lock"
   return "$rc"
 }

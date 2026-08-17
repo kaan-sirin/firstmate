@@ -1179,9 +1179,13 @@ fm_wake_unread_events() {  # <validated-status-path> <byte-cap> <min-offset> [<e
       $remaining -= $read;
     }
     my $complete = $read_end == $end;
+    my $ends_at_line = $buffer =~ /\n\z/;
     my @lines = split /\n/, $buffer, -1;
     pop @lines if @lines && $lines[-1] eq q{};
-    pop @lines if !$complete && $buffer !~ /\n\z/;
+    if (!$ends_at_line && $read_end < $size) {
+      pop @lines;
+      $complete = 0;
+    }
     @lines = grep { /[^[:space:]]/ } @lines;
     my $omitted = 0;
     if (@lines > $line_cap) {
@@ -1231,6 +1235,7 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
   local read_bytes=8192 line_cap=8 item_bytes=2048 global_bytes=8192 read_cap=8 reads=0 marker_reserve=256
   local LC_ALL=C
   FM_WAKE_ANNOTATION_FULLY_PRESENTED_TASKS=
+  FM_WAKE_ANNOTATION_PAGED_TASKS=
 
   manifest=$(fm_wake_annotation_manifest "$rows" | awk -F '\t' '
     {
@@ -1281,8 +1286,12 @@ fm_wake_print_annotations() {  # <deduped-raw-rows> [<presentation-snapshot>]
     endpoint=
     if [ -n "$snapshot" ]; then
       task=${status_key%.status}
-      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident; do
-        if [ "$snapshot_task" = "$task" ]; then endpoint=$snapshot_endpoint; break; fi
+      while IFS=$(printf '\t') read -r snapshot_task snapshot_endpoint _snapshot_ident snapshot_start _snapshot_end; do
+        if [ "$snapshot_task" = "$task" ]; then
+          endpoint=$snapshot_endpoint
+          [ -z "$snapshot_start" ] || offset=$snapshot_start
+          break
+        fi
       done <<EOF
 $snapshot
 EOF
@@ -1297,6 +1306,10 @@ EOF
       # the snapshot must not suppress annotations for other status files; the
       # presentation commit will reject a changed snapshot identity.
       continue
+    fi
+    if [ "$mode" = direct ]; then
+      task=${status_key%.status}
+      FM_WAKE_ANNOTATION_PAGED_TASKS="${FM_WAKE_ANNOTATION_PAGED_TASKS}${FM_WAKE_ANNOTATION_PAGED_TASKS:+$'\n'}$task"
     fi
     task_complete=true
     if [ "$event_rc" -eq 2 ] || [ "$FM_WAKE_UNREAD_COMPLETE" != true ]; then
