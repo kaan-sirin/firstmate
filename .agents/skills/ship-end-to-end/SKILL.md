@@ -16,7 +16,7 @@ Do not use it for a scout that remains read-only, a narrow read-only investigati
 Inspect the request, repository, task, production, and fleet facts first.
 Resolve every question that these sources can answer.
 Do not start implementation, dispatch a worker, change project, production, or external data, deploy, or post externally.
-The private preflight record is the only workflow state written before approval.
+The private preflight record is the durable workflow state before approval.
 
 Give one concise contract with the recommendation first.
 Include the interpreted outcome, scope and non-goals, delivery and external-system boundaries, then put all remaining material questions in one group.
@@ -29,7 +29,7 @@ For direct work, publish an awaiting-approval record.
 After one explicit approval, replace it with an approved record with the same fingerprint.
 If the captain corrects the contract, publish a new awaiting-approval record with its new fingerprint and wait for an explicit approval of that record.
 An explicitly approved complete plan can publish its approved record without a duplicate preflight question.
-For Slack work, the Agent bridge verifies the allowlisted same-thread approval and publishes the already-authorized typed record.
+For Agent bridge work, the bridge verifies the allowlisted same-thread approval and publishes the already-authorized typed record.
 Do not provide Slack origin, contract, authority, evidence, identity, or approval input to FirstMate.
 
 ## Phase 2 - approved execution
