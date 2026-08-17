@@ -484,6 +484,17 @@ dashboard_recovery_reconcile() {
     || triage_log "dashboard recovery check failed for $1"
 }
 
+dashboard_recovery_reconcile_metadata() {
+  local meta task kind
+  for meta in "$STATE"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || continue
+    task=$(basename "$meta" .meta)
+    case "$task" in ''|*[!A-Za-z0-9._-]*) continue ;; esac
+    kind=$(fm_meta_get "$meta" kind)
+    case "$kind" in ship|scout|'') dashboard_recovery_reconcile "$task" ;; esac
+  done
+}
+
 # Layer 2 + 3 signal scan: status files and turn-end markers. Each file is
 # compared against a persisted size:mtime signature (.seen-*) rather than
 # mtime-vs-a-startup-touch, so signals that land while no watcher is running
@@ -1053,6 +1064,8 @@ EOF
     fi
   fi
 
+  dashboard_recovery_reconcile_metadata
+
   # Layer 1 backbone: pane staleness. Two consecutive identical hashes with no busy
   # signature means the crewmate finished, is waiting, or is wedged. Each distinct
   # stale hash is surfaced, absorbed, or timed toward escalation once (.stale-*
@@ -1061,7 +1074,6 @@ EOF
     kind=$(window_kind "$w")
     task=$(window_to_task "$w" "$STATE")
     dashboard_transition_reconcile "$task"
-    dashboard_recovery_reconcile "$task"
     key=${w//:/_}
     key=${key//\//_}
     key=${key//./_}

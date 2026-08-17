@@ -85,6 +85,7 @@ STATE="$REC_DIR" FM_STATE_OVERRIDE="$REC_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
 LOCK="$REC_DIR/.ship-preflight.lock"
 fm_lock_acquire_wait "$LOCK" || die "could not lock preflight record"
 CLAIM=
+VALIDATION_DATA=
 restore_claim() {
   [ -f "$CLAIM" ] && [ -s "$CLAIM" ] || return 0
   if [ ! -e "$HANDOFF" ] && [ ! -L "$HANDOFF" ]; then
@@ -96,6 +97,7 @@ cleanup() {
   local status=$?
   trap - EXIT
   [ "$status" -eq 0 ] || restore_claim
+  [ -z "$VALIDATION_DATA" ] || rm -rf -- "$VALIDATION_DATA" || true
   [ ! -f "$CLAIM" ] || [ -s "$CLAIM" ] || rm -f -- "$CLAIM" 2>/dev/null || true
   fm_lock_release "$LOCK" || true
   exit "$status"
@@ -120,6 +122,16 @@ if ! cat "$CLAIM" > "$TMP" || ! chmod 600 "$TMP" || ! valid_private_file "$TMP";
   rm -f -- "$TMP"
   die "could not prepare private preflight record"
 fi
+VALIDATION_DATA=$(umask 077; mktemp -d "$REC_DIR/.ship-preflight-validation.XXXXXX") || die "could not validate private preflight record"
+mkdir "$VALIDATION_DATA/$ID" || die "could not validate private preflight record"
+chmod 700 "$VALIDATION_DATA" "$VALIDATION_DATA/$ID" || die "could not validate private preflight record"
+if ! cp "$TMP" "$VALIDATION_DATA/$ID/ship-preflight.json" || ! chmod 600 "$VALIDATION_DATA/$ID/ship-preflight.json" \
+  || ! FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$VALIDATION_DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" validate "$ID" >/dev/null; then
+  rm -f -- "$TMP"
+  die "invalid typed private bridge handoff"
+fi
+rm -rf -- "$VALIDATION_DATA"
+VALIDATION_DATA=
 mv -f -- "$TMP" "$REC_DIR/ship-preflight.json"
 valid_private_file "$REC_DIR/ship-preflight.json" || die "preflight publication failed validation"
 rm -f -- "$CLAIM"

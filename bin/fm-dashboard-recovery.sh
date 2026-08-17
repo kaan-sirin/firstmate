@@ -5,6 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 STATE="${FM_STATE_OVERRIDE:-$FM_HOME/state}"
+DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 MAX_ATTEMPTS=${FM_DASHBOARD_RECOVERY_MAX_ATTEMPTS:-2}
 
 case "${1:-}" in observe) ;; *) echo "usage: fm-dashboard-recovery.sh observe <task-id>" >&2; exit 2 ;; esac
@@ -52,17 +53,28 @@ RECORD="$DIR/$ID.json"
 attempts=0
 prior_state=
 reason=
+preflight_awaiting_approval() {
+  local fingerprint rc=0
+  fingerprint=$(fm_meta_get "$META" preflight_fingerprint)
+  [ -n "$fingerprint" ] || return 1
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-recovery "$ID" --fingerprint "$fingerprint" >/dev/null || rc=$?
+  [ "$rc" -eq 4 ]
+}
 if [ -f "$RECORD" ] && [ ! -L "$RECORD" ]; then
   IFS=$'\t' read -r prior_state attempts reason < <(jq -r '[.state // "",(.attempts // 0 | tostring),(.reason // "")] | @tsv' "$RECORD" 2>/dev/null || true)
   case "$attempts" in ''|*[!0-9]*) attempts=0 ;; esac
   if [ "$prior_state" = unrecoverable ]; then
     case "$reason" in
-      *'preflight approval is missing'*|*'preflight is awaiting approval'*)
-        attempts=0
-        prior_state=pending
-        ;;
-      *) exit 0 ;;
+      *'preflight approval is missing'*|*'preflight is awaiting approval'*) legacy_awaiting=1 ;;
+      *) legacy_awaiting=0 ;;
     esac
+    if preflight_awaiting_approval || [ "$legacy_awaiting" -eq 1 ]; then
+      attempts=0
+      prior_state=pending
+    else
+      exit 0
+    fi
   fi
 fi
 if [ "$prior_state" = pending ] && [ "$attempts" -eq 0 ] && [ -n "$reason" ]; then
@@ -79,7 +91,7 @@ case "$agent_state" in
   dead) recovery_action=--relaunch ;;
   missing) recovery_action=--recover-missing ;;
 esac
-out=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
+out=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
 recovery_status=${recovery_status:-0}
 if [ "$recovery_status" -eq 0 ]; then
   rm -f -- "$RECORD"

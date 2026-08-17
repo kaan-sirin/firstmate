@@ -459,6 +459,24 @@ SH
   pass "bridge serializes concurrent publish claims without an empty handoff"
 }
 
+test_bridge_preserves_approved_record_on_invalid_handoff() {
+  local home="$TMP_ROOT/bridge-invalid" id=invalid-bridge-a1 contract="$TMP_ROOT/bridge-invalid-contract.json" fp handoff out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" "$id" "$contract" bridge approved 100) || fail "could not publish approved baseline"
+  write_bridge_handoff "$home" "$id" "$contract" bridge approved 101 >/dev/null || fail "could not prepare malformed handoff"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  jq 'del(.contract.outcome)' "$handoff" > "$home/malformed.json" || fail "could not corrupt handoff fixture"
+  chmod 600 "$home/malformed.json" && mv -f "$home/malformed.json" "$handoff" || fail "could not publish malformed handoff fixture"
+  out=$(bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "malformed bridge handoff replaced an approved record"
+  assert_contains "$out" "invalid typed private bridge handoff" "malformed handoff refusal was unclear"
+  preflight_env "$home" 101 verify "$id" --fingerprint "$fp" >/dev/null || fail "malformed handoff changed the approved record"
+  [ -f "$handoff" ] || fail "malformed handoff was not restored"
+  pass "bridge preserves approved records when a handoff is malformed"
+}
+
 test_spawn_enforces_the_durable_preflight() {
   local home="$TMP_ROOT/spawn" project="$TMP_ROOT/spawn-project" contract="$TMP_ROOT/spawn-contract.json" corrected="$TMP_ROOT/spawn-corrected.json" racebin="$TMP_ROOT/spawn-race-bin" submitbin="$TMP_ROOT/spawn-submit-bin" submit_remote="$TMP_ROOT/spawn-submit-remote.git" submit_worktree="$TMP_ROOT/spawn-submit-worktree" submit_events="$TMP_ROOT/spawn-submit-events" submit_out="$TMP_ROOT/spawn-submit-publish.out" submit_status="$TMP_ROOT/spawn-submit-publish-status" submit_launch="$TMP_ROOT/spawn-submit-launch-literal" out fp status attempts submitted_line published_line
   mkdir -p "$home/data" "$home/state" "$home/config" "$project"
@@ -1006,6 +1024,7 @@ test_bridge_recovers_a_claim_after_interruption
 test_bridge_restores_a_claim_interrupted_after_rename
 test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_serializes_concurrent_publish_claims
+test_bridge_preserves_approved_record_on_invalid_handoff
 test_spawn_enforces_the_durable_preflight
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work

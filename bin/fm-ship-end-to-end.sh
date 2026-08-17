@@ -6,6 +6,7 @@
 #   fm-ship-end-to-end.sh verify-current <task-id>
 #   fm-ship-end-to-end.sh verify-dispatched <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-recovery <task-id> --fingerprint <sha256>
+#   fm-ship-end-to-end.sh validate <task-id>
 #
 # The record is data/<task-id>/ship-preflight.json, mode 0600. Its schema is
 # `{schema_version,workflow,task_id,fingerprint,origin,state,contract,created_at|approval}`.
@@ -40,7 +41,7 @@ valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac
 valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s' "$1" | grep -q '[^0-9a-f]' ;; *) return 1;; esac; }
 
 COMMAND=${1:-}
-case "$COMMAND" in verify|verify-current|verify-dispatched|verify-recovery) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
+case "$COMMAND" in verify|verify-current|verify-dispatched|verify-recovery|validate) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
 ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
@@ -131,6 +132,14 @@ verify_record() {
 }
 
 case "$COMMAND" in
+  validate)
+    read_record
+    if [ "$(jq -r '.state' "$RECORD")" = approved ]; then
+      verify_record "$(jq -r '.fingerprint' "$RECORD")" 0
+    else
+      jq -e '.created_at | type == "number" and . >= 0' "$RECORD" >/dev/null || die "preflight creation timestamp is malformed"
+    fi
+    ;;
   verify)
     valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
     read_record
