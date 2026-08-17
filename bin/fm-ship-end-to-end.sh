@@ -155,7 +155,6 @@ case "$COMMAND" in
     if [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ]; then
       exit 4
     fi
-    FINGERPRINT=$(jq -r '.fingerprint' "$RECORD")
     verify_record "$FINGERPRINT" 0
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;

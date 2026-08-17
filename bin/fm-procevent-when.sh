@@ -147,13 +147,16 @@ command_executable() {  # <argv-zero>: print the executable's canonical path
 }
 
 command_is_interpreter() {  # <absolute-command-path>
-  local base=${1##*/}
+  local path=$1 base=${1##*/} known
   case "$base" in
     sh|bash|dash|ash|ksh|mksh|zsh|fish|busybox|env|python|python[0-9]*|perl|perl[0-9]*|ruby|ruby[0-9]*|node|nodejs|lua|lua[0-9]*|php|php[0-9]*|R|Rscript|tclsh*|wish*|awk|gawk|mawk|nawk|sed|ed|ex|vi)
       return 0
       ;;
-    *) return 1 ;;
   esac
+  for known in /bin/sh /bin/bash /bin/dash; do
+    [ -x "$known" ] && cmp -s "$path" "$known" && return 0
+  done
+  return 1
 }
 
 command_bytes_match() {  # <absolute-command-path> <registered-sha256>

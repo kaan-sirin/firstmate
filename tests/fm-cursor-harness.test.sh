@@ -124,7 +124,7 @@ test_identity_signals_diverge() {
 }
 
 test_verify_executable_refuses_unrelated_agent() {
-  local tree bin odd="$TMP_ROOT/verify"
+  local tree bin odd="$TMP_ROOT/verify" spoof
   tree="$TMP_ROOT/tree3"; bin=$(make_cursor_tree "$tree")
   mkdir -p "$odd"
   printf '#!/bin/sh\necho unrelated\n' > "$odd/agent"; chmod +x "$odd/agent"
@@ -135,6 +135,11 @@ test_verify_executable_refuses_unrelated_agent() {
     || fail "an unrelated executable named agent must NOT verify as cursor"
   ! fm_cursor_verify_executable "$odd/cursor-agent" \
     || fail "an unrelated executable named cursor-agent must NOT verify as cursor"
+  spoof="$TMP_ROOT/path-spoof/cursor-agent/versions/v1"
+  mkdir -p "$spoof"
+  printf '#!/bin/sh\necho unrelated\n' > "$spoof/runner"; chmod +x "$spoof/runner"
+  ! fm_cursor_verify_executable "$spoof/runner" \
+    || fail "an unrelated Cursor-shaped install path must NOT verify as cursor"
   pass "fm_cursor_verify_executable: only Cursor evidence permits a launch"
 }
 

@@ -111,10 +111,15 @@ fm_cursor_probe_is_cursor() {  # <path>
 # An executable must prove itself with Cursor's install path or by the bounded
 # probe before it can be launched as Cursor.
 fm_cursor_verify_executable() {  # <path>
-  local path=$1 canonical
+  local path=$1 canonical install_root=
   [ -n "$path" ] && [ -x "$path" ] || return 1
   canonical=$(fm_cursor_canonical_path "$path") || return 1
-  case "$canonical" in */cursor-agent/versions/*/*) return 0 ;; esac
+  if [ -n "${HOME:-}" ]; then
+    install_root=$(CDPATH='' cd -- "$HOME/.local/share/cursor-agent/versions" 2>/dev/null && pwd -P) || install_root=
+  fi
+  if [ -n "$install_root" ]; then
+    case "$canonical" in "$install_root"/*/cursor-agent) return 0 ;; esac
+  fi
   fm_cursor_probe_is_cursor "$path"
 }
 

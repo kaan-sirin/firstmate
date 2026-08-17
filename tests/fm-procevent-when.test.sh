@@ -411,6 +411,17 @@ assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter
   "the symlink target is classified as an interpreter"
 assert_absent "$H/state/procevent/when-interpreter-symlink.source" \
   "an interpreter symlink command form is never registered"
+INTERPRETER_COPY="$TMP_ROOT/approved-runner-copy"
+cp /bin/sh "$INTERPRETER_COPY"
+chmod +x "$INTERPRETER_COPY"
+if when "$H" arm interpreter-copy --condition true --action "$INTERPRETER_COPY" "$INTERPRETED" "$TMP_ROOT/interpreter-copy-act" \
+  >"$TMP_ROOT/interpreter-copy.out" 2>"$TMP_ROOT/interpreter-copy.err"; then
+  fail "a renamed interpreter command form must be refused"
+fi
+assert_grep 'interpreter command forms are not supported' "$TMP_ROOT/interpreter-copy.err" \
+  "the copied interpreter is classified by its executable identity"
+assert_absent "$H/state/procevent/when-interpreter-copy.source" \
+  "a copied interpreter command form is never registered"
 pass "interpreter command forms cannot register mutable scripts"
 
 H="$TMP_ROOT/h-symlink-cycle"; new_home "$H"

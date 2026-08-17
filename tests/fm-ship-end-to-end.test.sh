@@ -158,6 +158,12 @@ test_correction_bypass_and_stale_refusal() {
   assert_contains "$out" "stale" "stale refusal was unclear"
   FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify-dispatched correction-a1 --fingerprint "$fp2" >/dev/null \
     || fail "an approved dispatched task must resume after its approval ages"
+  out=$(preflight_env "$home" 108 verify-recovery correction-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "recovery must refuse a replaced approved contract"
+  assert_contains "$out" "fingerprint does not match" "recovery did not preserve its original contract binding"
+  preflight_env "$home" 108 verify-recovery correction-a1 --fingerprint "$fp2" >/dev/null \
+    || fail "recovery must accept its original approved contract"
 
   make_contract "$contract" true
   fp=$(publish_preflight_record "$home" bypass-a1 "$contract" direct approved 200) || fail "approved complete plan should bypass duplicate preflight"
