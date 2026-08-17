@@ -183,6 +183,34 @@ test_unread_output_over_cap_remains_recoverable() {
   pass "unread status over the former byte cap preserves every line"
 }
 
+test_bounded_signal_annotations_keep_routine_status_unacknowledged() {
+  local dir state out status cursor i payload offset
+  dir=$(make_case bounded-signal-annotation)
+  state="$dir/state"
+  out="$dir/drain.out"
+  status="$state/task-bounded.status"
+  payload=$(printf '%09000d' 0)
+  i=1
+  while [ "$i" -le 10 ]; do
+    printf 'working: bounded-%02d %s\n' "$i" "$payload" >> "$status"
+    i=$((i + 1))
+  done
+  append_wake "$state" signal task-bounded.status "signal: task-bounded.status" \
+    || fail "queueing the oversized routine status signal failed"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" \
+    || fail "drain failed on oversized routine status annotations"
+  grep -F 'wake annotation: 1 status contexts remain unread (enrichment read cap)' "$out" >/dev/null \
+    || fail "the bounded annotation did not report retained status context: $(cat "$out")"
+  [ "$(wc -c < "$out")" -le 8500 ] \
+    || fail "the bounded annotation exceeded its output limit: $(wc -c < "$out")"
+  cursor="$state/.status-presentation-cursor"
+  offset=$(awk -F '\t' '$1 == "task-bounded" { print $3 }' "$cursor")
+  [ -z "$offset" ] || [ "$offset" -eq 0 ] \
+    || fail "a partially presented routine status advanced its cursor to $offset"
+  pass "bounded signal annotations retain routine status until presentation completes"
+}
+
 test_snapshot_does_not_ack_a_later_append() {
   local dir state status first second
   dir=$(make_case snapshot-append)
@@ -314,6 +342,7 @@ test_brand_new_note_after_presentation_is_surfaced
 test_signal_annotation_surfaces_every_unread_note_not_only_the_newest
 test_pending_reply_resolution_surfaces_once
 test_unread_output_over_cap_remains_recoverable
+test_bounded_signal_annotations_keep_routine_status_unacknowledged
 test_snapshot_does_not_ack_a_later_append
 test_retired_task_id_starts_new_status_unread
 test_open_decisions_fold_is_unchanged
