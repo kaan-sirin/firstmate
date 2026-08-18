@@ -227,6 +227,14 @@ test_nested_secondmate_uses_root_host_capacity() {
   mkdir -p "$primary/state" "$first/state" "$nested/state" "$nested/config" "$fakebin"
   printf 'first\n' > "$first/.fm-secondmate-home"
   printf 'nested\n' > "$nested/.fm-secondmate-home"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$primary" > "$first/.fm-secondmate-parent"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$first" > "$nested/.fm-secondmate-parent"
   printf '3\n' > "$nested/config/max-active-workers"
   cat > "$primary/state/first.meta" <<EOF
 window=firstmate:first
@@ -250,8 +258,7 @@ EOF
     '  *) : ;;' \
     'esac' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$nested" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_WORKER_CAPACITY_HOST_STATE="$primary/state" FM_SPAWN_NO_GUARD=1 \
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$nested" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "nested secondmate started despite a full root host limit"
