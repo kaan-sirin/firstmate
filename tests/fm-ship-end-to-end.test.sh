@@ -452,6 +452,47 @@ test_bridge_preserves_claimed_correction_against_delayed_handoff() {
   pass "bridge preserves claimed corrections against delayed handoffs"
 }
 
+test_bridge_preserves_claimed_correction_on_link_race() {
+  local home="$TMP_ROOT/bridge-claim-link-race" id=claim-link-race-a1 original="$TMP_ROOT/bridge-claim-link-race-original.json" corrected="$TMP_ROOT/bridge-claim-link-race-corrected.json" handoff claim delayed fakebin real_ln out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "could not prepare claimed correction"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  claim="${handoff%/*}/.${id}.claim.interrupted"
+  delayed="${handoff%/*}/.${id}.delayed"
+  mv -f -- "$handoff" "$claim" || fail "could not stage interrupted correction claim"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 1 >/dev/null || fail "could not prepare delayed handoff"
+  mv -f -- "$handoff" "$delayed" || fail "could not reserve delayed handoff"
+  fakebin="$TMP_ROOT/bridge-claim-link-race-bin"
+  mkdir -p "$fakebin"
+  real_ln=$(command -v ln)
+  cat > "$fakebin/ln" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ "$1" = "$FM_BRIDGE_RACE_CLAIM" ] && [ "$2" = "$FM_BRIDGE_RACE_HANDOFF" ]; then
+  mv -f -- "$FM_BRIDGE_RACE_DELAYED" "$FM_BRIDGE_RACE_HANDOFF"
+fi
+exec "$FM_BRIDGE_REAL_LN" "$@"
+SH
+  chmod +x "$fakebin/ln"
+  out=$(PATH="$fakebin:$PATH" FM_BRIDGE_RACE_CLAIM="$claim" FM_BRIDGE_RACE_HANDOFF="$handoff" FM_BRIDGE_RACE_DELAYED="$delayed" FM_BRIDGE_REAL_LN="$real_ln" bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a delayed link-race handoff displaced a claimed correction"
+  assert_contains "$out" "competing private bridge handoffs" "link-race refusal was unclear"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$claim" >/dev/null \
+    || fail "link race changed the claimed correction"
+  jq -e '.producer_revision == 1 and .state == "approved" and .contract.outcome == "A tested PR"' "$handoff" >/dev/null \
+    || fail "link race did not preserve the delayed handoff"
+  assert_absent "$home/data/$id/ship-preflight.json" "link race published a stale preflight record"
+  rm -f -- "$handoff" || fail "could not remove delayed link-race handoff"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not recover the claimed correction after link-race resolution"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "link-race recovery did not preserve the corrected preflight"
+  assert_absent "$claim" "link-race correction claim remained stranded after recovery"
+  pass "bridge preserves claimed corrections on link races"
+}
+
 test_bridge_serializes_concurrent_publish_claims() {
   local home="$TMP_ROOT/bridge-concurrent" id=concurrent-a1 contract="$TMP_ROOT/bridge-concurrent-contract.json" fakebin real_mktemp first second attempts first_status second_status
   mkdir -p "$home/data" "$home/state"
@@ -1557,6 +1598,7 @@ test_bridge_recovers_a_claim_after_interruption
 test_bridge_restores_a_claim_interrupted_after_rename
 test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_preserves_claimed_correction_against_delayed_handoff
+test_bridge_preserves_claimed_correction_on_link_race
 test_bridge_serializes_concurrent_publish_claims
 test_bridge_preserves_approved_record_on_invalid_handoff
 test_bridge_rejects_stale_producer_revisions

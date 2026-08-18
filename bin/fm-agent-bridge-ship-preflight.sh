@@ -71,9 +71,14 @@ recover_claim() {
     die "competing private bridge handoffs: claimed revision $claim_revision and pending revision $handoff_revision"
   else
     valid_private_file "$claim" || die "invalid private bridge handoff claim"
-    if ! ln "$claim" "$HANDOFF"; then
-      valid_private_file "$HANDOFF" || die "could not recover private bridge handoff"
+    if ln "$claim" "$HANDOFF"; then
+      rm -f -- "$claim" || die "could not recover private bridge handoff"
+      return 0
     fi
+    valid_private_file "$HANDOFF" || die "could not recover private bridge handoff"
+    claim_revision=$(record_producer_revision "$claim") || die "claimed preflight producer revision is malformed"
+    handoff_revision=$(record_producer_revision "$HANDOFF") || die "private bridge handoff producer revision is malformed"
+    die "competing private bridge handoffs: claimed revision $claim_revision and pending revision $handoff_revision"
   fi
   rm -f -- "$claim" || die "could not recover private bridge handoff"
 }
