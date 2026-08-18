@@ -57,16 +57,27 @@ cleanup() {
     [ -z "$RECOVERY_CANCEL_GUARD" ] || rm -f -- "$RECOVERY_CANCEL_GUARD" || true
     rmdir "$RECOVERY_CANCEL_GUARD_DIR" 2>/dev/null || true
   fi
+  if recovery_owns_cancel_lock; then
+    fm_lock_release "$RECOVERY_CANCEL_LOCK" || true
+  fi
   if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
     PREFLIGHT_LOCK_HELD=0
     fm_lock_release "$PREFLIGHT_LOCK" || true
   fi
   fm_lock_release "$LOCK" || true
 }
+recovery_owns_cancel_lock() {
+  local owner
+  [ -n "$RECOVERY_CANCEL_LOCK" ] || return 1
+  owner=$(cat "$RECOVERY_CANCEL_LOCK/pid" 2>/dev/null || true)
+  [ "$owner" = "${BASHPID:-$$}" ]
+}
 recovery_mark_cancelled() {
   local held=0
   [ -n "$RECOVERY_CANCEL_GUARD" ] || return 0
-  if [ -n "$RECOVERY_CANCEL_LOCK" ]; then
+  if recovery_owns_cancel_lock; then
+    held=1
+  elif [ -n "$RECOVERY_CANCEL_LOCK" ]; then
     fm_lock_acquire_wait "$RECOVERY_CANCEL_LOCK" || return 1
     held=1
   fi
@@ -172,6 +183,7 @@ RECOVERY_OUTPUT=$(umask 077; mktemp "$DIR/.${ID}.spawn.XXXXXX") || exit 1
 RECOVERY_CANCEL_GUARD_DIR=$(umask 077; mktemp -d "$DIR/.${ID}.cancel.XXXXXX") || exit 1
 RECOVERY_CANCEL_GUARD="$RECOVERY_CANCEL_GUARD_DIR/cancelled"
 RECOVERY_CANCEL_LOCK="$RECOVERY_CANCEL_GUARD_DIR/handoff.lock"
+fm_lock_acquire_wait "$RECOVERY_CANCEL_LOCK" || exit 1
 case $- in *m*) RECOVERY_MONITOR_WAS_ON=1 ;; esac
 set -m
 FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_DASHBOARD_RECOVERY_CANCEL_GUARD="$RECOVERY_CANCEL_GUARD" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery > "$RECOVERY_OUTPUT" 2>&1 &
@@ -180,6 +192,7 @@ if [ -n "$RECOVERY_TEST_READY" ]; then
   while [ ! -e "$RECOVERY_TEST_CONTINUE" ]; do sleep 0.01; done
 fi
 RECOVERY_PID=$!
+fm_lock_release "$RECOVERY_CANCEL_LOCK" || exit 1
 [ "$RECOVERY_MONITOR_WAS_ON" = 1 ] || set +m
 wait "$RECOVERY_PID" || recovery_status=$?
 RECOVERY_PID=

@@ -745,6 +745,10 @@ spawn_recovery_submit() {
   fi
   guard=$SPAWN_RECOVERY_CANCEL_GUARD
   lock="${guard%/cancelled}/handoff.lock"
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_REGISTRATION_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_REGISTRATION_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_REGISTRATION_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_REGISTRATION_CONTINUE" ]; do sleep 0.01; done
+  fi
   fm_lock_acquire_wait "$lock" || return 1
   if [ -e "$guard" ] || [ -L "$guard" ]; then
     fm_lock_release "$lock" || return 1
