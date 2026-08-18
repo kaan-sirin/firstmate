@@ -614,10 +614,17 @@ make_launch_capturing_tmux() {
 set -u
 case "$*" in
   *"#{pane_current_path}"*) printf '%s\n' "${FM_FAKE_PANE_PATH:-}"; exit 0 ;;
+  *"#{pane_current_command}"*) printf 'codex\n'; exit 0 ;;
 esac
 case "${1:-}" in
   display-message) printf 'firstmate\n'; exit 0 ;;
-  list-windows) exit 0 ;;
+  list-windows)
+    for meta in "${FM_FAKE_STATE:-/nonexistent}"/*.meta; do
+      [ -f "$meta" ] || continue
+      printf 'fm-%s\n' "$(basename "$meta" .meta)"
+    done
+    exit 0
+    ;;
   has-session|new-session|new-window|kill-window) exit 0 ;;
   send-keys)
     if [ -n "${FM_FAKE_LAUNCH_LOG:-}" ]; then
@@ -652,7 +659,7 @@ spawn_secondmate_capture() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$world/home" \
     FM_STATE_OVERRIDE="$world/home/state" FM_DATA_OVERRIDE="$world/home/data" \
     FM_PROJECTS_OVERRIDE="$world/home/projects" FM_CONFIG_OVERRIDE="$world/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$world/home/state" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$home" "$@" --secondmate
 }
 
@@ -914,6 +921,9 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
   launchlog="$w/launch.log"
   mkdir -p "$w/home/config"
   printf 'codex\n' > "$w/home/config/crew-harness"
+  # This fixture starts a secondmate and then an ordinary ship on one host.
+  # The production default is one, so make the intended two-endpoint scenario explicit.
+  printf '2\n' > "$w/home/config/max-active-workers"
   make_seeded_home "$sm" sm
 
   spawn_secondmate_capture "$w" sm "$sm" "$launchlog" >/dev/null 2>&1
@@ -940,7 +950,7 @@ test_spawn_fallback_chain_and_crew_scout_unaffected() {
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$home" \
     FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
     FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$home/state" FM_FAKE_PANE_PATH="$wt" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" "$id" "$proj" --mode no-mistakes --yolo off >/dev/null 2>&1
   meta="$home/state/$id.meta"
   [ "$(meta_field "$meta" kind)" = ship ] || fail "crew-unaffected: expected an ordinary ship task"
@@ -2463,7 +2473,7 @@ SH
     FM_ROOT_OVERRIDE="$ROOT" FM_HOME="$w/home" \
     FM_STATE_OVERRIDE="$w/home/state" FM_DATA_OVERRIDE="$w/home/data" \
     FM_PROJECTS_OVERRIDE="$w/home/projects" FM_CONFIG_OVERRIDE="$w/home/config" \
-    FM_SPAWN_NO_GUARD=1 FM_FAKE_LAUNCH_LOG="$launchlog" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$w/home/state" FM_FAKE_LAUNCH_LOG="$launchlog" \
     "$ROOT/bin/fm-spawn.sh" sm "$sm" --secondmate 2>&1); status=$?
   expect_code 0 "$status" "spawn should remain available after reread cleanup failure"
   assert_contains "$out" "CONFIG_REREAD: secondmate sm: quarantined pre-relaunch generations" \
