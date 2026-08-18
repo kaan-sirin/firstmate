@@ -20,7 +20,8 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
-MAX_BYTES=${FM_SHIP_PREFLIGHT_MAX_BYTES:-65536}
+# shellcheck source=bin/fm-ship-preflight-lib.sh
+. "$SCRIPT_DIR/fm-ship-preflight-lib.sh"
 
 usage() { sed -n '2,8p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
@@ -28,13 +29,6 @@ sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" |
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 links_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %l "$1"; else stat -c %h "$1"; fi; }
 owner_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi; }
-bytes_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %z "$1"; else stat -c %s "$1"; fi; }
-within_preflight_limit() {
-  local bytes
-  bytes=$(bytes_of "$1" 2>/dev/null) || return 1
-  case "$bytes" in ''|*[!0-9]*) return 1;; esac
-  [ "$bytes" -le "$MAX_BYTES" ]
-}
 valid_private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ] && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
 valid_data_dir() {
   local path=$1 mode owner group other
@@ -62,8 +56,7 @@ ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
 case "$MAX_AGE" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_AGE must be a positive integer";; esac
-case "$MAX_BYTES" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_BYTES must be a positive integer";; esac
-[ "$MAX_BYTES" -le 1048576 ] || die "FM_SHIP_PREFLIGHT_MAX_BYTES exceeds the safe limit"
+fm_ship_preflight_validate_limit || die "FM_SHIP_PREFLIGHT_MAX_BYTES must be a positive integer no greater than 1048576"
 
 FINGERPRINT=''
 CONTRACT_FILE=''
@@ -88,6 +81,7 @@ REC_DIR="$DATA/$ID"
 RECORD="$REC_DIR/ship-preflight.json"
 DIRECT_LOCK=
 DIRECT_LOCK_HELD=0
+DIRECT_CONTRACT_TMP=
 
 contract_valid() {
   jq -e '
@@ -139,6 +133,7 @@ release_direct_lock() {
     DIRECT_LOCK_HELD=0
     fm_lock_release "$DIRECT_LOCK" || true
   fi
+  [ -z "$DIRECT_CONTRACT_TMP" ] || rm -f -- "$DIRECT_CONTRACT_TMP" || true
   exit "$status"
 }
 acquire_direct_lock() {
@@ -177,7 +172,7 @@ publish_direct_record() {
     rm -f -- "$tmp"
     die "could not prepare direct preflight"
   fi
-  if ! within_preflight_limit "$tmp"; then
+  if ! fm_ship_preflight_within_limit "$tmp"; then
     rm -f -- "$tmp"
     die "direct preflight record exceeds the bounded size"
   fi
@@ -196,7 +191,7 @@ read_record() {
     die "no valid private preflight record"
   fi
   valid_private "$RECORD" || die "no valid private preflight record"
-  within_preflight_limit "$RECORD" || die "preflight record exceeds the bounded size"
+  fm_ship_preflight_within_limit "$RECORD" || die "preflight record exceeds the bounded size"
   jq -e --arg id "$ID" '
     .schema_version == 1 and
     .workflow == "ship-end-to-end" and
@@ -238,10 +233,15 @@ case "$COMMAND" in
   publish-direct)
     [ -n "$CONTRACT_FILE" ] || die "--contract-file is required"
     [ -f "$CONTRACT_FILE" ] && [ ! -L "$CONTRACT_FILE" ] || die "contract file is unsafe"
-    within_preflight_limit "$CONTRACT_FILE" || die "preflight input exceeds the bounded size"
     prepare_record_dir
     acquire_direct_lock
-    CONTRACT=$(jq -cS . "$CONTRACT_FILE") || die "malformed preflight contract"
+    DIRECT_CONTRACT_TMP=$(umask 077; mktemp "$REC_DIR/.ship-contract.XXXXXX") || die "could not prepare direct contract"
+    if ! fm_ship_preflight_copy_bounded_file "$CONTRACT_FILE" "$DIRECT_CONTRACT_TMP" || ! chmod 600 "$DIRECT_CONTRACT_TMP" || ! valid_private "$DIRECT_CONTRACT_TMP"; then
+      die "preflight input exceeds the bounded size"
+    fi
+    CONTRACT=$(jq -cS . "$DIRECT_CONTRACT_TMP") || die "malformed preflight contract"
+    rm -f -- "$DIRECT_CONTRACT_TMP" || die "could not remove direct contract"
+    DIRECT_CONTRACT_TMP=
     printf '%s\n' "$CONTRACT" | contract_valid || die "malformed preflight contract"
     REVISION=$(next_producer_revision)
     if printf '%s\n' "$CONTRACT" | jq -e '.complete_plan_approved == true and (.questions | length == 0)' >/dev/null; then

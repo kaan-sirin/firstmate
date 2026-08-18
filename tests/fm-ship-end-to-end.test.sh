@@ -183,6 +183,38 @@ test_direct_record_size_refusal_preserves_prior_record() {
   pass "direct records reject oversized envelopes before replacement"
 }
 
+test_direct_preflight_snapshots_contract_before_parse() {
+  local home="$TMP_ROOT/direct-contract-snapshot" contract="$TMP_ROOT/direct-contract-snapshot.json" replacement="$TMP_ROOT/direct-contract-replacement.json" fakebin="$TMP_ROOT/direct-contract-snapshot-bin" real_jq out record
+  mkdir -p "$home" "$fakebin"
+  make_contract "$contract"
+  jq '.scope = "Replacement scope"' "$contract" > "$replacement" || fail "could not create replacement contract"
+  printf '%2048s' '' >> "$replacement"
+  real_jq=$(command -v jq) || fail "could not find jq"
+  cat > "$fakebin/jq" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [ ! -e "$FM_DIRECT_CONTRACT_SWAPPED" ]; then
+  for arg in "$@"; do
+    if [ "$arg" = -cS ]; then
+      mv -f -- "$FM_DIRECT_CONTRACT_REPLACEMENT" "$FM_DIRECT_CONTRACT_PATH"
+      : > "$FM_DIRECT_CONTRACT_SWAPPED"
+      break
+    fi
+  done
+fi
+exec "$FM_DIRECT_REAL_JQ" "$@"
+SH
+  chmod +x "$fakebin/jq"
+  out=$(PATH="$fakebin:$PATH" FM_SHIP_PREFLIGHT_MAX_BYTES=1024 FM_DIRECT_CONTRACT_PATH="$contract" FM_DIRECT_CONTRACT_REPLACEMENT="$replacement" FM_DIRECT_CONTRACT_SWAPPED="$home/contract-swapped" FM_DIRECT_REAL_JQ="$real_jq" preflight_env "$home" 100 publish-direct direct-contract-snapshot-a1 --contract-file "$contract") \
+    || fail "direct preflight did not publish its bounded snapshot"
+  [ -e "$home/contract-swapped" ] || fail "direct contract mutation did not run"
+  record="$home/data/direct-contract-snapshot-a1/ship-preflight.json"
+  jq -e '.contract.scope == "One change"' "$record" >/dev/null \
+    || fail "direct preflight parsed the replaced contract instead of its snapshot"
+  [ "${out#fingerprint=}" != "$out" ] || fail "direct snapshot publication did not return a fingerprint"
+  pass "direct preflight parses only its private bounded snapshot"
+}
+
 test_preflight_rejects_oversized_inputs_before_publication() {
   local home="$TMP_ROOT/preflight-size" contract="$TMP_ROOT/preflight-size-contract.json" handoff out status
   mkdir -p "$home/data" "$home/state"
@@ -2026,6 +2058,7 @@ test_direct_and_bridge_owned_preflight_authority
 test_direct_preflight_publisher_and_approval
 test_direct_complete_plan_publisher_bypasses_duplicate_approval
 test_direct_record_size_refusal_preserves_prior_record
+test_direct_preflight_snapshots_contract_before_parse
 test_preflight_rejects_oversized_inputs_before_publication
 test_direct_preflight_serializes_corrections
 test_preflight_requires_typed_authority_evidence
