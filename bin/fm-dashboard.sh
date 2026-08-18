@@ -169,7 +169,7 @@ RESULT=$(jq -n \
        provenance:{origin:(if (.x_request? // "") != "" then "slack" else "direct" end),
                    slack_thread_url:thread_url},
        stop:$stop};
-  [$snapshot.tasks[]? | select(.kind != "secondmate" and .current_state.state != "done") | task_record] as $tasks
+  [$snapshot.tasks[]? | select(.kind != "secondmate" and .current_state.state != "done" and .current_state.state != "failed") | task_record] as $tasks
   | ($tasks | map(select(.state == "working" and .timing_exact) | {id,name,phase,active_seconds})) as $progress
   | ($tasks | map(select(.stop != null) | {id,name,kind:.stop.verb,summary:(.stop.summary | clip(240)),slack_thread_url:.provenance.slack_thread_url})) as $needs
   | {schema_version:1,

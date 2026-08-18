@@ -877,7 +877,7 @@ case "$1" in
 esac
 SH
   chmod +x "$fakebin/mktemp" "$fakebin/tmux"
-  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$id" --relaunch > "$home/spawn.out" 2>&1 &
+  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SHIP_PREFLIGHT_NOW=101 FM_SPAWN_NO_GUARD=1 "$ROOT/bin/fm-spawn.sh" "$id" --relaunch > "$home/spawn.out" 2>&1 &
   spawn_pid=$!
   attempts=0
   while [ ! -e "$home/launch-literal" ] && [ "$attempts" -lt 500 ]; do
@@ -966,7 +966,7 @@ SH
     fail "independent preflight lock holder did not start"
   fi
   holder_owner=$(cat "$home/data/$id/.ship-preflight.lock/pid")
-  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$holder_owner" "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --dashboard-recovery > "$home/spoof-spawn.out" 2>&1 &
+  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SHIP_PREFLIGHT_NOW=103 FM_SPAWN_NO_GUARD=1 FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$holder_owner" "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --dashboard-recovery > "$home/spoof-spawn.out" 2>&1 &
   spawn_pid=$!
   attempts=0
   while kill -0 "$spawn_pid" 2>/dev/null && [ "$attempts" -lt 30 ]; do
@@ -1781,6 +1781,10 @@ test_dashboard_keeps_only_active_tasks() {
   record="$home/data/dashboard.json"
   jq -e '.projection.in_progress == [] and .projection.needs_you == [] and .technical.tasks == []' "$record" >/dev/null \
     || fail "dashboard must not retain completed tasks as active work"
+  write_snapshot "$mock" failed '[]'
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=120 "$DASHBOARD" refresh >/dev/null || fail "failed dashboard refresh failed"
+  jq -e '.projection.in_progress == [] and .projection.needs_you == [] and .technical.tasks == []' "$record" >/dev/null \
+    || fail "dashboard must not retain failed tasks as active work"
   pass "dashboard retains only active task records"
 }
 
