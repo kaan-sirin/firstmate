@@ -47,6 +47,7 @@
 set -u
 
 REQUIRED_SHELLCHECK=0.11.0
+SHELLCHECK_MEMORY_LIMIT_BYTES=1073741824
 # ShellCheck retains analysis state for every root passed to one invocation. Keep
 # each process small enough for a single-worker lint to remain safe on the shared
 # fleet host; this bound applies independently of FM_LINT_JOBS.
@@ -65,8 +66,24 @@ fm_lint_worker_stop() {
   FM_LINT_WORKER_SHELLCHECK_PID=
 }
 
+fm_lint_source_isolated_fallback() {  # <path>
+  local path=$1
+  awk '
+    /^[[:space:]]*(\.|source)[[:space:]]+/ {print ":"; next}
+    {print}
+  ' "$path" | "$FM_LINT_PRLIMIT" --as="${FM_LINT_MEMORY_LIMIT_BYTES}:${FM_LINT_MEMORY_LIMIT_BYTES}" -- \
+    "$FM_LINT_SHELLCHECK" --norc -- -
+}
+
+fm_lint_bounded_failure_is_resource() {  # <exit-status> <output>
+  case "$1" in
+    134|137) return 0 ;;
+  esac
+  grep -Eiq 'cannot allocate memory|memory (limit|exhausted)|out of memory|heap overflow|stack space overflow|resource limit' "$2"
+}
+
 fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
-  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0 batch_rc root_index timing
+  local manifest=$1 output_dir=$2 shard_index=$3 tab index path output rc=0 batch_rc root_index timing batch_output fallback_output
   local -a roots batch
   roots=()
   tab=$(printf '\t')
@@ -84,21 +101,35 @@ fm_lint_worker() {  # <manifest> <output-dir> <shard-index>
     while [ "$root_index" -lt "${#roots[@]}" ]; do
       batch=("${roots[@]:root_index:SHELLCHECK_BATCH_ROOT_LIMIT}")
       timing=
+      batch_output="$output_dir/batch.$shard_index.$root_index.out"
       if [ -n "${FM_LINT_BATCH_TIMING_DIR:-}" ]; then
         timing="$FM_LINT_BATCH_TIMING_DIR/batch.$shard_index.$root_index"
         if [ "$(uname)" = Darwin ]; then
-          "$FM_LINT_TIME" -lp -o "$timing" "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+          "$FM_LINT_TIME" -lp -o "$timing" "$FM_LINT_PRLIMIT" --as="${FM_LINT_MEMORY_LIMIT_BYTES}:${FM_LINT_MEMORY_LIMIT_BYTES}" -- \
+            "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" > "$batch_output" 2>&1 &
         else
           "$FM_LINT_TIME" -f 'wall_seconds=%e\nuser_seconds=%U\nsystem_seconds=%S\nmax_rss_kib=%M' -o "$timing" \
-            "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+            "$FM_LINT_PRLIMIT" --as="${FM_LINT_MEMORY_LIMIT_BYTES}:${FM_LINT_MEMORY_LIMIT_BYTES}" -- \
+            "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" > "$batch_output" 2>&1 &
         fi
       else
-        "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" >> "$output.out" 2>&1 &
+        "$FM_LINT_PRLIMIT" --as="${FM_LINT_MEMORY_LIMIT_BYTES}:${FM_LINT_MEMORY_LIMIT_BYTES}" -- \
+          "$FM_LINT_SHELLCHECK" --norc --external-sources -- "${batch[@]}" > "$batch_output" 2>&1 &
       fi
       FM_LINT_WORKER_SHELLCHECK_PID=$!
       batch_rc=0
       wait "$FM_LINT_WORKER_SHELLCHECK_PID" || batch_rc=$?
       FM_LINT_WORKER_SHELLCHECK_PID=
+      cat "$batch_output" >> "$output.out"
+      if [ "$batch_rc" -ne 0 ] && fm_lint_bounded_failure_is_resource "$batch_rc" "$batch_output"; then
+        printf 'fm-lint.sh: bounded ShellCheck failed for %s; source-isolated fallback follows.\n' "${batch[0]}" >> "$output.out"
+        fallback_output="$output_dir/fallback.$shard_index.$root_index.out"
+        fm_lint_source_isolated_fallback "${batch[0]}" > "$fallback_output" 2>&1 &
+        FM_LINT_WORKER_SHELLCHECK_PID=$!
+        wait "$FM_LINT_WORKER_SHELLCHECK_PID" || true
+        FM_LINT_WORKER_SHELLCHECK_PID=
+        cat "$fallback_output" >> "$output.out"
+      fi
       if [ "$rc" -eq 0 ] && [ "$batch_rc" -ne 0 ]; then
         rc=$batch_rc
       fi
@@ -118,7 +149,8 @@ if [ "${1:-}" = "--internal-worker" ]; then
     printf 'fm-lint.sh: --internal-worker is private to the lint owner.\n' >&2
     exit 2
   }
-  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] || exit 2
+  [ "$#" -eq 4 ] && [ -n "${FM_LINT_SHELLCHECK:-}" ] && [ -n "${FM_LINT_PRLIMIT:-}" ] \
+    && [ -n "${FM_LINT_MEMORY_LIMIT_BYTES:-}" ] || exit 2
   fm_lint_worker "$2" "$3" "$4"
   exit $?
 fi
@@ -276,6 +308,17 @@ if [ "$resolved" != "$REQUIRED_SHELLCHECK" ]; then
     "$REQUIRED_SHELLCHECK" "$resolved" "$REQUIRED_SHELLCHECK" >&2
   exit 1
 fi
+
+if [ "$(uname -s)" != Linux ]; then
+  printf 'fm-lint.sh: source-aware ShellCheck requires Linux prlimit memory limits; refusing unsafe lint on %s.\n' "$(uname -s)" >&2
+  exit 2
+fi
+if ! FM_LINT_PRLIMIT=$(command -v prlimit); then
+  printf 'fm-lint.sh: prlimit is required to bound each source-aware ShellCheck process.\n' >&2
+  exit 127
+fi
+FM_LINT_MEMORY_LIMIT_BYTES=$SHELLCHECK_MEMORY_LIMIT_BYTES
+export FM_LINT_PRLIMIT FM_LINT_MEMORY_LIMIT_BYTES
 
 if [ "$CHANGED_MODE" -eq 1 ] && [ "$ROOT_COUNT" -eq 0 ]; then
   printf 'fm-lint.sh: no changed lint targets\n'

@@ -293,6 +293,44 @@ SH
   chmod +x "$fakebin/shellcheck"
 }
 
+fm_lint_stub_prlimit_memory_fallback() {  # <fakebin-dir>
+  local fakebin=$1
+  cat > "$fakebin/prlimit" <<'SH'
+#!/usr/bin/env bash
+limit=${1:-}
+[ "$limit" = "--as=1073741824:1073741824" ] || exit 64
+shift
+[ "${1:-}" = -- ] || exit 64
+shift
+FM_TEST_PRLIMIT_ACTIVE=1 "$@"
+SH
+  chmod +x "$fakebin/prlimit"
+  cat > "$fakebin/shellcheck" <<'SH'
+#!/usr/bin/env bash
+if [ "${1:-}" = --version ]; then
+  printf 'ShellCheck - shell script analysis tool\nversion: 0.11.0\n'
+  exit 0
+fi
+[ "${FM_TEST_PRLIMIT_ACTIVE:-}" = 1 ] || exit 65
+state=${FM_TEST_SHELLCHECK_STATE:?}
+marker="$state/running.$$"
+: > "$marker"
+active=$(find "$state" -maxdepth 1 -type f -name 'running.*' | wc -l | tr -d '[:space:]')
+[ "$active" -le 1 ] || : > "$state/concurrent"
+if [ "$*" = "--norc --external-sources -- tests/fm-pending-reply.test.sh" ]; then
+  printf 'simulated memory limit\n' >&2
+  rm -f "$marker"
+  exit 75
+fi
+[ "$*" = "--norc -- -" ] || { rm -f "$marker"; exit 66; }
+cat >/dev/null
+: > "$state/fallback-ran"
+rm -f "$marker"
+exit 0
+SH
+  chmod +x "$fakebin/shellcheck"
+}
+
 # Default fm-lint runs the separate workflow validator after ShellCheck. These
 # changed-mode fixtures exercise ShellCheck root selection, so provide the
 # pinned workflow-linter interface as well instead of depending on a host tool.
@@ -854,6 +892,25 @@ test_single_worker_uses_bounded_shellcheck_batches() {
   pass "jobs=1 splits each ShellCheck process into bounded one-root batches"
 }
 
+test_pathological_root_uses_a_limited_source_isolated_fallback() {
+  local tmp fakebin state out rc
+  tmp=$(fm_test_tmproot fm-lint-pathological-root)
+  fakebin=$(fm_fakebin "$tmp")
+  state="$tmp/state"
+  mkdir -p "$state"
+  fm_lint_stub_prlimit_memory_fallback "$fakebin"
+
+  rc=0
+  out=$(PATH="$fakebin:$PATH" FM_LINT_JOBS=1 FM_TEST_SHELLCHECK_STATE="$state" \
+    "$LINT" tests/fm-pending-reply.test.sh 2>&1) || rc=$?
+  [ "$rc" -eq 75 ] || fail "a bounded pathological root must preserve its failing result, got $rc"$'\n'"$out"
+  assert_contains "$out" "simulated memory limit" "the bounded source-aware result was lost"
+  assert_contains "$out" "source-isolated fallback follows" "the safe fallback was not explicit"
+  [ -e "$state/fallback-ran" ] || fail "the pathological root did not receive source-isolated fallback coverage"
+  [ ! -e "$state/concurrent" ] || fail "pathological-root fallback started concurrent ShellCheck invocations"
+  pass "a pathological source graph is limited and receives explicit serial fallback coverage"
+}
+
 test_worker_trees_stop_on_signal() {
   local tmp fakebin fixture jobs telemetry lint_tmp pid_file out_file telemetry_file
   local parent_pid shellcheck_pid i parent_rc survivor
@@ -1016,6 +1073,7 @@ test_clean_fixture_passes
 test_default_job_is_one_and_explicit_two_overrides
 test_jobs_are_deterministic_and_complete
 test_single_worker_uses_bounded_shellcheck_batches
+test_pathological_root_uses_a_limited_source_isolated_fallback
 test_worker_trees_stop_on_signal
 test_seeded_module_boundary_parity
 test_changed_mode_lints_only_the_changed_file
