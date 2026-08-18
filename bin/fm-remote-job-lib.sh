@@ -457,13 +457,18 @@ fm_remote_job_read_deadline() { # <job-dir>
   fm_remote_job_read_number "$1" deadline
 }
 
-fm_remote_job_register_capacity_route() { # <home>
-  local home=$1 marker id capacity routes record tmp existing
+fm_remote_job_register_capacity_route() { # <home> [expected-id]
+  local home=$1 expected_id=${2:-} marker id capacity routes record tmp existing
+  [ -z "$expected_id" ] || fm_remote_job_safe_id "$expected_id" || return 1
   marker="$home/.fm-secondmate-home"
-  [ ! -e "$marker" ] && [ ! -L "$marker" ] && return 0
+  if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    [ -z "$expected_id" ] && return 0
+    return 2
+  fi
   [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
   id=$(<"$marker")
   fm_remote_job_safe_id "$id" || return 1
+  [ -z "$expected_id" ] || [ "$id" = "$expected_id" ] || return 2
   case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
   capacity="$FM_REMOTE_JOB_STATE/worker-capacity"
   if [ -e "$capacity" ] || [ -L "$capacity" ]; then
@@ -493,6 +498,31 @@ fm_remote_job_register_capacity_route() { # <home>
     rm -f -- "$tmp"
     [ -f "$record" ] && [ ! -L "$record" ] && [ "$(<"$record")" = "$home" ] || return 1
   fi
+}
+
+fm_remote_job_register_capacity_routes() { # <route-index>
+  local index=$1 record id home status seen_ids=$'\n' seen_homes=$'\n'
+  [ -f "$index" ] && [ ! -L "$index" ] || return 1
+  while IFS= read -r record || [ -n "$record" ]; do
+    case "$record" in *$'\t'*) ;; *) return 1 ;; esac
+    id=${record%%$'\t'*}
+    home=${record#*$'\t'}
+    case "$home" in *$'\t'*) return 1 ;; esac
+    fm_remote_job_safe_id "$id" || return 1
+    home=$(fm_remote_job_normalize_absolute_path "$home") || return 1
+    case "$seen_ids" in *$'\n'"$id"$'\n'*) return 1 ;; esac
+    case "$seen_homes" in *$'\n'"$home"$'\n'*) return 1 ;; esac
+    seen_ids+="$id"$'\n'
+    seen_homes+="$home"$'\n'
+    [ -e "$home" ] || [ -L "$home" ] || continue
+    home=$(fm_remote_job_canonical_existing_dir "$home") || return 1
+    fm_remote_job_register_capacity_route "$home" "$id" || status=$?
+    case "${status:-0}" in
+      0) ;;
+      2) unset status ;;
+      *) return 1 ;;
+    esac
+  done < "$index"
 }
 
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
