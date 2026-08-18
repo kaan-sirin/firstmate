@@ -45,7 +45,7 @@ write_bridge_handoff() {
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || fail "could not prepare bridge record"
   jq -n --arg id "$id" --argjson contract "$contract_json" --arg fp "$fp" --arg origin "$origin" --arg state "$state" --argjson now "$now" --argjson bypass "$bypass" --argjson revision "$revision" '
     {schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:$origin,state:$state,contract:$contract,producer_revision:$revision}
-    + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
+    + (if $state == "approved" then {approval:{authority:(if $origin == "bridge" then "agent-bridge" else "direct-captain" end),evidence:(if $origin == "bridge" then "bridge-submission" else "direct-captain" end),approved_at:$now,complete_plan_bypass:$bypass}} else {created_at:$now} end)
   ' > "$tmp" || { rm -f -- "$tmp"; fail "could not write bridge record"; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
     rm -f -- "$tmp"
@@ -97,6 +97,37 @@ test_direct_and_bridge_owned_preflight_authority() {
   assert_contains "$out" "no valid private bridge handoff" "generic submission refusal was unclear"
   assert_absent "$home/data/generic-a1/ship-preflight.json" "generic submission wrote an approval record"
   pass "typed direct and bridge-owned Slack preflights preserve approval authority"
+}
+
+test_direct_preflight_publisher_and_approval() {
+  local home="$TMP_ROOT/direct-publisher" contract="$TMP_ROOT/direct-publisher-contract.json" corrected="$TMP_ROOT/direct-publisher-corrected.json" fp next_fp out status record
+  mkdir -p "$home"
+  make_contract "$contract"
+  out=$(preflight_env "$home" 100 publish-direct direct-publisher-a1 --contract-file "$contract") || fail "direct publisher should create an awaiting record"
+  fp=${out#fingerprint=}
+  case "$fp" in
+    ????????*) [ "${#fp}" -eq 64 ] && ! printf '%s' "$fp" | grep -q '[^0-9a-f]' ;;
+    *) false ;;
+  esac || fail "direct publisher did not return a fingerprint"
+  record="$home/data/direct-publisher-a1/ship-preflight.json"
+  jq -e '.origin == "direct" and .state == "awaiting_approval" and .producer_revision == 1' "$record" >/dev/null || fail "direct publisher did not create an awaiting direct record"
+
+  out=$(preflight_env "$home" 101 approve-direct direct-publisher-a1 --fingerprint "$fp") || fail "direct approval should approve the published record"
+  [ "$out" = approved ] || fail "direct approval did not report approval"
+  preflight_env "$home" 102 verify direct-publisher-a1 --fingerprint "$fp" >/dev/null || fail "direct approved record should authorize dispatch"
+  jq -e '.state == "approved" and .producer_revision == 2 and .approval.authority == "direct-captain" and .approval.evidence == "direct-captain"' "$record" >/dev/null || fail "direct approval did not retain typed captain evidence"
+
+  out=$(preflight_env "$home" 103 approve-direct direct-publisher-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a direct record accepted duplicate approval"
+  assert_contains "$out" "not awaiting approval" "duplicate direct approval refusal was unclear"
+
+  jq '.scope = "Corrected change"' "$contract" > "$corrected" || fail "could not create corrected direct contract"
+  out=$(preflight_env "$home" 104 publish-direct direct-publisher-a1 --contract-file "$corrected") || fail "corrected direct contract should republish"
+  next_fp=${out#fingerprint=}
+  [ "$next_fp" != "$fp" ] || fail "corrected direct contract retained its old fingerprint"
+  jq -e '.state == "awaiting_approval" and .producer_revision == 3' "$record" >/dev/null || fail "corrected direct contract did not require fresh approval"
+  pass "direct publisher creates typed records and requires fresh approval"
 }
 
 test_preflight_requires_typed_authority_evidence() {
@@ -1832,6 +1863,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 }
 
 test_direct_and_bridge_owned_preflight_authority
+test_direct_preflight_publisher_and_approval
 test_preflight_requires_typed_authority_evidence
 test_preflight_requires_a_bounded_producer_revision
 test_grouped_questions_and_bounded_contract

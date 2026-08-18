@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Own the durable two-phase approval record for a material software ship task.
 # Usage:
+#   fm-ship-end-to-end.sh publish-direct <task-id> --contract-file <path>
+#   fm-ship-end-to-end.sh approve-direct <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify <task-id> --fingerprint <sha256>
 #   fm-ship-end-to-end.sh verify-current <task-id>
 #   fm-ship-end-to-end.sh verify-dispatched <task-id> --fingerprint <sha256>
@@ -47,13 +49,14 @@ valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac
 valid_fingerprint() { case "$1" in ????????*) [ "${#1}" -eq 64 ] && ! printf '%s' "$1" | grep -q '[^0-9a-f]' ;; *) return 1;; esac; }
 
 COMMAND=${1:-}
-case "$COMMAND" in verify|verify-current|verify-dispatched|verify-recovery|validate) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
+case "$COMMAND" in publish-direct|approve-direct|verify|verify-current|verify-dispatched|verify-recovery|validate) shift;; -h|--help) usage; exit 0;; *) usage >&2; exit 2;; esac
 ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
 case "$MAX_AGE" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_AGE must be a positive integer";; esac
 
 FINGERPRINT=''
+CONTRACT_FILE=''
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --fingerprint)
@@ -61,6 +64,10 @@ while [ "$#" -gt 0 ]; do
       case "$key" in
         fingerprint) FINGERPRINT=$1;;
       esac
+      ;;
+    --contract-file)
+      shift; [ "$#" -gt 0 ] || die "--contract-file needs a value"
+      CONTRACT_FILE=$1
       ;;
     *) usage >&2; exit 2;;
   esac
@@ -87,6 +94,48 @@ preflight_fingerprint() {
   local contract=$1 bound
   bound=$(jq -cn --arg id "$ID" --argjson contract "$contract" '{task_id:$id,contract:$contract}' | jq -cS .) || return 1
   sha256_text "$bound"
+}
+prepare_record_dir() {
+  if [ -e "$DATA" ] || [ -L "$DATA" ]; then
+    valid_data_dir "$DATA" || die "unsafe task record directory"
+  else
+    (umask 077; mkdir -p "$DATA") || die "could not create task record directory"
+    valid_data_dir "$DATA" || die "unsafe task record directory"
+  fi
+  if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
+    valid_private_dir "$REC_DIR" || die "unsafe task record directory"
+  else
+    (umask 077; mkdir "$REC_DIR") || die "could not create task record directory"
+    valid_private_dir "$REC_DIR" || die "unsafe task record directory"
+  fi
+}
+next_producer_revision() {
+  if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
+    read_record
+    jq -r '.producer_revision + 1' "$RECORD"
+  else
+    printf '1\n'
+  fi
+}
+publish_direct_record() {
+  local contract=$1 state=$2 revision=$3 approval tmp record
+  case "$revision" in ''|*[!0-9]*) die "preflight producer revision is malformed";; esac
+  [ "$revision" -le 9007199254740991 ] || die "preflight producer revision is malformed"
+  preflight_fingerprint "$contract" >/dev/null || die "could not fingerprint direct preflight"
+  FINGERPRINT=$(preflight_fingerprint "$contract")
+  if [ "$state" = approved ]; then
+    approval=$(jq -cn --argjson now "$NOW" --argjson bypass "$(printf '%s' "$contract" | jq '.complete_plan_approved == true')" '{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:$bypass}') || die "could not create direct approval"
+    record=$(jq -cn --arg id "$ID" --arg fp "$FINGERPRINT" --argjson contract "$contract" --argjson revision "$revision" --argjson approval "$approval" '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:$revision,approval:$approval}') || die "could not create direct preflight"
+  else
+    record=$(jq -cn --arg id "$ID" --arg fp "$FINGERPRINT" --argjson contract "$contract" --argjson revision "$revision" --argjson now "$NOW" '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:$revision,created_at:$now}') || die "could not create direct preflight"
+  fi
+  tmp=$(umask 077; mktemp "$REC_DIR/.ship-preflight.XXXXXX") || die "could not prepare direct preflight"
+  if ! printf '%s\n' "$record" > "$tmp" || ! chmod 600 "$tmp" || ! valid_private "$tmp"; then
+    rm -f -- "$tmp"
+    die "could not prepare direct preflight"
+  fi
+  mv -f -- "$tmp" "$RECORD" || die "could not publish direct preflight"
+  read_record
 }
 read_record() {
   local record_contract
@@ -122,9 +171,8 @@ verify_record() {
     (.approval | type == "object") and
     (.approval.approved_at | type == "number") and
     (.approval.complete_plan_bypass | type == "boolean") and
-    (.approval.evidence == "bridge-submission") and
-    ((.origin == "direct" and .approval.authority == "direct-captain") or
-     (.origin == "bridge" and .approval.authority == "agent-bridge"))
+    ((.origin == "direct" and .approval.authority == "direct-captain" and .approval.evidence == "direct-captain") or
+     (.origin == "bridge" and .approval.authority == "agent-bridge" and .approval.evidence == "bridge-submission"))
   ' "$RECORD" >/dev/null || die "preflight lacks typed approval authority evidence"
   bypass=$(jq -r 'if (.approval | has("complete_plan_bypass")) then .approval.complete_plan_bypass else "" end' "$RECORD")
   case "$bypass" in
@@ -139,6 +187,27 @@ verify_record() {
 }
 
 case "$COMMAND" in
+  publish-direct)
+    [ -n "$CONTRACT_FILE" ] || die "--contract-file is required"
+    [ -f "$CONTRACT_FILE" ] && [ ! -L "$CONTRACT_FILE" ] || die "contract file is unsafe"
+    prepare_record_dir
+    CONTRACT=$(jq -cS . "$CONTRACT_FILE") || die "malformed preflight contract"
+    printf '%s\n' "$CONTRACT" | contract_valid || die "malformed preflight contract"
+    REVISION=$(next_producer_revision)
+    publish_direct_record "$CONTRACT" awaiting_approval "$REVISION"
+    printf 'fingerprint=%s\n' "$FINGERPRINT"
+    ;;
+  approve-direct)
+    valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
+    read_record
+    [ "$(jq -r '.origin' "$RECORD")" = direct ] || die "direct approval requires a direct preflight"
+    [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "direct preflight is not awaiting approval"
+    [ "$(jq -r '.fingerprint' "$RECORD")" = "$FINGERPRINT" ] || die "preflight fingerprint does not match the awaiting contract"
+    CONTRACT=$(jq -cS '.contract' "$RECORD") || die "malformed preflight contract"
+    REVISION=$(next_producer_revision)
+    publish_direct_record "$CONTRACT" approved "$REVISION"
+    printf 'approved\n'
+    ;;
   validate)
     read_record
     if [ "$(jq -r '.state' "$RECORD")" = approved ]; then
