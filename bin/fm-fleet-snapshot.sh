@@ -417,7 +417,7 @@ task_json_lines() {
   local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source current_transition_at current_active_seconds transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at current_active_seconds current_activity_state transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -465,6 +465,7 @@ task_json_lines() {
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
     current_transition_at=$(printf '%s' "$current_json" | jq -r '.transition_at // "null"')
     current_active_seconds=null
+    current_activity_state=$current_state
     transition_file="$STATE/dashboard-transitions/$id.json"
     recovery_file="$STATE/dashboard-recovery/$id.json"
     recovery_json='{"state":"none"}'
@@ -485,9 +486,12 @@ task_json_lines() {
       case "$transition_epoch" in ''|*[!0-9]*) ;; *)
         case "$transition_incarnation" in ''|*[!A-Za-z0-9._-]*) ;; *)
           case "$transition_active_seconds" in ''|*[!0-9]*) ;; *)
-            if [ "$transition_state" = "$current_state" ] && [ "$transition_incarnation" = "$task_incarnation" ]; then
+            if [ "$transition_incarnation" = "$task_incarnation" ] \
+               && { [ "$transition_state" = "$current_state" ] \
+                    || { [ "$current_state" = unknown ] && [ "$transition_state" = working ]; }; }; then
               current_transition_at=$transition_epoch
               current_active_seconds=$transition_active_seconds
+              current_activity_state=$transition_state
             fi
             ;;
           esac
@@ -597,6 +601,7 @@ task_json_lines() {
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
+      --arg current_activity_state "$current_activity_state" \
       --argjson current_state "$current_json" \
       --argjson current_transition_at "$current_transition_at" \
       --argjson current_active_seconds "$current_active_seconds" \
@@ -628,7 +633,7 @@ task_json_lines() {
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,active_seconds:$current_active_seconds,freshness:"fresh"}),
+        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,active_seconds:$current_active_seconds,activity_state:$current_activity_state,freshness:"fresh"}),
         recovery:$recovery,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"

@@ -1088,8 +1088,9 @@ SH
 }
 
 write_snapshot() {
-  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-100} checkpoint=${8:-0} recovery=${9:-'{"state":"none"}'} json
-  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","source":"%s","detail":"%s","transition_at":%s,"active_seconds":%s},"recovery":%s,"hints":{"open_decisions":%s}}]}' "$url" "$state" "$source" "$detail" "$transition" "$checkpoint" "$recovery" "$decision")
+  local file=$1 state=$2 decision=${3:-null} url=${4:-} source=${5:-pane} detail=${6:-} transition=${7:-100} checkpoint=${8:-0} recovery=${9:-'{"state":"none"}'} activity json
+  activity=${10:-$state}
+  json=$(printf '{"schema":"fm-fleet-snapshot.v1","tasks":[{"id":"dash-a1","kind":"ship","backlog":{"title":"Build dashboard"},"x_request":"r1","x_thread_url":"%s","current_state":{"state":"%s","activity_state":"%s","source":"%s","detail":"%s","transition_at":%s,"active_seconds":%s},"recovery":%s,"hints":{"open_decisions":%s}}]}' "$url" "$state" "$activity" "$source" "$detail" "$transition" "$checkpoint" "$recovery" "$decision")
   printf '%s\n' '#!/usr/bin/env bash' > "$file"
   printf "printf '%%s\\n' '%s'\n" "$json" >> "$file"
   chmod +x "$file"
@@ -1138,6 +1139,26 @@ test_dashboard_omits_uncheckpointed_active_work() {
   jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Building",active_seconds:14}] and .technical.tasks[0].timing_exact == true' "$record" >/dev/null \
     || fail "dashboard did not resume exact timing from the producer checkpoint"
   pass "dashboard omits active work until its producer provides exact timing"
+}
+
+test_dashboard_projects_unknown_launch_work() {
+  local home="$TMP_ROOT/dashboard-unknown-launch" mock="$TMP_ROOT/dashboard-unknown-launch-snapshot" record
+  mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
+  write_snapshot "$mock" unknown '[]' '' pane 'harness state unavailable (unknown codex-unverified)' 100 0 '{"state":"none"}' working
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "unknown launch dashboard refresh failed"
+  record="$home/data/dashboard.json"
+  jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Building",active_seconds:0}] and .technical.tasks[0].state == "unknown" and .technical.tasks[0].activity_state == "working"' "$record" >/dev/null \
+    || fail "dashboard did not project unknown launch work"
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=110 "$DASHBOARD" refresh >/dev/null || fail "unknown launch timing refresh failed"
+  jq -e '.projection.in_progress[0].active_seconds == 10' "$record" >/dev/null || fail "dashboard did not accumulate unknown launch time"
+  write_snapshot "$mock" unknown '[]' '' pane 'harness state unavailable (unknown codex-unverified)' 110 10 '{"state":"none"}' parked
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=120 "$DASHBOARD" refresh >/dev/null || fail "unknown launch pause refresh failed"
+  jq -e '.projection.in_progress == [] and .technical.tasks[0].active_seconds == 10' "$record" >/dev/null || fail "dashboard did not preserve unknown launch pause time"
+  write_snapshot "$mock" unknown '[]' '' pane 'harness state unavailable (unknown codex-unverified)' 130 10 '{"state":"none"}' working
+  FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=140 "$DASHBOARD" refresh >/dev/null || fail "unknown launch resume refresh failed"
+  jq -e '.projection.in_progress == [{id:"dash-a1",name:"Build dashboard",phase:"Building",active_seconds:20}]' "$record" >/dev/null || fail "dashboard did not resume unknown launch timing"
+  pass "dashboard projects unknown launch work with exact timing"
 }
 
 test_dashboard_recovers_stale_publication_lock() {
@@ -1944,6 +1965,7 @@ test_spawn_enforces_the_durable_preflight
 test_recovery_submission_serializes_preflight_corrections
 test_dashboard_projection_and_active_time
 test_dashboard_omits_uncheckpointed_active_work
+test_dashboard_projects_unknown_launch_work
 test_dashboard_recovers_stale_publication_lock
 test_dashboard_filters_and_checking_phase
 test_dashboard_transition_ledger_tracks_canonical_edges

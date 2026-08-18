@@ -128,7 +128,7 @@ printf '%s' "$SNAPSHOT" | jq -e '.schema == "fm-fleet-snapshot.v1" and (.tasks |
 # through fm-crew-state.sh and the durable open-decision fold.
 RESULT=$(jq -n \
   --argjson prior "$PREVIOUS" --argjson snapshot "$SNAPSHOT" --argjson now "$NOW" '
-  def active: .current_state.state == "working";
+  def active: (.current_state.activity_state // .current_state.state) == "working";
   def clip($n): tostring | .[0:$n];
   def phase:
     if (.current_state.source == "run-step" and ((.current_state.detail // "") | test("validat|ci|check"; "i")))
@@ -149,7 +149,7 @@ RESULT=$(jq -n \
     | (.current_state.active_seconds? // null) as $checkpoint
     | (if ($checkpoint | type) == "number" and $checkpoint >= 0
        and ($reported_transition | type) == "number" and $reported_transition <= $now
-       then {active:($checkpoint + (if .current_state.state == "working" then (($now - $reported_transition) | if . > 0 then . else 0 end) else 0 end)),
+       then {active:($checkpoint + (if active then (($now - $reported_transition) | if . > 0 then . else 0 end) else 0 end)),
              transition:$reported_transition,exact:true}
        else {active:$old_seconds,
              transition:(if ($reported_transition | type) == "number" and $reported_transition <= $now
@@ -159,6 +159,7 @@ RESULT=$(jq -n \
     | {id:.id,
        name:(.backlog.title // .id | clip(160)),
        state:.current_state.state,
+       activity_state:(.current_state.activity_state // .current_state.state),
        phase:(if active then phase else null end),
        active_seconds:$timing.active,
        timing_exact:$timing.exact,
@@ -170,7 +171,7 @@ RESULT=$(jq -n \
                    slack_thread_url:thread_url},
        stop:$stop};
   [$snapshot.tasks[]? | select(.kind != "secondmate" and .current_state.state != "done" and .current_state.state != "failed") | task_record] as $tasks
-  | ($tasks | map(select(.state == "working" and .timing_exact) | {id,name,phase,active_seconds})) as $progress
+  | ($tasks | map(select(.activity_state == "working" and .timing_exact and .stop == null) | {id,name,phase,active_seconds})) as $progress
   | ($tasks | map(select(.stop != null) | {id,name,kind:.stop.verb,summary:(.stop.summary | clip(240)),slack_thread_url:.provenance.slack_thread_url})) as $needs
   | {schema_version:1,
      generated_at:$now,

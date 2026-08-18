@@ -3140,6 +3140,13 @@ if [ "$literal_status" -ne 0 ]; then
   fi
   exit "$literal_status"
 fi
+if [ "$KIND" != secondmate ] \
+   && { [ "$DASHBOARD_RECOVERY" -eq 0 ] || [ -z "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; }; then
+  "$SCRIPT_DIR/fm-dashboard-transition.sh" record "$STATE" "$ID" working "$(date +%s)" || {
+    echo "error: could not publish dashboard launch timing for $ID" >&2
+    exit 1
+  }
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
