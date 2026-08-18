@@ -726,7 +726,7 @@ status_presentation_page_snapshot() {  # <state> <snapshot>
     f="$state/$task.status"
     offset=$(status_presentation_cursor_offset "$f") || return 1
     page=$(status_presentation_page_path "$state" "$task")
-    page_ident= page_base= page_end= page_next= page_scan= page_skip_ready=false
+    page_ident='' page_base='' page_end='' page_next='' page_scan='' page_skip_ready=false
     if [ -e "$page" ] || [ -L "$page" ]; then
       [ -f "$page" ] && [ -r "$page" ] && [ ! -L "$page" ] || return 1
       page_data=$(LC_ALL=C command cat "$page" 2>/dev/null) || return 1
