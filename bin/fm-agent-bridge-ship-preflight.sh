@@ -46,8 +46,17 @@ record_producer_revision() {
     end
   ' "$1"
 }
+same_private_handoff() {
+  local first=$1 second=$2 first_inode second_inode
+  valid_private_metadata "$first" && valid_private_metadata "$second" || return 1
+  [ "$(links_of "$first" 2>/dev/null || true)" = 2 ] || return 1
+  [ "$(links_of "$second" 2>/dev/null || true)" = 2 ] || return 1
+  first_inode=$(inode_of "$first" 2>/dev/null || true)
+  second_inode=$(inode_of "$second" 2>/dev/null || true)
+  [ -n "$first_inode" ] && [ "$first_inode" = "$second_inode" ]
+}
 recover_claim() {
-  local claim claim_inode handoff_inode claim_revision handoff_revision
+  local claim claim_revision handoff_revision
   local -a claims
   shopt -s nullglob
   claims=("$HANDOFF_DIR/.${ID}.claim."*)
@@ -56,12 +65,7 @@ recover_claim() {
   [ "${#claims[@]}" -eq 1 ] || return 0
   claim=${claims[0]}
   if [ -e "$HANDOFF" ] || [ -L "$HANDOFF" ]; then
-    claim_inode=$(inode_of "$claim" 2>/dev/null || true)
-    handoff_inode=$(inode_of "$HANDOFF" 2>/dev/null || true)
-    if valid_private_metadata "$claim" && valid_private_metadata "$HANDOFF" \
-      && [ "$(links_of "$claim" 2>/dev/null || true)" = 2 ] \
-      && [ "$(links_of "$HANDOFF" 2>/dev/null || true)" = 2 ] \
-      && [ -n "$claim_inode" ] && [ "$claim_inode" = "$handoff_inode" ]; then
+    if same_private_handoff "$claim" "$HANDOFF"; then
       rm -f -- "$claim" || die "could not recover private bridge handoff"
       return 0
     fi
@@ -113,9 +117,12 @@ VALIDATION_DATA=
 restore_claim() {
   [ -f "$CLAIM" ] && [ -s "$CLAIM" ] || return 0
   if [ ! -e "$HANDOFF" ] && [ ! -L "$HANDOFF" ]; then
-    ln "$CLAIM" "$HANDOFF" 2>/dev/null && rm -f -- "$CLAIM" || true
+    if ln "$CLAIM" "$HANDOFF" 2>/dev/null; then
+      rm -f -- "$CLAIM" || true
+      return 0
+    fi
   fi
-  [ ! -e "$HANDOFF" ] && [ ! -L "$HANDOFF" ] || rm -f -- "$CLAIM" || true
+  same_private_handoff "$CLAIM" "$HANDOFF" && rm -f -- "$CLAIM" || true
 }
 cleanup() {
   local status=$?

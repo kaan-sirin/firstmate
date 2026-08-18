@@ -409,6 +409,66 @@ SH
   pass "bridge restores a claim interrupted after rename"
 }
 
+test_bridge_preserves_claimed_correction_on_cleanup_conflict() {
+  local home="$TMP_ROOT/bridge-cleanup-conflict" id=cleanup-conflict-a1 original="$TMP_ROOT/bridge-cleanup-conflict-original.json" corrected="$TMP_ROOT/bridge-cleanup-conflict-corrected.json" handoff claim fakebin real_cat ready release target_pid publisher attempts out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "could not prepare claimed correction"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  claim="${handoff%/*}/.${id}.claim."
+  fakebin="$TMP_ROOT/bridge-cleanup-conflict-bin"
+  mkdir -p "$fakebin"
+  real_cat=$(command -v cat)
+  cat > "$fakebin/cat" <<'SH'
+#!/usr/bin/env bash
+set -eu
+if [[ "$1" == "$FM_BRIDGE_INTERRUPT_CLAIM"* ]]; then
+  printf '%s\n' "$PPID" > "$FM_BRIDGE_INTERRUPT_PID"
+  : > "$FM_BRIDGE_INTERRUPT_READY"
+  while [ ! -e "$FM_BRIDGE_INTERRUPT_RELEASE" ]; do sleep 0.01; done
+fi
+exec "$FM_BRIDGE_REAL_CAT" "$@"
+SH
+  chmod +x "$fakebin/cat"
+  ready="$home/cleanup-ready"
+  release="$home/cleanup-release"
+  PATH="$fakebin:$PATH" FM_BRIDGE_INTERRUPT_CLAIM="$claim" FM_BRIDGE_REAL_CAT="$real_cat" FM_BRIDGE_INTERRUPT_PID="$home/cleanup-pid" FM_BRIDGE_INTERRUPT_READY="$ready" FM_BRIDGE_INTERRUPT_RELEASE="$release" \
+    bridge_env "$home" publish "$id" > "$home/cleanup-publish.out" 2>&1 &
+  publisher=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    kill "$publisher" 2>/dev/null || true
+    : > "$release"
+    wait "$publisher" 2>/dev/null || true
+    fail "cleanup interruption did not reach the claimed handoff"
+  fi
+  claim=$(find "${handoff%/*}" -maxdepth 1 -type f -name ".${id}.claim.*" -print -quit)
+  [ -n "$claim" ] || fail "cleanup interruption did not create a claimed handoff"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 1 >/dev/null || fail "could not prepare delayed handoff"
+  target_pid=$(cat "$home/cleanup-pid")
+  kill -TERM "$target_pid" || fail "could not interrupt the validating bridge process"
+  : > "$release"
+  wait "$publisher"
+  status=$?
+  [ "$status" -ne 0 ] || fail "cleanup interruption did not stop bridge publication"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$claim" >/dev/null \
+    || fail "cleanup conflict changed the claimed correction"
+  jq -e '.producer_revision == 1 and .state == "approved" and .contract.outcome == "A tested PR"' "$handoff" >/dev/null \
+    || fail "cleanup conflict did not preserve the delayed handoff"
+  assert_absent "$home/data/$id/ship-preflight.json" "cleanup conflict published a stale preflight record"
+  rm -f -- "$handoff" || fail "could not remove delayed cleanup handoff"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not recover the claimed correction after cleanup-conflict resolution"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "cleanup-conflict recovery did not preserve the corrected preflight"
+  assert_absent "$claim" "cleanup-conflict correction claim remained stranded after recovery"
+  pass "bridge preserves claimed corrections on cleanup conflicts"
+}
+
 test_bridge_recovers_a_hard_linked_claim_after_interruption() {
   local home="$TMP_ROOT/bridge-hard-link-recovery" id=hard-link-recovery-a1 contract="$TMP_ROOT/bridge-hard-link-recovery-contract.json" handoff claim
   mkdir -p "$home/data" "$home/state"
@@ -1596,6 +1656,7 @@ test_bridge_preserves_handoff_when_record_directories_are_unsafe
 test_bridge_claims_a_handoff_before_reading_it
 test_bridge_recovers_a_claim_after_interruption
 test_bridge_restores_a_claim_interrupted_after_rename
+test_bridge_preserves_claimed_correction_on_cleanup_conflict
 test_bridge_recovers_a_hard_linked_claim_after_interruption
 test_bridge_preserves_claimed_correction_against_delayed_handoff
 test_bridge_preserves_claimed_correction_on_link_race
