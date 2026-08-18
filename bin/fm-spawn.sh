@@ -1657,8 +1657,9 @@ if [ "$KIND" = secondmate ]; then
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
   if [ "${WORKER_CAPACITY:-0}" -gt 0 ]; then
-    if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
-      echo "error: secondmate $ID cannot skip capacity inheritance while max-active-workers is configured" >&2
+    if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ] \
+       && [ "$CONFIG" != "$PROJ_ABS/config" ]; then
+      echo "error: secondmate $ID cannot skip capacity inheritance outside its pre-inherited config" >&2
       exit 1
     fi
     SECONDMATE_WORKER_CAPACITY=$(fm_worker_capacity_limit "$PROJ_ABS/config") || {
