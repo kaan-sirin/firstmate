@@ -1174,8 +1174,7 @@ test_dashboard_recovery_signal_exits_without_recording_attempts() {
       TERM) expected=143 ;;
     esac
     kill -s "$signal" "$recovery_pid" || fail "could not signal recovery for $signal"
-    wait "$recovery_pid"
-    status=$?
+    if wait "$recovery_pid"; then status=0; else status=$?; fi
     [ "$status" -eq "$expected" ] || fail "$signal recovery continued after cleanup ($status): $(cat "$home/recovery-$signal.out")"
     [ ! -e "$home/state/dashboard-recovery/$id.json" ] || fail "$signal recovery recorded an attempt"
     [ ! -e "$home/data/$id/.ship-preflight.lock" ] && [ ! -L "$home/data/$id/.ship-preflight.lock" ] \
@@ -1191,6 +1190,45 @@ test_dashboard_recovery_signal_exits_without_recording_attempts() {
     [ ! -e "$replacement" ] || fail "$signal recovery allowed a replacement after cancellation"
   done
   pass "dashboard recovery signals stop blocked replacement spawns"
+}
+
+test_dashboard_recovery_cancels_unregistered_spawn() {
+  local home="$TMP_ROOT/dashboard-recovery-unregistered" state_bin="$TMP_ROOT/dashboard-recovery-unregistered-state" agent_bin="$TMP_ROOT/dashboard-recovery-unregistered-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-unregistered-spawn" recovery_bin="$TMP_ROOT/dashboard-recovery-unregistered-runner" ready="$TMP_ROOT/dashboard-recovery-unregistered-ready" continue="$TMP_ROOT/dashboard-recovery-unregistered-continue" replacement="$TMP_ROOT/dashboard-recovery-unregistered-replacement" consumed="$TMP_ROOT/dashboard-recovery-unregistered-consumed" contract="$TMP_ROOT/dashboard-recovery-unregistered-contract.json" fp recovery_pid status attempts
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" dash-unregistered "$contract" direct approved 100) || fail "could not prepare unregistered recovery preflight"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/dash-unregistered.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'for _ in $(seq 1 100); do' '  if [ -e "$FM_DASHBOARD_RECOVERY_CANCEL_GUARD" ]; then' '    rm -f "$FM_DASHBOARD_RECOVERY_CANCEL_GUARD"' '    rmdir "${FM_DASHBOARD_RECOVERY_CANCEL_GUARD%/cancelled}"' '    : > "$FM_RECOVERY_UNREGISTERED_CONSUMED"' '    exit 4' '  fi' '  sleep 0.01' 'done' 'printf replacement > "$FM_RECOVERY_UNREGISTERED_REPLACEMENT"' 'exit 1' > "$spawn_bin"
+  printf '%s\n' 'import os' 'import signal' 'import sys' 'for value in (signal.SIGHUP, signal.SIGINT, signal.SIGTERM):' '    signal.signal(value, signal.SIG_DFL)' 'command = os.environ["FM_RECOVERY_UNREGISTERED_BIN"]' 'os.execvpe(command, [command, *sys.argv[1:]], os.environ)' > "$recovery_bin"
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+  FM_DASHBOARD_RECOVERY_TESTING=1 FM_DASHBOARD_RECOVERY_TEST_PID_READY="$ready" FM_DASHBOARD_RECOVERY_TEST_PID_CONTINUE="$continue" FM_RECOVERY_UNREGISTERED_BIN="$ROOT/bin/fm-dashboard-recovery.sh" FM_RECOVERY_UNREGISTERED_CONSUMED="$consumed" FM_RECOVERY_UNREGISTERED_REPLACEMENT="$replacement" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" python3 "$recovery_bin" observe dash-unregistered > "$home/recovery.out" 2>&1 &
+  recovery_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$recovery_pid" || true
+    fail "recovery did not stop before child registration"
+  fi
+  kill -TERM "$recovery_pid" || fail "could not signal unregistered recovery"
+  : > "$continue"
+  if wait "$recovery_pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 143 ] || fail "unregistered recovery did not stop on TERM ($status): $(cat "$home/recovery.out")"
+  attempts=0
+  while [ ! -e "$consumed" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  [ -e "$consumed" ] || fail "unregistered recovery did not deliver its cancellation guard"
+  [ ! -e "$replacement" ] || fail "unregistered recovery launched a replacement after cancellation"
+  [ ! -e "$home/data/dash-unregistered/.ship-preflight.lock" ] && [ ! -L "$home/data/dash-unregistered/.ship-preflight.lock" ] \
+    || fail "unregistered recovery retained the preflight lock"
+  pass "dashboard recovery cancels an unregistered spawn"
 }
 
 test_dashboard_recovery_relaunches_dead_endpoint() {
@@ -1503,6 +1541,7 @@ test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_serializes_preflight_publication
 test_dashboard_recovery_signal_exits_without_recording_attempts
+test_dashboard_recovery_cancels_unregistered_spawn
 test_dashboard_recovery_relaunches_dead_endpoint
 test_dashboard_recovery_preserves_terminal_transition
 test_dashboard_recovery_preserves_legacy_terminal_receipt

@@ -712,6 +712,16 @@ spawn_busy_event() {
   fi
 }
 
+spawn_recovery_cancelled() {
+  local guard=${FM_DASHBOARD_RECOVERY_CANCEL_GUARD:-}
+  [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "$guard" ] || return 1
+  case "$guard" in "$STATE/dashboard-recovery/.${ID}.cancel."*/cancelled) ;; *) return 1 ;; esac
+  [ -e "$guard" ] || [ -L "$guard" ] || return 1
+  rm -f -- "$guard" 2>/dev/null || true
+  rmdir "${guard%/cancelled}" 2>/dev/null || true
+  return 0
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -937,6 +947,10 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
 fi
 ID=${POS[0]}
 fm_task_id_creation_valid "$ID" || { echo "error: invalid task id" >&2; exit 2; }
+if spawn_recovery_cancelled; then
+  echo "error: dashboard recovery was cancelled for $ID" >&2
+  exit 4
+fi
 if [ "$RELAUNCH" -eq 1 ]; then
   SPAWN_CONTROL_LOCK="$STATE/.control-$ID.lock"
   control_owner=$(cat "$SPAWN_CONTROL_LOCK/pid" 2>/dev/null || true)
@@ -3025,6 +3039,10 @@ if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
         ;;
     esac
   fi
+fi
+if spawn_recovery_cancelled; then
+  echo "error: dashboard recovery was cancelled for $ID" >&2
+  exit 4
 fi
 if ! spawn_send_literal "$T" "$LAUNCH"; then
   if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then

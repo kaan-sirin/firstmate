@@ -37,9 +37,24 @@ PREFLIGHT_LOCK_OWNER=
 RECOVERY_PID=
 RECOVERY_OUTPUT=
 RECOVERY_MONITOR_WAS_ON=0
+RECOVERY_CANCELLED=0
+RECOVERY_CHILD_REAPED=0
+RECOVERY_CANCEL_GUARD=
+RECOVERY_CANCEL_GUARD_DIR=
+RECOVERY_TEST_READY=${FM_DASHBOARD_RECOVERY_TEST_PID_READY:-}
+RECOVERY_TEST_CONTINUE=${FM_DASHBOARD_RECOVERY_TEST_PID_CONTINUE:-}
+if [ -n "$RECOVERY_TEST_READY" ] || [ -n "$RECOVERY_TEST_CONTINUE" ]; then
+  [ "${FM_DASHBOARD_RECOVERY_TESTING:-0}" = 1 ] && [ -n "$RECOVERY_TEST_READY" ] && [ -n "$RECOVERY_TEST_CONTINUE" ] || exit 1
+fi
 cleanup() {
   if [ -n "$RECOVERY_OUTPUT" ]; then
     rm -f -- "$RECOVERY_OUTPUT" || true
+  fi
+  if [ "$RECOVERY_CANCELLED" = 1 ] && [ "$RECOVERY_CHILD_REAPED" = 0 ] && [ -n "$RECOVERY_CANCEL_GUARD" ]; then
+    (umask 077; : > "$RECOVERY_CANCEL_GUARD") || true
+  elif [ -n "$RECOVERY_CANCEL_GUARD_DIR" ]; then
+    [ -z "$RECOVERY_CANCEL_GUARD" ] || rm -f -- "$RECOVERY_CANCEL_GUARD" || true
+    rmdir "$RECOVERY_CANCEL_GUARD_DIR" 2>/dev/null || true
   fi
   if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
     PREFLIGHT_LOCK_HELD=0
@@ -49,10 +64,15 @@ cleanup() {
 }
 recovery_signal() {
   local signal=$1 status=$2
+  RECOVERY_CANCELLED=1
+  if [ -n "$RECOVERY_CANCEL_GUARD" ]; then
+    (umask 077; : > "$RECOVERY_CANCEL_GUARD") || true
+  fi
   if [ -n "$RECOVERY_PID" ]; then
     kill -s "$signal" -- "-$RECOVERY_PID" 2>/dev/null || kill -s "$signal" "$RECOVERY_PID" 2>/dev/null || true
     wait "$RECOVERY_PID" 2>/dev/null || true
     RECOVERY_PID=
+    RECOVERY_CHILD_REAPED=1
   fi
   exit "$status"
 }
@@ -137,16 +157,26 @@ case "$agent_state" in
   missing) recovery_action=--recover-missing ;;
 esac
 RECOVERY_OUTPUT=$(umask 077; mktemp "$DIR/.${ID}.spawn.XXXXXX") || exit 1
+RECOVERY_CANCEL_GUARD_DIR=$(umask 077; mktemp -d "$DIR/.${ID}.cancel.XXXXXX") || exit 1
+RECOVERY_CANCEL_GUARD="$RECOVERY_CANCEL_GUARD_DIR/cancelled"
 case $- in *m*) RECOVERY_MONITOR_WAS_ON=1 ;; esac
 set -m
-FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery > "$RECOVERY_OUTPUT" 2>&1 &
+FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_DASHBOARD_RECOVERY_CANCEL_GUARD="$RECOVERY_CANCEL_GUARD" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery > "$RECOVERY_OUTPUT" 2>&1 &
+if [ -n "$RECOVERY_TEST_READY" ]; then
+  : > "$RECOVERY_TEST_READY"
+  while [ ! -e "$RECOVERY_TEST_CONTINUE" ]; do sleep 0.01; done
+fi
 RECOVERY_PID=$!
 [ "$RECOVERY_MONITOR_WAS_ON" = 1 ] || set +m
 wait "$RECOVERY_PID" || recovery_status=$?
 RECOVERY_PID=
+RECOVERY_CHILD_REAPED=1
 out=$(< "$RECOVERY_OUTPUT")
 rm -f -- "$RECOVERY_OUTPUT" || exit 1
 RECOVERY_OUTPUT=
+rmdir "$RECOVERY_CANCEL_GUARD_DIR" || exit 1
+RECOVERY_CANCEL_GUARD_DIR=
+RECOVERY_CANCEL_GUARD=
 if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
   PREFLIGHT_LOCK_HELD=0
   fm_lock_release "$PREFLIGHT_LOCK" || exit 1
