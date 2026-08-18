@@ -238,6 +238,8 @@ SUB_HOME_MARKER=".fm-secondmate-home"
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-worker-capacity-lib.sh
+. "$SCRIPT_DIR/fm-worker-capacity-lib.sh"
 # shellcheck source=bin/fm-control-lib.sh
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
@@ -922,6 +924,23 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
+  # This lock serializes fresh spawns, so the active count and the later meta
+  # publication form one admission decision. Relaunches do not enter here:
+  # they replace a known endpoint and must not consume a second worker slot.
+  WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
+    echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
+    exit 1
+  }
+  if [ "$WORKER_CAPACITY" -gt 0 ]; then
+    WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
+      echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    }
+    if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+      echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
+      exit 1
+    fi
+  fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
