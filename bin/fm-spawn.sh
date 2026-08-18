@@ -713,13 +713,57 @@ spawn_busy_event() {
 }
 
 spawn_recovery_cancelled() {
-  local guard=${FM_DASHBOARD_RECOVERY_CANCEL_GUARD:-}
-  [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "$guard" ] || return 1
-  case "$guard" in "$STATE/dashboard-recovery/.${ID}.cancel."*/cancelled) ;; *) return 1 ;; esac
+  local guard
+  spawn_recovery_guard_path || return 1
+  guard=$SPAWN_RECOVERY_CANCEL_GUARD
   [ -e "$guard" ] || [ -L "$guard" ] || return 1
   rm -f -- "$guard" 2>/dev/null || true
   rmdir "${guard%/cancelled}" 2>/dev/null || true
   return 0
+}
+
+spawn_recovery_guard_path() {
+  SPAWN_RECOVERY_CANCEL_GUARD=
+  [ "$DASHBOARD_RECOVERY" -eq 1 ] || return 1
+  case "${FM_DASHBOARD_RECOVERY_CANCEL_GUARD:-}" in
+    "$STATE/dashboard-recovery/.${ID}.cancel."*/cancelled)
+      SPAWN_RECOVERY_CANCEL_GUARD=$FM_DASHBOARD_RECOVERY_CANCEL_GUARD
+      return 0
+      ;;
+    *) return 1 ;;
+  esac
+}
+
+spawn_recovery_submit() {
+  local guard lock status=0
+  if ! spawn_recovery_guard_path; then
+    spawn_send_literal "$@"
+    return
+  fi
+  guard=$SPAWN_RECOVERY_CANCEL_GUARD
+  lock="${guard%/cancelled}/handoff.lock"
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$guard" ] || [ -L "$guard" ]; then
+    fm_lock_release "$lock" || return 1
+    rm -f -- "$guard" 2>/dev/null || true
+    rmdir "${guard%/cancelled}" 2>/dev/null || true
+    return 4
+  fi
+  fm_lock_release "$lock" || return 1
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_HANDOFF_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_HANDOFF_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE" ]; do sleep 0.01; done
+  fi
+  fm_lock_acquire_wait "$lock" || return 1
+  if [ -e "$guard" ] || [ -L "$guard" ]; then
+    fm_lock_release "$lock" || return 1
+    rm -f -- "$guard" 2>/dev/null || true
+    rmdir "${guard%/cancelled}" 2>/dev/null || true
+    return 4
+  fi
+  spawn_send_literal "$@" || status=$?
+  fm_lock_release "$lock" || return 1
+  return "$status"
 }
 
 parse_orca_worktree_result() {
@@ -3040,15 +3084,16 @@ if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
     esac
   fi
 fi
-if spawn_recovery_cancelled; then
-  echo "error: dashboard recovery was cancelled for $ID" >&2
-  exit 4
-fi
-if ! spawn_send_literal "$T" "$LAUNCH"; then
+literal_status=0
+spawn_recovery_submit "$T" "$LAUNCH" || literal_status=$?
+if [ "$literal_status" -ne 0 ]; then
   if [ "$RELAUNCH" -eq 1 ] && [ -n "${BUSY_GEN:-}" ]; then
     spawn_busy_event apply "$STATE_REAL" "$ID" unknown --gen "$BUSY_GEN" --source fm-recovery --event replacement-send-failed || true
   fi
-  exit 1
+  if [ "$literal_status" -eq 4 ]; then
+    echo "error: dashboard recovery was cancelled for $ID" >&2
+  fi
+  exit "$literal_status"
 fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then

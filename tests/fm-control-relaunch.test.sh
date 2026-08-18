@@ -1378,6 +1378,50 @@ test_dashboard_recovery_marks_launch_before_submit() {
   pass "fm-spawn dashboard recovery records launch state before submit"
 }
 
+test_dashboard_recovery_cancellation_wins_before_submit() {
+  local dir id claim guard_dir guard lock ready continue spawn_pid status attempts
+  id=rl43
+  dir=$(new_case dashboard-cancel "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-cancel\n' >> "$dir/home/state/$id.meta"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+  guard_dir="$dir/home/state/dashboard-recovery/.${id}.cancel.test"
+  guard="$guard_dir/cancelled"
+  lock="$guard_dir/handoff.lock"
+  ready="$dir/handoff-ready"
+  continue="$dir/handoff-continue"
+  mkdir -p "$guard_dir"
+  FM_DASHBOARD_RECOVERY_CLAIM="$claim" FM_DASHBOARD_RECOVERY_CANCEL_GUARD="$guard" \
+    FM_SPAWN_TESTING=1 FM_SPAWN_TEST_RECOVERY_HANDOFF_READY="$ready" FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE="$continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" "$id" --relaunch --dashboard-recovery --harness claude > "$dir/spawn.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$spawn_pid" || true
+    fail "dashboard recovery did not reach its submission handoff"
+  fi
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock" || exit 1
+    : > "$guard"
+    fm_lock_release "$lock"
+  ) || fail "could not cancel dashboard recovery at its submission handoff"
+  : > "$continue"
+  if wait "$spawn_pid"; then status=0; else status=$?; fi
+  expect_code 4 "$status" "dashboard recovery cancellation should defer submission"
+  ! grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "cancelled dashboard recovery submitted a replacement literal"
+  pass "fm-spawn dashboard recovery serializes cancellation before submit"
+}
+
 test_dashboard_recovery_removes_unsubmitted_missing_endpoint() {
   local dir id claim out rc
   id=rl42
@@ -1525,6 +1569,7 @@ test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_dashboard_recovery_marks_launch_before_submit
+test_dashboard_recovery_cancellation_wins_before_submit
 test_dashboard_recovery_removes_unsubmitted_missing_endpoint
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
