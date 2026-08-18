@@ -930,9 +930,9 @@ if [ "$RELAUNCH" -eq 0 ]; then
     exit 1
   fi
   SPAWN_TASK_SET_LOCK_HELD=1
-  # This lock serializes fresh spawns, so the active count and the later meta
-  # publication form one admission decision. Relaunches do not enter here:
-  # they replace a known endpoint and must not consume a second worker slot.
+  # This lock serializes fresh spawns, so the active count and the later launch
+  # submission form one admission decision. Relaunches do not enter here: they
+  # replace a known endpoint and must not consume a second worker slot.
   WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
     echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
     exit 1
@@ -2715,13 +2715,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
-if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
-  # The record is published, so this task is now part of the set a teardown
-  # enumerates and locks per task. The set lock is only needed across that
-  # publication.
-  SPAWN_TASK_SET_LOCK_HELD=0
-  fm_lock_release "$SPAWN_TASK_SET_LOCK"
-fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -2825,13 +2818,25 @@ if [ -n "$SPAWN_TRACEPARENT" ]; then
   fi
 fi
 sleep 0.3
-spawn_send_literal "$T" "$LAUNCH"
+if ! spawn_send_literal "$T" "$LAUNCH"; then
+  echo "error: could not send the launch command to $W" >&2
+  exit 1
+fi
 sleep 0.3
 if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
-spawn_send_key "$T" Enter
+if ! spawn_send_key "$T" Enter; then
+  echo "error: could not submit the launch command to $W" >&2
+  exit 1
+fi
+if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+  # A fresh endpoint is now executing its launch command, so a later capacity
+  # check can inspect it through the published record.
+  SPAWN_TASK_SET_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
     kimi_spawn_fail "kimi did not show a verified ready signal before brief delivery"

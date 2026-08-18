@@ -17,9 +17,12 @@
 #   fm_worker_capacity_active <state-dir>       -> active count
 
 fm_worker_capacity_limit() {  # <config-dir>
-  local config=$1 file value extra links
+  local config=$1 file value links bytes
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -d "$config" ] && [ ! -L "$config" ] || return 1
+  fi
   file="$config/max-active-workers"
-  [ -e "$file" ] || { printf '0'; return 0; }
+  [ -e "$file" ] || [ -L "$file" ] || { printf '0'; return 0; }
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
     links=$(stat -f %l "$file" 2>/dev/null) || return 1
@@ -27,13 +30,15 @@ fm_worker_capacity_limit() {  # <config-dir>
     links=$(stat -c %h "$file" 2>/dev/null) || return 1
   fi
   [ "$links" = 1 ] || return 1
-  IFS= read -r value < "$file" || return 1
-  IFS= read -r extra < <(sed -n '2p' "$file") || true
-  [ -z "$extra" ] || return 1
+  value=$(<"$file")
   case "$value" in
-    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) printf '%s' "$value" ;;
+    [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;;
     *) return 1 ;;
   esac
+  bytes=$(LC_ALL=C wc -c < "$file") || return 1
+  bytes=${bytes//[[:space:]]/}
+  [ "$bytes" = "$(( ${#value} + 1 ))" ] || return 1
+  printf '%s' "$value"
 }
 
 fm_worker_capacity_active() {  # <state-dir>
