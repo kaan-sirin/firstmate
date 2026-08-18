@@ -93,17 +93,74 @@ fm_worker_capacity_pending_until_started() {  # <state-dir> <task-id>
   return 1
 }
 
+fm_worker_capacity_pending_expired() {  # <pending-path>
+  local pending=$1 grace now modified
+  grace=${FM_WORKER_CAPACITY_PENDING_GRACE_SECONDS:-120}
+  case "$grace" in 0|[1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) return 1 ;; esac
+  if [ "$(uname)" = Darwin ]; then
+    modified=$(stat -f %m "$pending" 2>/dev/null) || return 1
+  else
+    modified=$(stat -c %Y "$pending" 2>/dev/null) || return 1
+  fi
+  case "$modified" in ''|*[!0-9]*) return 1 ;; esac
+  now=$(date +%s 2>/dev/null) || return 1
+  case "$now" in ''|*[!0-9]*) return 1 ;; esac
+  [ "$now" -ge "$modified" ] && [ $((now - modified)) -ge "$grace" ]
+}
+
+fm_worker_capacity_pending_counts() {  # <state-dir> <pending-path>
+  local state=$1 pending=$2 name id meta backend target verdict
+  name=${pending##*/}
+  case "$name" in
+    .worker-capacity-*.pending)
+      id=${name#.worker-capacity-}
+      id=${id%.pending}
+      ;;
+    *) return 2 ;;
+  esac
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
+  [ "$(<"$pending")" = "$id" ] || return 2
+  meta="$state/$id.meta"
+  [ ! -e "$meta" ] && [ ! -L "$meta" ] && return 0
+  [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
+  backend=$(fm_backend_of_meta "$meta") || return 2
+  target=$(fm_backend_target_of_meta "$meta") || return 2
+  [ -n "$target" ] || return 2
+  verdict=$(fm_backend_agent_state "$backend" "$target") || return 2
+  case "$verdict" in
+    dead|missing)
+      if [ "${FM_WORKER_CAPACITY_RECONCILE:-0}" = 1 ] \
+        && fm_worker_capacity_pending_expired "$pending"; then
+        fm_worker_capacity_pending_release "$state" "$id" || return 2
+        return 1
+      fi
+      return 0
+      ;;
+    alive|ambiguous|unreadable|unverified) ;;
+    *) return 2 ;;
+  esac
+  if [ "${FM_WORKER_CAPACITY_RECONCILE:-0}" = 1 ]; then
+    fm_worker_capacity_pending_release "$state" "$id" || return 2
+  fi
+  return 1
+}
+
 fm_worker_capacity_active() {  # <state-dir>
   fm_worker_capacity_active_in_state "$1" 0
 }
 
 fm_worker_capacity_active_in_state() {  # <state-dir> <skip-remote-secondmates>
-  local state=$1 skip_remote=$2 meta pending backend target verdict kind remote_host count=0
+  local state=$1 skip_remote=$2 meta pending backend target verdict kind remote_host count=0 pending_status
   [ -d "$state" ] || { printf '0'; return 0; }
   shopt -s nullglob
   for pending in "$state"/.worker-capacity-*.pending; do
     [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
-    count=$((count + 1))
+    if fm_worker_capacity_pending_counts "$state" "$pending"; then
+      count=$((count + 1))
+    else
+      pending_status=$?
+      [ "$pending_status" = 1 ] || { shopt -u nullglob; return 1; }
+    fi
   done
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
@@ -126,12 +183,74 @@ fm_worker_capacity_active_in_state() {  # <state-dir> <skip-remote-secondmates>
   printf '%s' "$count"
 }
 
+fm_worker_capacity_remote_route_register_one() {  # <host-state> <route-state> <id> <home>
+  local host_state=$1 route_state=$2 id=$3 home=$4 meta meta_home route_file tmp existing
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -d "$route_state" ] && [ ! -L "$route_state" ] || return 1
+  route_state=$(CDPATH='' cd -- "$route_state" 2>/dev/null && pwd -P) || return 1
+  [ -d "$home" ] && [ ! -L "$home" ] || return 1
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  [ "$route_state" = "$home/state/parent-route" ] \
+    && [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] \
+    && [ "$(<"$home/.fm-secondmate-home")" = "$id" ] || return 1
+  meta="$route_state/$id.meta"
+  if [ -e "$meta" ] || [ -L "$meta" ]; then
+    [ -f "$meta" ] && [ ! -L "$meta" ] \
+      && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 1
+    meta_home=$(fm_meta_get "$meta" home)
+    meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+    [ "$meta_home" = "$home" ] || return 1
+  fi
+  if [ -e "$host_state" ] || [ -L "$host_state" ]; then
+    [ -d "$host_state" ] && [ ! -L "$host_state" ] || return 1
+  else
+    mkdir "$host_state" 2>/dev/null || true
+    [ -d "$host_state" ] && [ ! -L "$host_state" ] || return 1
+  fi
+  host_state=$(CDPATH='' cd -- "$host_state" 2>/dev/null && pwd -P) || return 1
+  route_file="$host_state/.worker-capacity-route-$id.state"
+  if [ -e "$route_file" ] || [ -L "$route_file" ]; then
+    [ -f "$route_file" ] && [ ! -L "$route_file" ] || return 1
+    existing=$(<"$route_file")
+    [ "$existing" = "$route_state" ] || return 1
+    return 0
+  fi
+  tmp="$route_file.tmp.$$"
+  (umask 077; printf '%s\n' "$route_state" > "$tmp") || return 1
+  [ -f "$tmp" ] && [ ! -L "$tmp" ] || { rm -f -- "$tmp"; return 1; }
+  if ! mv -n -- "$tmp" "$route_file" 2>/dev/null; then
+    rm -f -- "$tmp"
+    [ -f "$route_file" ] && [ ! -L "$route_file" ] \
+      && [ "$(<"$route_file")" = "$route_state" ] || return 1
+  fi
+}
+
+fm_worker_capacity_remote_route_register() {  # <host-state> <route-state> <id> <home>
+  local host_state=$1 route_state=$2 id=$3 home=$4 parent candidate candidate_id candidate_route candidate_meta
+  fm_worker_capacity_remote_route_register_one "$host_state" "$route_state" "$id" "$home" || return 1
+  parent=$(dirname "$home")
+  parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
+  shopt -s nullglob
+  for candidate in "$parent"/*; do
+    [ -d "$candidate" ] && [ ! -L "$candidate" ] \
+      && [ -f "$candidate/.fm-secondmate-home" ] && [ ! -L "$candidate/.fm-secondmate-home" ] || continue
+    candidate_id=$(<"$candidate/.fm-secondmate-home")
+    case "$candidate_id" in ''|*[!A-Za-z0-9._-]*) shopt -u nullglob; return 1 ;; esac
+    candidate_route="$candidate/state/parent-route"
+    candidate_meta="$candidate_route/$candidate_id.meta"
+    [ -e "$candidate_meta" ] || [ -L "$candidate_meta" ] || continue
+    fm_worker_capacity_remote_route_register_one "$host_state" "$candidate_route" "$candidate_id" "$candidate" \
+      || { shopt -u nullglob; return 1; }
+  done
+  shopt -u nullglob
+}
+
 fm_worker_capacity_active_host() {  # <primary-state-dir>
   fm_worker_capacity_active_host_state "$1" $'\n'
 }
 
 fm_worker_capacity_active_host_state() {  # <state-dir> <visited-homes>
-  local state=$1 visited=$2 meta id kind home remote_host active count=0
+  local state=$1 visited=$2 meta id kind home remote_host active count=0 route route_state route_home
   [ -d "$state" ] || { printf '0'; return 0; }
   active=$(fm_worker_capacity_active_in_state "$state" 1) || return 1
   count=$active
@@ -154,6 +273,32 @@ fm_worker_capacity_active_host_state() {  # <state-dir> <visited-homes>
       && [ -d "$home/state" ] || { shopt -u nullglob; return 1; }
     case "$visited" in *$'\n'"$home"$'\n'*) shopt -u nullglob; return 1 ;; esac
     active=$(fm_worker_capacity_active_host_state "$home/state" "$visited$home"$'\n') || { shopt -u nullglob; return 1; }
+    count=$((count + active))
+  done
+  for route in "$state"/.worker-capacity-route-*.state; do
+    [ -f "$route" ] && [ ! -L "$route" ] || { shopt -u nullglob; return 1; }
+    id=${route##*/}
+    id=${id#.worker-capacity-route-}
+    id=${id%.state}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) shopt -u nullglob; return 1 ;; esac
+    route_state=$(<"$route")
+    case "$route_state" in /*) ;; *) shopt -u nullglob; return 1 ;; esac
+    case "$route_state" in *$'\n'*|*$'\r'*) shopt -u nullglob; return 1 ;; esac
+    route_state=$(CDPATH='' cd -- "$route_state" 2>/dev/null && pwd -P) || { shopt -u nullglob; return 1; }
+    [ -d "$route_state" ] && [ ! -L "$route_state" ] || { shopt -u nullglob; return 1; }
+    case "$route_state" in */state/parent-route) route_home=${route_state%/state/parent-route} ;; *) shopt -u nullglob; return 1 ;; esac
+    [ -d "$route_home" ] && [ ! -L "$route_home" ] \
+      && [ -f "$route_home/.fm-secondmate-home" ] && [ ! -L "$route_home/.fm-secondmate-home" ] \
+      && [ "$(<"$route_home/.fm-secondmate-home")" = "$id" ] || { shopt -u nullglob; return 1; }
+    if [ -e "$route_state/$id.meta" ] || [ -L "$route_state/$id.meta" ]; then
+      [ -f "$route_state/$id.meta" ] && [ ! -L "$route_state/$id.meta" ] \
+        && [ "$(fm_meta_get "$route_state/$id.meta" kind)" = secondmate ] || { shopt -u nullglob; return 1; }
+      home=$(fm_meta_get "$route_state/$id.meta" home)
+      home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || { shopt -u nullglob; return 1; }
+      [ "$home" = "$route_home" ] || { shopt -u nullglob; return 1; }
+    fi
+    case "$visited" in *$'\n'"$route_state"$'\n'*) shopt -u nullglob; return 1 ;; esac
+    active=$(fm_worker_capacity_active_host_state "$route_state" "$visited$route_state"$'\n') || { shopt -u nullglob; return 1; }
     count=$((count + active))
   done
   shopt -u nullglob

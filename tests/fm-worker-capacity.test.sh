@@ -117,6 +117,62 @@ test_only_proven_dead_workers_free_slots() {
   pass "only proven dead or missing workers free capacity"
 }
 
+test_started_launch_reconciles_capacity_reservation() {
+  local state="$TMP_ROOT/reconcile-pending/state" pending
+  mkdir -p "$state"
+  make_meta "$state" launch alive
+  fm_worker_capacity_pending_reserve "$state" launch || fail "could not create a launch reservation"
+  pending=$(fm_worker_capacity_pending_path "$state" launch)
+  [ "$(FM_WORKER_CAPACITY_RECONCILE=1 fm_worker_capacity_active "$state")" = 1 ] \
+    || fail "started launch counted its reservation twice"
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] \
+    || fail "started launch left a stale capacity reservation"
+  pass "started launches reconcile their capacity reservations"
+}
+
+test_expired_dead_launch_releases_capacity_reservation() {
+  local state="$TMP_ROOT/reconcile-dead/state" pending
+  mkdir -p "$state"
+  make_meta "$state" launch dead
+  fm_worker_capacity_pending_reserve "$state" launch || fail "could not create a dead launch reservation"
+  pending=$(fm_worker_capacity_pending_path "$state" launch)
+  [ "$(FM_WORKER_CAPACITY_RECONCILE=1 FM_WORKER_CAPACITY_PENDING_GRACE_SECONDS=0 fm_worker_capacity_active "$state")" = 0 ] \
+    || fail "expired dead launch retained worker capacity"
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] \
+    || fail "expired dead launch left a capacity reservation"
+  pass "expired dead launches release capacity reservations"
+}
+
+test_remote_routes_share_host_capacity_index() {
+  local dir="$TMP_ROOT/remote-host-index" host_state first second first_route second_route
+  dir="$TMP_ROOT/remote-host-index"
+  host_state="$dir/root/.firstmate-worker-capacity"
+  first="$dir/homes/first"
+  second="$dir/homes/second"
+  first_route="$first/state/parent-route"
+  second_route="$second/state/parent-route"
+  mkdir -p "$first_route" "$second_route" "$dir/root"
+  printf 'first\n' > "$first/.fm-secondmate-home"
+  printf 'second\n' > "$second/.fm-secondmate-home"
+  cat > "$first_route/first.meta" <<EOF
+window=alive
+home=$first
+kind=secondmate
+EOF
+  cat > "$second_route/second.meta" <<EOF
+window=alive
+home=$second
+kind=secondmate
+EOF
+  fm_worker_capacity_remote_route_register "$host_state" "$first_route" first "$first" \
+    || fail "could not register the first remote route"
+  fm_worker_capacity_remote_route_register "$host_state" "$second_route" second "$second" \
+    || fail "could not register the second remote route"
+  [ "$(fm_worker_capacity_active_host "$host_state")" = 2 ] \
+    || fail "remote routes did not share one host capacity index"
+  pass "remote routes share one host capacity index"
+}
+
 test_spawn_refuses_when_capacity_is_full() {
   local dir="$TMP_ROOT/spawn" home fakebin out status
   dir="$TMP_ROOT/spawn"
@@ -184,12 +240,13 @@ EOF
 }
 
 test_remote_secondmate_uses_parent_route_capacity() {
-  local dir="$TMP_ROOT/remote-host-capacity" home route fakebin out status
+  local dir="$TMP_ROOT/remote-host-capacity" root home route fakebin out status
   dir="$TMP_ROOT/remote-host-capacity"
+  root="$dir/root"
   home="$dir/home"
   route="$home/state/parent-route"
   fakebin="$dir/fakebin"
-  mkdir -p "$route" "$home/config" "$fakebin"
+  mkdir -p "$root" "$route" "$home/config" "$fakebin"
   printf 'remote-secondmate\n' > "$home/.fm-secondmate-home"
   printf '%s\n' \
     'schema=fm-secondmate-parent.v1' \
@@ -209,7 +266,7 @@ EOF
     '  *) : ;;' \
     'esac' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "remote secondmate started despite a full parent-route limit"
@@ -476,6 +533,9 @@ test_valid_limit_and_malformed_values
 test_unsafe_config_directory_refuses_limit_lookup
 test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
+test_started_launch_reconciles_capacity_reservation
+test_expired_dead_launch_releases_capacity_reservation
+test_remote_routes_share_host_capacity_index
 test_spawn_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
 test_remote_secondmate_uses_parent_route_capacity
