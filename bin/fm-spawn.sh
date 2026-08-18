@@ -667,6 +667,8 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_CAPACITY_RESERVATION=
+SPAWN_CAPACITY_LAUNCH_SUBMITTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
 RELAUNCH_REPLACEMENT_BUSY_GEN=
 RELAUNCH_REPLACEMENT_HARNESS=
@@ -775,6 +777,11 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
+  fi
+  if [ -n "$SPAWN_CAPACITY_RESERVATION" ] \
+     && [ "$SPAWN_CAPACITY_LAUNCH_SUBMITTED" != 1 ]; then
+    fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION" || true
+    SPAWN_CAPACITY_RESERVATION=
   fi
   if [ "$SPAWN_CONTROL_LOCK_HELD" = 1 ]; then
     SPAWN_CONTROL_LOCK_HELD=0
@@ -946,10 +953,21 @@ if [ "$RELAUNCH" -eq 0 ]; then
       echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
       exit 1
     fi
+    if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+      echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=$ID
   fi
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
+    if [ -n "$SPAWN_CAPACITY_RESERVATION" ] \
+       && ! fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+      echo "error: could not release the worker capacity reservation for $ID" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=
     exit 0
   else
     remote_spawn_rc=$?
@@ -2715,6 +2733,10 @@ if [ "$RELAUNCH" -eq 1 ]; then
   fm_lock_release "$SPAWN_META_LOCK"
   SPAWN_META_LOCK_HELD=0
 fi
+if [ -z "$SPAWN_CAPACITY_RESERVATION" ] && [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
+  SPAWN_TASK_SET_LOCK_HELD=0
+  fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -2831,11 +2853,21 @@ if ! spawn_send_key "$T" Enter; then
   echo "error: could not submit the launch command to $W" >&2
   exit 1
 fi
+SPAWN_CAPACITY_LAUNCH_SUBMITTED=1
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
-  # A fresh endpoint is now executing its launch command, so a later capacity
-  # check can inspect it through the published record.
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
+if [ -n "$SPAWN_CAPACITY_RESERVATION" ]; then
+  if ! fm_worker_capacity_pending_until_started "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+    echo "error: worker launch did not become active; its capacity reservation is retained to prevent host memory exhaustion" >&2
+    exit 1
+  fi
+  if ! fm_worker_capacity_pending_release "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
+    echo "error: could not release the worker capacity reservation for $ID" >&2
+    exit 1
+  fi
+  SPAWN_CAPACITY_RESERVATION=
 fi
 if [ "$HARNESS" = kimi ]; then
   if ! kimi_wait_for_ready; then
