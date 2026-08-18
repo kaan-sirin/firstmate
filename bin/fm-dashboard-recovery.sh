@@ -34,17 +34,32 @@ fm_lock_acquire_wait "$LOCK"
 PREFLIGHT_LOCK=
 PREFLIGHT_LOCK_HELD=0
 PREFLIGHT_LOCK_OWNER=
+RECOVERY_PID=
+RECOVERY_OUTPUT=
+RECOVERY_MONITOR_WAS_ON=0
 cleanup() {
+  if [ -n "$RECOVERY_OUTPUT" ]; then
+    rm -f -- "$RECOVERY_OUTPUT" || true
+  fi
   if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
     PREFLIGHT_LOCK_HELD=0
     fm_lock_release "$PREFLIGHT_LOCK" || true
   fi
   fm_lock_release "$LOCK" || true
 }
+recovery_signal() {
+  local signal=$1 status=$2
+  if [ -n "$RECOVERY_PID" ]; then
+    kill -s "$signal" -- "-$RECOVERY_PID" 2>/dev/null || kill -s "$signal" "$RECOVERY_PID" 2>/dev/null || true
+    wait "$RECOVERY_PID" 2>/dev/null || true
+    RECOVERY_PID=
+  fi
+  exit "$status"
+}
 trap cleanup EXIT
-trap 'exit 129' HUP
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'recovery_signal HUP 129' HUP
+trap 'recovery_signal INT 130' INT
+trap 'recovery_signal TERM 143' TERM
 STATE_BIN=${FM_DASHBOARD_RECOVERY_STATE_BIN:-$SCRIPT_DIR/fm-crew-state.sh}
 line=$(FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" "$STATE_BIN" "$ID" 2>/dev/null || true)
 case "$line" in state:\ unknown\ *) ;; *) exit 0 ;; esac
@@ -121,7 +136,17 @@ case "$agent_state" in
   dead) recovery_action=--relaunch ;;
   missing) recovery_action=--recover-missing ;;
 esac
-out=$(FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery 2>&1) || recovery_status=$?
+RECOVERY_OUTPUT=$(umask 077; mktemp "$DIR/.${ID}.spawn.XXXXXX") || exit 1
+case $- in *m*) RECOVERY_MONITOR_WAS_ON=1 ;; esac
+set -m
+FM_DASHBOARD_RECOVERY_CLAIM="$recovery_claim" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$PREFLIGHT_LOCK" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$PREFLIGHT_LOCK_OWNER" FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$RECOVERY_BIN" "$ID" "$recovery_action" --dashboard-recovery > "$RECOVERY_OUTPUT" 2>&1 &
+RECOVERY_PID=$!
+[ "$RECOVERY_MONITOR_WAS_ON" = 1 ] || set +m
+wait "$RECOVERY_PID" || recovery_status=$?
+RECOVERY_PID=
+out=$(< "$RECOVERY_OUTPUT")
+rm -f -- "$RECOVERY_OUTPUT" || exit 1
+RECOVERY_OUTPUT=
 if [ "$PREFLIGHT_LOCK_HELD" = 1 ]; then
   PREFLIGHT_LOCK_HELD=0
   fm_lock_release "$PREFLIGHT_LOCK" || exit 1
