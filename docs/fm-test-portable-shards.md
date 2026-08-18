@@ -72,7 +72,7 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 `bin/fm-test-run.sh --list-shard-plan` prints that assignment, one line per shard:
 
 ```
-portable-serial-1of4 count=24 estimated_ms=455937
+portable-serial-1of4 count=25 estimated_ms=460930
 ```
 
 The table below renders that output, so it is derived from the current lane membership and those hints rather than measured directly.
