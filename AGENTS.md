@@ -86,7 +86,7 @@ data/                personal fleet records; LOCAL, gitignored as a whole
   dashboard.json      private canonical active-work dashboard record; `fm-dashboard.sh` is its only writer and consumers read only this record (docs/architecture.md)
   <id>/brief.md      per-task crewmate brief, or per-secondmate charter brief when kind=secondmate
   <id>/report.md     scout task deliverable, written by the crewmate; survives teardown
-  <id>/ship-preflight.json  private typed two-phase ship approval record; `ship-end-to-end` owns its workflow and `fm-spawn.sh` verifies it before dispatch
+  <id>/ship-preflight.json  private typed two-phase ship preflight record, awaiting or carrying approval; `ship-end-to-end` owns its workflow and `fm-spawn.sh` verifies it before dispatch
 projects/            cloned repos; gitignored; read-only except under hard rule 1's concrete captain-approved project operation exception
 state/               runtime records and signals; gitignored
   <id>.status        appended by crewmates: "<state>: <note>" wake-event lines, not current-state truth
@@ -99,6 +99,7 @@ state/               runtime records and signals; gitignored
   <id>.herdr-presentation  quarantinable attempt and restart-binding journal for Herdr's optional visual projection; never task or endpoint authority; see docs/herdr-backend.md "Presentation spaces"
   <id>.check.sh      authenticated slow poll; the watcher dispatches validated PR data and the byte-identified Relay shim through trusted repository scripts, runs registered custom checks from hash-validated private snapshots, and rejects every other state check without execution
   <id>.check-trust   private content binding created by fm-check-register.sh for an intentional custom check
+  <id>.fast-repair-tests <id>.fast-repair-broader (and their .log files)  private Fast Repair test-evidence records written by bin/fm-fast-repair.sh; removed by teardown; see docs/fast-repair.md
   dashboard-transitions/ dashboard-recovery/  private dashboard timing and recovery records; `fm-dashboard*` scripts own them (docs/architecture.md)
   <id>.pr-poll       private validated data sidecar for the byte-static PR merge poll
   <id>.pr-poll-registration  private transactional provenance record binding the task, canonical metadata identity, sidecar, and static poll publication
