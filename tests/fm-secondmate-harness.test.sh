@@ -613,9 +613,9 @@ test_spawn_cursor_secondmate_launches_with_its_primary_contract() {
     "a cursor secondmate must launch with --trust, or none of its project hooks load and its home has no supervision at all"
   assert_contains "$launch" "--workspace" \
     "a cursor secondmate must be pinned to its own home as the workspace"
-  assert_contains "$launch" "FM_SUPERVISION_MODEL=autoarm" \
-    "cursor's stop-hook park runs the watcher only between turns, so its home must inherit the autoarm model"
-  pass "Cursor is accepted for secondmates and launches with the contract its park needs"
+  assert_contains "$launch" "FM_SUPERVISION_MODEL=persistent" \
+    "Cursor must use the persistent supervision model without a project hook registry"
+  pass "Cursor is accepted for secondmates with persistent supervision"
 }
 
 # ===========================================================================

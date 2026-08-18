@@ -182,9 +182,7 @@
 # bind the pane to cursor's own conversation transcript (projects root, the exact
 # workspace path cursor records in .workspace-trusted, and the conversations that
 # already existed for that workspace). It is launched through the verified binary
-# resolver because `cursor` is not the CLI name. A cursor SECONDMATE instead runs
-# the tracked project-scope .cursor/hooks.json in its own home, whose stop-hook
-# park owns that home's supervision (docs/supervision-protocols/cursor.md).
+# resolver because `cursor` is not the CLI name.
 # On success prints: spawned <id> harness=<name> kind=<ship|scout|secondmate> [mode=<mode> yolo=<on|off>] window=<backend-target> worktree=<path>
 # A ship task records the explicit mode/yolo it was passed; a secondmate spawn records
 # mode=secondmate, yolo=off, home=, and projects=; a scout records neither, and both the
@@ -3027,10 +3025,10 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
-  # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
-  # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
+  # Stop auto-arm runs the watcher only BETWEEN turns, so a fresh beacon with no
+  # live watcher is its healthy mid-turn state.
   case "$HARNESS" in
-    claude|cursor) supervision_model=autoarm ;;
+    claude) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
   esac
   # Deliver the primary's EFFECTIVE trace-context decision as a normalized on/off

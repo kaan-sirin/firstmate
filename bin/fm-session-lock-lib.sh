@@ -81,8 +81,8 @@ fm_harness_process_matches() {  # <comm> <args>
       ;;
   esac
   # Cursor: its own owner decides, from Cursor's name or versioned install tree
-  # in the command path or argv[0]. Without this a Cursor primary can never
-  # locate its own harness in the ancestry, so every session start refuses the
+  # in the command path or argv[0]. Without this a Cursor session can never
+  # locate its own harness in the ancestry, so every session-start command refuses the
   # fleet lock as read-only and the park can never arm.
   fm_cursor_process_matches "$comm" "$args" "$argv0" && return 0
   return 1
