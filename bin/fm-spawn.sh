@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only|fast-repair> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> <project-dir> --scout [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
@@ -15,10 +15,7 @@
 #   the explicit mode carries less rigor than the project's standing posture, a
 #   loud one-line deviation notice is printed and the spawn continues.
 #   no-mistakes-prod-only is a registry policy rather than a task mode and is
-#   refused as a flag value. fast-repair is a strict per-task exception, never
-#   a project mode: it requires an eligible typed record from fm-fast-repair.sh,
-#   yolo=off, and the built-in Codex gpt-5.6-luna medium profile. A missing or
-#   conflicting profile refuses before an endpoint or metadata record exists.
+#   refused as a flag value.
 #        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>]
 #        fm-spawn.sh <task-id> --recover-missing
 #   --relaunch launches a replacement agent for an EXISTING task into that
@@ -385,7 +382,7 @@ else
   # and record no delivery posture; secondmate spawns hardcode theirs.
   if [ "$KIND" = ship ]; then
     [ "$MODE_SET" -eq 1 ] || {
-      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only|fast-repair>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
+      echo "error: ship spawns require --mode <no-mistakes|direct-PR|local-only>; resolve it at intake from the captain's instruction and the project's registered posture in data/projects.md" >&2
       exit 1
     }
     [ "$YOLO_SET" -eq 1 ] || {
@@ -393,20 +390,16 @@ else
       exit 1
     }
     case "$MODE" in
-      no-mistakes|direct-PR|local-only|fast-repair) ;;
+      no-mistakes|direct-PR|local-only) ;;
       no-mistakes-prod-only)
         echo "error: no-mistakes-prod-only is a registry policy, not a task mode; classify this task's surface and resolve it to no-mistakes or direct-PR at intake" >&2
         exit 1 ;;
-      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only, fast-repair (got '$MODE')" >&2; exit 1 ;;
+      *) echo "error: --mode must be one of no-mistakes, direct-PR, local-only (got '$MODE')" >&2; exit 1 ;;
     esac
     case "$YOLO" in
       on|off) ;;
       *) echo "error: --yolo must be on or off (got '$YOLO')" >&2; exit 1 ;;
     esac
-    if [ "$MODE" = fast-repair ] && [ "$YOLO" != off ]; then
-      echo "error: Fast Repair always requires --yolo off; captain approval remains the only merge authority" >&2
-      exit 1
-    fi
   else
     [ "$MODE_SET" -eq 0 ] || {
       echo "error: --mode applies only to ship spawns; a scout delivers a report and a secondmate records its own fixed posture" >&2
@@ -1165,10 +1158,6 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
-  if [ "$MODE" = fast-repair ]; then
-    echo "error: task $ID uses the removed fast-repair delivery mode and cannot relaunch" >&2
-    exit 1
-  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
@@ -1806,7 +1795,7 @@ fi
 delivery_rigor_rank() {  # <mode> -> 3 (most rigor) .. 1 (least); 0 = not a task mode
   case "$1" in
     no-mistakes) echo 3 ;;
-    direct-PR|fast-repair) echo 2 ;;
+    direct-PR) echo 2 ;;
     local-only) echo 1 ;;
     *) echo 0 ;;
   esac
@@ -2490,21 +2479,6 @@ if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
   freshen_spawn_worktree_base "$WT" || exit 1
 fi
 
-# The --worktree proof is a DISPATCH-time gate: it asserts a pristine worktree
-# still sitting on the recorded reproduction commit, which is only true before a
-# crewmate branches, edits, or commits. A relaunch replaces a wedged crewmate in a
-# worktree that already holds unlanded repair work, so re-running that proof would
-# refuse the documented stuck-crewmate recovery purely for being dirty. The typed
-# eligibility gate above already re-proves the task's Fast Repair authorization on
-# every spawn, relaunch included, and the branch and tested-head proofs belong to
-# evidence, publish-pr, broader, and ready, which run once the repair commit exists.
-if [ "$KIND" = ship ] && [ "$MODE" = fast-repair ] && [ "$RELAUNCH" -eq 0 ]; then
-  "$SCRIPT_DIR/fm-fast-repair.sh" eligible "$ID" --worktree "$WT" >/dev/null || {
-    echo "error: Fast Repair spawn refused because its reproduction revision is not proven for the task worktree; use the normal delivery path" >&2
-    exit 1
-  }
-fi
-
 # Per-task temp root: /tmp/fm-<id>/ with Go's build temp nested at gotmp/. Go won't
 # create GOTMPDIR, so mkdir before it is used; fm-teardown removes the whole root.
 # Nested (not a bare /tmp/fm-<id>/gotmp) so other per-task temp can live alongside
@@ -2891,7 +2865,7 @@ fi
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo fast_repair tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint dashboard_incarnation", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo tasktmp model effort busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx preflight_fingerprint dashboard_incarnation", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -2907,7 +2881,6 @@ preserve_relaunch_meta() {
   echo "dashboard_incarnation=$DASHBOARD_INCARNATION"
   [ -z "$MODE" ] || echo "mode=$MODE"
   [ -z "$YOLO" ] || echo "yolo=$YOLO"
-  [ "$MODE" != fast-repair ] || echo "fast_repair=eligible"
   [ -z "${PREFLIGHT_FINGERPRINT:-}" ] || echo "preflight_fingerprint=$PREFLIGHT_FINGERPRINT"
   echo "tasktmp=$TASK_TMP"
   echo "model=${MODEL:-default}"
