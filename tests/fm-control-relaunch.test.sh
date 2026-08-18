@@ -173,11 +173,25 @@ new_case() {
 
 # add_ship_task <case-dir> <id> [harness]
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
+  local dir=$1 id=$2 harness=${3:-claude} contract bound fingerprint now
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
+  chmod 755 "$home/data"
+  chmod 700 "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  contract='{"recommendation":"Continue approved work","outcome":"A tested PR","scope":"Recorded task work","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[],"complete_plan_approved":false}'
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not create preflight binding"
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' \
+    > "$home/data/$id/ship-preflight.json" || fail "could not create approved preflight record"
+  chmod 600 "$home/data/$id/ship-preflight.json"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -190,6 +204,7 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "preflight_fingerprint=$fingerprint"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -880,40 +895,56 @@ test_cursor_session_binding_is_retired_on_a_harness_switch() {
   pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
 }
 
-test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record() {
+test_spawn_relaunch_refuses_a_legacy_ship_without_a_preflight_record() {
   local dir out rc meta
   dir=$(new_case legacy-preflight rl36)
   add_ship_task "$dir" rl36 claude
   meta="$dir/home/state/rl36.meta"
+  sed '/^preflight_fingerprint=/d' "$meta" > "$meta.legacy" \
+    && mv "$meta.legacy" "$meta" || fail "could not prepare legacy task metadata"
+  rm -f "$dir/home/data/rl36/ship-preflight.json"
+  cp "$meta" "$dir/rl36.meta.before" || fail "could not preserve legacy task metadata"
   printf 'zsh' > "$dir/fake/command"
 
   out=$(run_spawn "$dir" rl36 --relaunch); rc=$?
-  expect_code 0 "$rc" "a legacy ship relaunch without a workflow record should continue"
-  assert_contains "$out" "spawned rl36 harness=claude" \
-    "legacy ship recovery did not relaunch its recorded worker"
+  expect_code 1 "$rc" "a legacy ship relaunch without a workflow record must refuse"
+  assert_contains "$out" "no valid recorded preflight fingerprint" \
+    "legacy ship refusal did not name its missing approval fingerprint"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "legacy ship recovery launched a replacement without approval"
+  cmp -s "$meta" "$dir/rl36.meta.before" \
+    || fail "legacy ship refusal changed its task metadata"
   [ ! -e "$dir/home/data/rl36/ship-preflight.json" ] \
     || fail "legacy recovery must not invent a ship workflow record"
   ! grep -q '^preflight_fingerprint=' "$meta" \
     || fail "legacy recovery must not invent a preflight fingerprint"
-  pass "fm-spawn --relaunch: legacy ships remain recoverable without workflow records"
+  pass "fm-spawn --relaunch: legacy ships require approved workflow records"
 }
 
-test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record() {
+test_spawn_recovers_a_legacy_missing_ship_requires_a_preflight_record() {
   local dir out rc meta
   dir=$(new_case legacy-missing-preflight rl37)
   add_ship_task "$dir" rl37 claude
   meta="$dir/home/state/rl37.meta"
+  sed '/^preflight_fingerprint=/d' "$meta" > "$meta.legacy" \
+    && mv "$meta.legacy" "$meta" || fail "could not prepare legacy missing task metadata"
+  rm -f "$dir/home/data/rl37/ship-preflight.json"
+  cp "$meta" "$dir/rl37.meta.before" || fail "could not preserve legacy missing task metadata"
   : > "$dir/fake/windows"
 
   out=$(run_spawn "$dir" rl37 --recover-missing); rc=$?
-  expect_code 0 "$rc" "a legacy ship missing-endpoint recovery without a workflow record should continue"
-  assert_contains "$out" "spawned rl37 harness=claude" \
-    "legacy missing-endpoint recovery did not launch the recorded worker"
+  expect_code 1 "$rc" "a legacy missing-endpoint recovery without a workflow record must refuse"
+  assert_contains "$out" "no valid recorded preflight fingerprint" \
+    "legacy missing-endpoint refusal did not name its missing approval fingerprint"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "legacy missing-endpoint recovery launched a replacement without approval"
+  cmp -s "$meta" "$dir/rl37.meta.before" \
+    || fail "legacy missing-endpoint refusal changed its task metadata"
   [ ! -e "$dir/home/data/rl37/ship-preflight.json" ] \
     || fail "legacy missing-endpoint recovery must not invent a ship workflow record"
   ! grep -q '^preflight_fingerprint=' "$meta" \
     || fail "legacy missing-endpoint recovery must not invent a preflight fingerprint"
-  pass "fm-spawn --recover-missing: legacy ships remain recoverable without workflow records"
+  pass "fm-spawn --recover-missing: legacy ships require approved workflow records"
 }
 
 test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode() {
@@ -1684,8 +1715,8 @@ test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
-test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record
-test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record
+test_spawn_relaunch_refuses_a_legacy_ship_without_a_preflight_record
+test_spawn_recovers_a_legacy_missing_ship_requires_a_preflight_record
 test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything

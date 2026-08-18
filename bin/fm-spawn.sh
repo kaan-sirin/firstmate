@@ -37,9 +37,8 @@
 #   whose validated tmux endpoint is positively missing. It recreates only that
 #   endpoint in the recorded worktree from the recorded task identity; it is not
 #   a normal control-plane relaunch and is called by fm-dashboard-recovery.sh.
-#   A workflow-enrolled ship must still validate its recorded preflight
-#   fingerprint, while a legacy ship with no recorded preflight remains
-#   recoverable.
+#   A ship recovery must validate its recorded preflight fingerprint; a missing
+#   or invalid approval record stops recovery before it creates an endpoint.
 #   --harness <name> is the explicit per-spawn harness/profile adapter. The old
 #   positional harness arg still works for back-compat.
 #   --model <name> and --effort <low|medium|high|xhigh|max> are concrete profile
@@ -1825,21 +1824,19 @@ if [ "$KIND" = ship ]; then
   fi
   if [ "$RELAUNCH" -eq 1 ]; then
     PREFLIGHT_FINGERPRINT=$(fm_meta_get "$RELAUNCH_META" preflight_fingerprint)
-    if [ -n "$PREFLIGHT_FINGERPRINT" ]; then
-      case "$PREFLIGHT_FINGERPRINT" in
-        ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
-        *) false ;;
-      esac || {
-        echo "error: task $ID has no valid recorded preflight fingerprint" >&2
-        exit 1
-      }
-      PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
-      [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
-        echo "error: ship preflight record for $ID is missing or unsafe" >&2
-        exit 1
-      }
-      PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
-    fi
+    case "$PREFLIGHT_FINGERPRINT" in
+      ????????*) [ "${#PREFLIGHT_FINGERPRINT}" -eq 64 ] && ! printf '%s' "$PREFLIGHT_FINGERPRINT" | grep -q '[^0-9a-f]' ;;
+      *) false ;;
+    esac || {
+      echo "error: task $ID has no valid recorded preflight fingerprint" >&2
+      exit 1
+    }
+    PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
+    [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
+      echo "error: ship preflight record for $ID is missing or unsafe" >&2
+      exit 1
+    }
+    PREFLIGHT_RESULT=$(FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" "$SCRIPT_DIR/fm-ship-end-to-end.sh" verify-dispatched "$ID" --fingerprint "$PREFLIGHT_FINGERPRINT") || exit 1
   else
     PREFLIGHT_RECORD="$DATA/$ID/ship-preflight.json"
     [ -f "$PREFLIGHT_RECORD" ] && [ ! -L "$PREFLIGHT_RECORD" ] || {
