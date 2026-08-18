@@ -183,6 +183,40 @@ EOF
   pass "local secondmates share the primary host worker capacity"
 }
 
+test_remote_secondmate_uses_parent_route_capacity() {
+  local dir="$TMP_ROOT/remote-host-capacity" home route fakebin out status
+  dir="$TMP_ROOT/remote-host-capacity"
+  home="$dir/home"
+  route="$home/state/parent-route"
+  fakebin="$dir/fakebin"
+  mkdir -p "$route" "$home/config" "$fakebin"
+  printf 'remote-secondmate\n' > "$home/.fm-secondmate-home"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=remote' > "$home/.fm-secondmate-parent"
+  printf '1\n' > "$home/config/max-active-workers"
+  cat > "$route/remote-secondmate.meta" <<EOF
+window=firstmate:remote-secondmate
+endpoint_task_id=remote-secondmate
+home=$home
+kind=secondmate
+EOF
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  *list-windows*) printf "%s\\n" remote-secondmate ;;' \
+    '  *pane_current_command*) printf "%s\\n" codex ;;' \
+    '  *) : ;;' \
+    'esac' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "remote secondmate started despite a full parent-route limit"
+  assert_contains "$out" "worker capacity reached (1/1 active)" "remote secondmate did not use parent-route capacity"
+  pass "remote secondmates share their parent-route worker capacity"
+}
+
 make_pending_launch_fakebin() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -395,6 +429,7 @@ test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
+test_remote_secondmate_uses_parent_route_capacity
 test_relaunch_respects_worker_capacity
 test_post_enter_launch_keeps_capacity_reserved
 test_interrupted_submit_keeps_capacity_reserved
