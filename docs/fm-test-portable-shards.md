@@ -72,7 +72,7 @@ Hints only affect balance: the coverage guard keeps the partition complete and d
 `bin/fm-test-run.sh --list-shard-plan` prints that assignment, one line per shard:
 
 ```
-portable-serial-1of4 count=24 estimated_ms=455937
+portable-serial-1of4 count=25 estimated_ms=460930
 ```
 
 The table below renders that output, so it is derived from the current lane membership and those hints rather than measured directly.
@@ -81,11 +81,11 @@ Treat the estimates as balance evidence and shard-count sanity only; the measure
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 24 | 455937 ms (~455.9 s) |
-| `portable-serial-2of4` | 27 | 455940 ms (~455.9 s) |
-| `portable-serial-3of4` | 25 | 455948 ms (~455.9 s) |
-| `portable-serial-4of4` | 27 | 455937 ms (~455.9 s) |
-| imbalance | | 11 ms |
+| `portable-serial-1of4` | 25 | 460930 ms (~460.9 s) |
+| `portable-serial-2of4` | 26 | 460946 ms (~460.9 s) |
+| `portable-serial-3of4` | 24 | 460940 ms (~460.9 s) |
+| `portable-serial-4of4` | 29 | 460946 ms (~460.9 s) |
+| imbalance | | 16 ms |
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 199573 ms, is the floor for any shard count.
 

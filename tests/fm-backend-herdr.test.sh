@@ -4226,6 +4226,7 @@ SH
     FM_BACKEND_HERDR_EVENT_READER="$reader" FM_FAKE_READER_READY_FILE="$ready" \
     bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_wait_transition sess 30 "$1" sess:wG:pQ' \
     "$ROOT" "$state" >/dev/null 2>&1 &
+  # shellcheck disable=SC2031 # $! is set by the background command above in this shell.
   pid=$!
   i=0
   while [ ! -e "$ready" ] && [ "$i" -lt 200 ]; do sleep 0.05; i=$((i + 1)); done
