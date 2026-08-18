@@ -457,6 +457,44 @@ fm_remote_job_read_deadline() { # <job-dir>
   fm_remote_job_read_number "$1" deadline
 }
 
+fm_remote_job_register_capacity_route() { # <home>
+  local home=$1 marker id capacity routes record tmp existing
+  marker="$home/.fm-secondmate-home"
+  [ ! -e "$marker" ] && [ ! -L "$marker" ] && return 0
+  [ -f "$marker" ] && [ ! -L "$marker" ] || return 1
+  id=$(<"$marker")
+  fm_remote_job_safe_id "$id" || return 1
+  case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  capacity="$FM_REMOTE_JOB_STATE/worker-capacity"
+  if [ -e "$capacity" ] || [ -L "$capacity" ]; then
+    [ -d "$capacity" ] && [ ! -L "$capacity" ] || return 1
+  else
+    mkdir "$capacity" 2>/dev/null || true
+    [ -d "$capacity" ] && [ ! -L "$capacity" ] || return 1
+  fi
+  routes="$capacity/routes"
+  if [ -e "$routes" ] || [ -L "$routes" ]; then
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  else
+    mkdir "$routes" 2>/dev/null || true
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  fi
+  record="$routes/$id.home"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    existing=$(<"$record")
+    [ "$existing" = "$home" ]
+    return
+  fi
+  tmp=$(umask 077; mktemp "$routes/.route-$id.XXXXXX") || return 1
+  printf '%s\n' "$home" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -n -- "$tmp" "$record" 2>/dev/null; then
+    rm -f -- "$tmp"
+    [ -f "$record" ] && [ ! -L "$record" ] && [ "$(<"$record")" = "$home" ] || return 1
+  fi
+}
+
 fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdin is captured
   local account_home=$1 root=$2 home=$3 command=$4 stage id destination bytes queue_deadline
   shift 4
@@ -467,6 +505,10 @@ fm_remote_job_stage() { # <account-home> <root> <home> <command> [args...]; stdi
   }
   home=$(fm_remote_job_canonical_home "$home") || {
     FM_REMOTE_JOB_ERROR="remote job home is unavailable or unsafe"
+    return 1
+  }
+  fm_remote_job_register_capacity_route "$home" || {
+    FM_REMOTE_JOB_ERROR="remote worker capacity route is unavailable or unsafe"
     return 1
   }
   case "$command" in fm-*.sh) ;; *) FM_REMOTE_JOB_ERROR="remote job command is outside the fm-*.sh namespace"; return 1 ;; esac

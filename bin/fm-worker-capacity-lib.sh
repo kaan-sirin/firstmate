@@ -231,9 +231,88 @@ fm_worker_capacity_remote_route_register_one() {  # <host-state> <route-state> <
   fi
 }
 
+fm_worker_capacity_remote_route_record_home() {  # <host-state> <id> <home>
+  local host_state=$1 id=$2 home=$3 routes record tmp existing
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -d "$host_state" ] && [ ! -L "$host_state" ] || return 1
+  host_state=$(CDPATH='' cd -- "$host_state" 2>/dev/null && pwd -P) || return 1
+  [ -d "$home" ] && [ ! -L "$home" ] || return 1
+  home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || return 1
+  case "$home" in *$'\n'*|*$'\r'*) return 1 ;; esac
+  routes="$host_state/routes"
+  if [ -e "$routes" ] || [ -L "$routes" ]; then
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  else
+    mkdir "$routes" 2>/dev/null || true
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  fi
+  record="$routes/$id.home"
+  if [ -e "$record" ] || [ -L "$record" ]; then
+    [ -f "$record" ] && [ ! -L "$record" ] || return 1
+    existing=$(<"$record")
+    [ "$existing" = "$home" ]
+    return
+  fi
+  tmp=$(umask 077; mktemp "$routes/.route-$id.XXXXXX") || return 1
+  printf '%s\n' "$home" > "$tmp" || { rm -f -- "$tmp"; return 1; }
+  chmod 600 "$tmp" || { rm -f -- "$tmp"; return 1; }
+  if ! mv -n -- "$tmp" "$record" 2>/dev/null; then
+    rm -f -- "$tmp"
+    [ -f "$record" ] && [ ! -L "$record" ] && [ "$(<"$record")" = "$home" ] || return 1
+  fi
+}
+
+fm_worker_capacity_remote_route_register_known() {  # <host-state>
+  local host_state=$1 routes record id home route_state
+  [ -d "$host_state" ] && [ ! -L "$host_state" ] || return 1
+  host_state=$(CDPATH='' cd -- "$host_state" 2>/dev/null && pwd -P) || return 1
+  routes="$host_state/routes"
+  [ ! -e "$routes" ] && [ ! -L "$routes" ] && return 0
+  [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+  shopt -s nullglob
+  for record in "$routes"/*.home; do
+    [ -f "$record" ] && [ ! -L "$record" ] || { shopt -u nullglob; return 1; }
+    id=${record##*/}
+    id=${id%.home}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) shopt -u nullglob; return 1 ;; esac
+    home=$(<"$record")
+    case "$home" in /*) ;; *) shopt -u nullglob; return 1 ;; esac
+    case "$home" in *$'\n'*|*$'\r'*) shopt -u nullglob; return 1 ;; esac
+    [ -d "$home" ] && [ ! -L "$home" ] || continue
+    home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || { shopt -u nullglob; return 1; }
+    route_state="$home/state/parent-route"
+    fm_worker_capacity_remote_route_register_one "$host_state" "$route_state" "$id" "$home" \
+      || { shopt -u nullglob; return 1; }
+  done
+  shopt -u nullglob
+}
+
+fm_worker_capacity_remote_route_release() {  # <host-state> <id>
+  local host_state=$1 id=$2 route routes record
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  [ -d "$host_state" ] && [ ! -L "$host_state" ] || return 1
+  host_state=$(CDPATH='' cd -- "$host_state" 2>/dev/null && pwd -P) || return 1
+  route="$host_state/.worker-capacity-route-$id.state"
+  if [ -e "$route" ] || [ -L "$route" ]; then
+    [ -f "$route" ] && [ ! -L "$route" ] || return 1
+    rm -f -- "$route" || return 1
+  fi
+  routes="$host_state/routes"
+  if [ -e "$routes" ] || [ -L "$routes" ]; then
+    [ -d "$routes" ] && [ ! -L "$routes" ] || return 1
+    record="$routes/$id.home"
+    if [ -e "$record" ] || [ -L "$record" ]; then
+      [ -f "$record" ] && [ ! -L "$record" ] || return 1
+      rm -f -- "$record" || return 1
+    fi
+  fi
+}
+
 fm_worker_capacity_remote_route_register() {  # <host-state> <route-state> <id> <home>
   local host_state=$1 route_state=$2 id=$3 home=$4 parent candidate candidate_id candidate_route candidate_meta
   fm_worker_capacity_remote_route_register_one "$host_state" "$route_state" "$id" "$home" || return 1
+  fm_worker_capacity_remote_route_record_home "$host_state" "$id" "$home" || return 1
+  fm_worker_capacity_remote_route_register_known "$host_state" || return 1
   parent=$(dirname "$home")
   parent=$(CDPATH='' cd -- "$parent" 2>/dev/null && pwd -P) || return 1
   shopt -s nullglob
@@ -246,6 +325,8 @@ fm_worker_capacity_remote_route_register() {  # <host-state> <route-state> <id> 
     candidate_meta="$candidate_route/$candidate_id.meta"
     [ -e "$candidate_meta" ] || [ -L "$candidate_meta" ] || continue
     fm_worker_capacity_remote_route_register_one "$host_state" "$candidate_route" "$candidate_id" "$candidate" \
+      || { shopt -u nullglob; return 1; }
+    fm_worker_capacity_remote_route_record_home "$host_state" "$candidate_id" "$candidate" \
       || { shopt -u nullglob; return 1; }
   done
   shopt -u nullglob

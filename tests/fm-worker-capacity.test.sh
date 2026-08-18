@@ -185,6 +185,60 @@ EOF
   pass "remote routes share one host capacity index"
 }
 
+test_remote_job_registry_includes_routes_outside_one_parent() {
+  local dir="$TMP_ROOT/remote-job-registry" host_state first second first_route second_route routes
+  host_state="$dir/remote-job/worker-capacity"
+  first="$dir/homes/first"
+  second="$dir/legacy-homes/second"
+  first_route="$first/state/parent-route"
+  second_route="$second/state/parent-route"
+  routes="$host_state/routes"
+  mkdir -p "$first_route" "$second_route" "$routes"
+  printf 'first\n' > "$first/.fm-secondmate-home"
+  printf 'second\n' > "$second/.fm-secondmate-home"
+  printf '%s\n' "$first" > "$routes/first.home"
+  printf '%s\n' "$second" > "$routes/second.home"
+  cat > "$first_route/first.meta" <<EOF
+window=alive
+home=$first
+kind=secondmate
+EOF
+  cat > "$second_route/second.meta" <<EOF
+window=alive
+home=$second
+kind=secondmate
+EOF
+  fm_worker_capacity_remote_route_register "$host_state" "$first_route" first "$first" \
+    || fail "could not register a route from the remote job registry"
+  [ "$(fm_worker_capacity_active_host "$host_state")" = 2 ] \
+    || fail "remote job registry omitted a route outside the current home parent"
+  pass "remote job registry includes routes outside one parent"
+}
+
+test_remote_route_release_removes_retired_route() {
+  local dir="$TMP_ROOT/remote-route-release" host_state home route
+  host_state="$dir/remote-job/worker-capacity"
+  home="$dir/home"
+  route="$home/state/parent-route"
+  mkdir -p "$route" "$dir/remote-job"
+  printf 'retired\n' > "$home/.fm-secondmate-home"
+  cat > "$route/retired.meta" <<EOF
+window=alive
+home=$home
+kind=secondmate
+EOF
+  fm_worker_capacity_remote_route_register "$host_state" "$route" retired "$home" \
+    || fail "could not register the route before retirement"
+  fm_worker_capacity_remote_route_release "$host_state" retired \
+    || fail "could not release the retired route"
+  rm -rf "$home"
+  [ "$(fm_worker_capacity_active_host "$host_state")" = 0 ] \
+    || fail "retired remote route still consumed host capacity"
+  [ ! -e "$host_state/routes/retired.home" ] \
+    || fail "retired remote route remained registered"
+  pass "retired remote routes release host capacity"
+}
+
 test_default_limit_refuses_when_capacity_is_full() {
   local dir="$TMP_ROOT/spawn" home fakebin out status
   dir="$TMP_ROOT/spawn"
@@ -549,6 +603,8 @@ test_started_launch_reconciles_capacity_reservation
 test_expired_dead_launch_releases_capacity_reservation
 test_expired_unpublished_launch_releases_capacity_reservation
 test_remote_routes_share_host_capacity_index
+test_remote_job_registry_includes_routes_outside_one_parent
+test_remote_route_release_removes_retired_route
 test_default_limit_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
 test_remote_secondmate_uses_parent_route_capacity
