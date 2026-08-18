@@ -916,6 +916,24 @@ test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record() {
   pass "fm-spawn --recover-missing: legacy ships remain recoverable without workflow records"
 }
 
+test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode() {
+  local dir out rc meta
+  dir=$(new_case unsupported-mode rl11b)
+  add_ship_task "$dir" rl11b claude
+  meta="$dir/home/state/rl11b.meta"
+  sed 's/^mode=no-mistakes$/mode=unsupported/' "$meta" > "$meta.tmp" \
+    && mv "$meta.tmp" "$meta" || fail "could not prepare an unsupported ship mode"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl11b --relaunch); rc=$?
+  expect_code 1 "$rc" "an unsupported recorded ship mode should refuse"
+  assert_contains "$out" "unsupported recorded ship mode" \
+    "the refusal should identify the unsupported recorded mode"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an unsupported recorded ship mode must not launch a replacement agent"
+  pass "fm-spawn --relaunch: unsupported recorded ship modes refuse before launch"
+}
+
 # --- 3 and 4. refusals before the agent is touched ---------------------------
 
 test_missing_worktree_refuses_before_stopping_anything() {
@@ -1668,6 +1686,7 @@ test_muse_session_binding_is_retired_on_a_harness_switch
 test_cursor_session_binding_is_retired_on_a_harness_switch
 test_spawn_relaunch_keeps_a_legacy_ship_without_a_preflight_record
 test_spawn_recovers_a_legacy_missing_ship_without_a_preflight_record
+test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical

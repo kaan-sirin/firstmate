@@ -1158,6 +1158,15 @@ if [ "$RELAUNCH" -eq 1 ]; then
   [ -n "$KIND" ] || KIND=ship
   MODE=$(fm_meta_get "$RELAUNCH_META" mode)
   YOLO=$(fm_meta_get "$RELAUNCH_META" yolo)
+  if [ "$KIND" = ship ]; then
+    case "$MODE" in
+      no-mistakes|direct-PR|local-only) ;;
+      *)
+        echo "error: task $ID has unsupported recorded ship mode '${MODE:-none}'; refusing to relaunch" >&2
+        exit 1
+        ;;
+    esac
+  fi
   RELAUNCH_WT=$(fm_meta_get "$RELAUNCH_META" worktree)
   [ -n "$RELAUNCH_WT" ] && [ -d "$RELAUNCH_WT" ] || {
     echo "error: task $ID's recorded worktree '${RELAUNCH_WT:-none}' is missing; refusing to relaunch without the local copy its work lives in" >&2
