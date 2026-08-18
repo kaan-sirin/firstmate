@@ -724,10 +724,14 @@ fm_recovery_marker_arm_check() {
 }
 
 fm_lock_try_acquire() {
-  local lockdir=$1 pid steal cur rc steal_owner primary_owner
+  local lockdir=$1 pid steal cur rc steal_owner primary_owner parent
   FM_LOCK_HELD_PID=
   FM_LOCK_OWNER_DIR=
   FM_LOCK_RECOVERED_PID=
+
+  parent=${lockdir%/*}
+  [ "$parent" != "$lockdir" ] || parent=.
+  [ -d "$parent" ] && [ ! -L "$parent" ] || return 1
 
   if fm_lock_try_create "$lockdir"; then
     return 0

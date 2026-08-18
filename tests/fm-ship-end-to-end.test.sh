@@ -1295,6 +1295,79 @@ test_dashboard_recovery_refuses_missing_preflight() {
   pass "dashboard recovery fails closed for missing preflights"
 }
 
+test_dashboard_recovery_rechecks_deleted_preflight_while_waiting() {
+  local home="$TMP_ROOT/dashboard-recovery-deleted-preflight" state_bin="$TMP_ROOT/dashboard-recovery-deleted-preflight-state" agent_bin="$TMP_ROOT/dashboard-recovery-deleted-preflight-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-deleted-preflight-spawn" fakebin="$TMP_ROOT/dashboard-recovery-deleted-preflight-bin" contract="$TMP_ROOT/dashboard-recovery-deleted-preflight-contract.json" id=dash-deleted-preflight fp holder_pid recovery_pid attempts status out
+  mkdir -p "$home/data" "$home/state" "$fakebin"
+  make_contract "$contract"
+  fp=$(publish_preflight_record "$home" "$id" "$contract" direct approved 100) || fail "could not prepare deleted preflight"
+  printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' "preflight_fingerprint=$fp" > "$home/state/$id.meta"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
+  cat > "$fakebin/sleep" <<'SH'
+#!/usr/bin/env bash
+if [ "$1" = 0.1 ] && [ ! -e "$FM_RACE_WAIT_READY" ]; then
+  : > "$FM_RACE_WAIT_READY"
+  while [ ! -e "$FM_RACE_WAIT_CONTINUE" ]; do /bin/sleep 0.01; done
+fi
+exec /bin/sleep "$@"
+SH
+  chmod +x "$state_bin" "$agent_bin" "$spawn_bin" "$fakebin/sleep"
+  (
+    STATE="$home/data/$id"
+    FM_STATE_OVERRIDE="$STATE" . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$home/data/$id/.ship-preflight.lock"
+    : > "$home/holder-ready"
+    while [ ! -e "$home/holder-release" ]; do sleep 0.01; done
+    fm_lock_release "$home/data/$id/.ship-preflight.lock"
+  ) &
+  holder_pid=$!
+  attempts=0
+  while [ ! -e "$home/holder-ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/holder-ready" ]; then
+    : > "$home/holder-release"
+    wait "$holder_pid" || true
+    fail "deleted-preflight lock holder did not start"
+  fi
+  PATH="$fakebin:$PATH" FM_RACE_WAIT_READY="$home/wait-ready" FM_RACE_WAIT_CONTINUE="$home/wait-continue" FM_RECOVERY_SPAWN_LOG="$home/spawn.log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe "$id" > "$home/recovery.out" 2>&1 &
+  recovery_pid=$!
+  attempts=0
+  while [ ! -e "$home/wait-ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/wait-ready" ]; then
+    : > "$home/holder-release"
+    : > "$home/wait-continue"
+    wait "$holder_pid" || true
+    wait "$recovery_pid" || true
+    fail "recovery did not wait for the held preflight lock"
+  fi
+  rm -rf -- "$home/data/$id"
+  : > "$home/holder-release"
+  : > "$home/wait-continue"
+  wait "$holder_pid" || true
+  attempts=0
+  while kill -0 "$recovery_pid" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if kill -0 "$recovery_pid" 2>/dev/null; then
+    kill -TERM "$recovery_pid" 2>/dev/null || true
+    wait "$recovery_pid" || true
+    fail "recovery waited after its preflight was deleted"
+  fi
+  if wait "$recovery_pid"; then status=0; else status=$?; fi
+  out=$(< "$home/recovery.out")
+  [ "$status" -ne 0 ] || fail "recovery accepted a deleted preflight"
+  assert_contains "$out" "no valid private preflight record" "deleted preflight refusal was unclear"
+  [ ! -e "$home/spawn.log" ] || fail "deleted preflight launched a replacement"
+  pass "dashboard recovery rechecks preflight while waiting for its lock"
+}
+
 test_dashboard_recovery_serializes_preflight_publication() {
   local home="$TMP_ROOT/dashboard-recovery-preflight-race" state_bin="$TMP_ROOT/dashboard-recovery-preflight-race-state" agent_bin="$TMP_ROOT/dashboard-recovery-preflight-race-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-preflight-race-spawn" fakebin="$TMP_ROOT/dashboard-recovery-preflight-race-bin" contract="$TMP_ROOT/dashboard-recovery-preflight-race-contract.json" id=dash-preflight-race fp real_mktemp spawn_pid publisher_pid attempts status
   mkdir -p "$home/data" "$home/state" "$fakebin"
@@ -1777,6 +1850,7 @@ test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
 test_dashboard_recovery_refuses_missing_preflight
+test_dashboard_recovery_rechecks_deleted_preflight_while_waiting
 test_dashboard_recovery_serializes_preflight_publication
 test_dashboard_recovery_signal_exits_without_recording_attempts
 test_dashboard_recovery_cancels_unregistered_spawn
