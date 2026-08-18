@@ -675,18 +675,43 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
+worker_capacity_parent_meta_matches_home() {
+  local state=$1 id=$2 home=$3 meta meta_home
+  meta="$state/$id.meta"
+  [ -f "$meta" ] && [ ! -L "$meta" ] \
+    && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || return 1
+  meta_home=$(fm_meta_get "$meta" home)
+  meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || return 1
+  [ "$meta_home" = "$home" ]
+}
+
 worker_capacity_host_state() {
-  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker parent_home parent_state route_state
-  local id meta meta_home child_home
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state route_state id
+  local climbed=0 visited=$'\n'
   if [ -z "$host_state" ]; then
-    marker="$FM_HOME/$SUB_HOME_MARKER"
-    if [ -e "$marker" ] || [ -L "$marker" ]; then
+    home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+    while :; do
+      case "$visited" in *$'\n'"$home"$'\n'*)
+        echo "error: secondmate parent binding loops; cannot resolve host worker capacity" >&2
+        return 1
+        ;;
+      esac
+      visited="$visited$home"$'\n'
+      marker="$home/$SUB_HOME_MARKER"
+      if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+        if [ "$climbed" = 1 ]; then
+          host_state="$home/state"
+        else
+          host_state=$STATE
+        fi
+        break
+      fi
       [ -f "$marker" ] && [ ! -L "$marker" ] || {
         echo "error: secondmate identity marker is unsafe; cannot resolve host worker capacity" >&2
         return 1
       }
-      fm_secondmate_parent_record_parse "$FM_HOME/$SUB_HOME_PARENT_MARKER" || {
-        echo "error: local secondmate has no valid parent binding; cannot resolve host worker capacity" >&2
+      fm_secondmate_parent_record_parse "$home/$SUB_HOME_PARENT_MARKER" || {
+        echo "error: secondmate has no valid parent binding; cannot resolve host worker capacity" >&2
         return 1
       }
       id=$(<"$marker")
@@ -696,28 +721,14 @@ worker_capacity_host_state() {
       }
       case "$FM_SECONDMATE_PARENT_ROUTE" in
         remote)
-          route_state="$STATE/parent-route"
-          [ -d "$route_state" ] && [ ! -L "$route_state" ] || {
-            echo "error: remote secondmate parent route is unsafe or unavailable; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          meta="$route_state/$id.meta"
-          [ -f "$meta" ] && [ ! -L "$meta" ] \
-            && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
-              echo "error: remote secondmate parent record is unavailable; cannot resolve host worker capacity" >&2
+          route_state="$home/state/parent-route"
+          [ -d "$route_state" ] && [ ! -L "$route_state" ] \
+            && worker_capacity_parent_meta_matches_home "$route_state" "$id" "$home" || {
+              echo "error: remote secondmate parent route is invalid; cannot resolve host worker capacity" >&2
               return 1
             }
-          meta_home=$(fm_meta_get "$meta" home)
-          child_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
-          meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || {
-            echo "error: remote secondmate parent home binding is invalid; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          [ "$meta_home" = "$child_home" ] || {
-            echo "error: remote secondmate parent home binding does not match this home; cannot resolve host worker capacity" >&2
-            return 1
-          }
           host_state=$route_state
+          break
           ;;
         local)
           parent_home=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
@@ -725,33 +736,17 @@ worker_capacity_host_state() {
             return 1
           }
           parent_state="$parent_home/state"
-          [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || {
-            echo "error: local secondmate parent state is unsafe or unavailable; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          meta="$parent_state/$id.meta"
-          [ -f "$meta" ] && [ ! -L "$meta" ] \
-            && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
-              echo "error: local secondmate parent record is unavailable; cannot resolve host worker capacity" >&2
+          [ -d "$parent_state" ] && [ ! -L "$parent_state" ] \
+            && worker_capacity_parent_meta_matches_home "$parent_state" "$id" "$home" || {
+              echo "error: local secondmate parent record is invalid; cannot resolve host worker capacity" >&2
               return 1
-            }
-          meta_home=$(fm_meta_get "$meta" home)
-          child_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
-          meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || {
-            echo "error: local secondmate parent home binding is invalid; cannot resolve host worker capacity" >&2
-            return 1
           }
-          [ "$meta_home" = "$child_home" ] || {
-            echo "error: local secondmate parent home binding does not match this home; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          host_state=$parent_state
+          home=$parent_home
+          climbed=1
           ;;
         *) return 1 ;;
       esac
-    else
-      host_state=$STATE
-    fi
+    done
   fi
   host_state=$(resolve_directory_input FM_WORKER_CAPACITY_HOST_STATE "$host_state") || return 1
   [ -d "$host_state" ] && [ ! -L "$host_state" ] || {
@@ -1028,28 +1023,35 @@ WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
   exit 1
 }
 if [ "$WORKER_CAPACITY" -gt 0 ]; then
-  WORKER_CAPACITY_STATE=$(worker_capacity_host_state) || exit 1
-  SPAWN_WORKER_CAPACITY_LOCK="$WORKER_CAPACITY_STATE/.worker-capacity.lock"
-  if ! fm_lock_try_acquire "$SPAWN_WORKER_CAPACITY_LOCK"; then
-    echo "error: worker capacity admission is in progress; retry this spawn" >&2
-    exit 1
+  REMOTE_SECONDMATE=0
+  if [ "$KIND" = secondmate ] && [ "$RELAUNCH" -eq 0 ] \
+     && [ "$(secondmate_registry_field "$DATA/secondmates.md" "$ID" remote 2>/dev/null || true)" = 1 ]; then
+    REMOTE_SECONDMATE=1
   fi
-  SPAWN_WORKER_CAPACITY_LOCK_HELD=1
-fi
-if [ "$RELAUNCH" -eq 0 ] && [ "$WORKER_CAPACITY" -gt 0 ]; then
-  WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
-    echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
-    exit 1
-  }
-  if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
-    echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
-    exit 1
+  if [ "$REMOTE_SECONDMATE" = 0 ]; then
+    WORKER_CAPACITY_STATE=$(worker_capacity_host_state) || exit 1
+    SPAWN_WORKER_CAPACITY_LOCK="$WORKER_CAPACITY_STATE/.worker-capacity.lock"
+    if ! fm_lock_try_acquire "$SPAWN_WORKER_CAPACITY_LOCK"; then
+      echo "error: worker capacity admission is in progress; retry this spawn" >&2
+      exit 1
+    fi
+    SPAWN_WORKER_CAPACITY_LOCK_HELD=1
+    if [ "$RELAUNCH" -eq 0 ]; then
+      WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
+        echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
+        exit 1
+      }
+      if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+        echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
+        exit 1
+      fi
+      if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+        echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
+        exit 1
+      fi
+      SPAWN_CAPACITY_RESERVATION=$ID
+    fi
   fi
-  if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
-    echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
-    exit 1
-  fi
-  SPAWN_CAPACITY_RESERVATION=$ID
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
