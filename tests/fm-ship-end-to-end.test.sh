@@ -213,7 +213,7 @@ test_preflight_rejects_tampering_and_future_approvals() {
 }
 
 test_preflight_rejects_cross_task_records() {
-  local home="$TMP_ROOT/cross-task" contract="$TMP_ROOT/cross-task-contract.json" out fp status
+  local home="$TMP_ROOT/cross-task" contract="$TMP_ROOT/cross-task-contract.json" out fp status unsafe_mode
   mkdir -p "$home/data"
   make_contract "$contract"
   fp=$(publish_preflight_record "$home" approved-a1 "$contract" direct approved 100) || fail "cross-task preflight approval failed"
@@ -224,12 +224,14 @@ test_preflight_rejects_cross_task_records() {
   [ "$status" -ne 0 ] || fail "a preflight under a writable data directory must refuse"
   assert_contains "$out" "unsafe task record directory" "writable data directory refusal was unclear"
 
-  chmod 733 "$home/data/approved-a1"
-  out=$(preflight_env "$home" 101 verify-current approved-a1 2>&1)
-  status=$?
-  chmod 700 "$home/data/approved-a1"
-  [ "$status" -ne 0 ] || fail "a preflight under a writable task directory must refuse"
-  assert_contains "$out" "unsafe task record directory" "writable task directory refusal was unclear"
+  for unsafe_mode in 733 740 704; do
+    chmod "$unsafe_mode" "$home/data/approved-a1"
+    out=$(preflight_env "$home" 101 verify-current approved-a1 2>&1)
+    status=$?
+    chmod 700 "$home/data/approved-a1"
+    [ "$status" -ne 0 ] || fail "a preflight under a nonprivate task directory must refuse: $unsafe_mode"
+    assert_contains "$out" "unsafe task record directory" "nonprivate task directory refusal was unclear: $unsafe_mode"
+  done
 
   ln -s "$home/data" "$home/linked-data"
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/linked-data" FM_STATE_OVERRIDE="$home/state" FM_SHIP_PREFLIGHT_NOW=101 "$PREFLIGHT" verify-current approved-a1 2>&1)
@@ -273,7 +275,7 @@ test_preflight_rejects_cross_task_records() {
 }
 
 test_bridge_preserves_handoff_when_record_directories_are_unsafe() {
-  local home="$TMP_ROOT/bridge-unsafe-directories" contract="$TMP_ROOT/bridge-unsafe-directories-contract.json" out status
+  local home="$TMP_ROOT/bridge-unsafe-directories" contract="$TMP_ROOT/bridge-unsafe-directories-contract.json" out status unsafe_mode
   mkdir -p "$home/data" "$home/state"
   make_contract "$contract"
 
@@ -288,17 +290,19 @@ test_bridge_preserves_handoff_when_record_directories_are_unsafe() {
     || fail "unsafe data directory publication consumed its handoff"
   assert_absent "$home/data/data-unsafe-a1/ship-preflight.json" "unsafe data directory publication wrote a record"
 
-  write_bridge_handoff "$home" task-unsafe-a1 "$contract" bridge approved 100 >/dev/null || fail "could not write task-directory handoff"
-  mkdir "$home/data/task-unsafe-a1"
-  chmod 733 "$home/data/task-unsafe-a1"
-  out=$(bridge_env "$home" publish task-unsafe-a1 2>&1)
-  status=$?
-  chmod 700 "$home/data/task-unsafe-a1"
-  [ "$status" -ne 0 ] || fail "bridge published through a writable task directory"
-  assert_contains "$out" "unsafe task record directory" "unsafe task directory refusal was unclear"
-  [ -f "$home/state/agent-bridge/ship-preflight/task-unsafe-a1.json" ] \
-    || fail "unsafe task directory publication consumed its handoff"
-  assert_absent "$home/data/task-unsafe-a1/ship-preflight.json" "unsafe task directory publication wrote a record"
+  for unsafe_mode in 733 740 704; do
+    write_bridge_handoff "$home" "task-unsafe-$unsafe_mode" "$contract" bridge approved 100 >/dev/null || fail "could not write task-directory handoff"
+    mkdir "$home/data/task-unsafe-$unsafe_mode"
+    chmod "$unsafe_mode" "$home/data/task-unsafe-$unsafe_mode"
+    out=$(bridge_env "$home" publish "task-unsafe-$unsafe_mode" 2>&1)
+    status=$?
+    chmod 700 "$home/data/task-unsafe-$unsafe_mode"
+    [ "$status" -ne 0 ] || fail "bridge published through a nonprivate task directory: $unsafe_mode"
+    assert_contains "$out" "unsafe task record directory" "unsafe task directory refusal was unclear: $unsafe_mode"
+    [ -f "$home/state/agent-bridge/ship-preflight/task-unsafe-$unsafe_mode.json" ] \
+      || fail "unsafe task directory publication consumed its handoff: $unsafe_mode"
+    assert_absent "$home/data/task-unsafe-$unsafe_mode/ship-preflight.json" "unsafe task directory publication wrote a record: $unsafe_mode"
+  done
   pass "bridge preserves handoffs when record directories are unsafe"
 }
 

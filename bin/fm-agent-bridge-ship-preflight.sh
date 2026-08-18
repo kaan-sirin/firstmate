@@ -19,7 +19,7 @@ inode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %i "$1"; else stat -c %
 owner_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi; }
 valid_private_metadata() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ]; }
 valid_private_file() { valid_private_metadata "$1" && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
-valid_private_dir() {
+valid_data_dir() {
   local path=$1 mode owner group other
   [ -d "$path" ] && [ ! -L "$path" ] || return 1
   owner=$(owner_of "$path" 2>/dev/null || true)
@@ -29,6 +29,12 @@ valid_private_dir() {
   group=${mode#?}; group=${group%?}
   other=${mode#??}
   case "$group$other" in *[2367]*) return 1 ;; esac
+}
+valid_private_dir() {
+  local path=$1 mode
+  valid_data_dir "$path" || return 1
+  mode=$(mode_of "$path" 2>/dev/null || true)
+  case "$mode" in [0-7]00) ;; *) return 1 ;; esac
 }
 valid_id() { case "$1" in ''|.*|*[!A-Za-z0-9._-]*) return 1;; *) return 0;; esac; }
 valid_producer_revision() {
@@ -98,7 +104,7 @@ if ! valid_private_dir "$BRIDGE_ROOT" || ! valid_private_dir "$HANDOFF_DIR"; the
 fi
 HANDOFF="$HANDOFF_DIR/$ID.json"
 
-valid_private_dir "$DATA" || die "unsafe task record directory"
+valid_data_dir "$DATA" || die "unsafe task record directory"
 REC_DIR="$DATA/$ID"
 if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
   valid_private_dir "$REC_DIR" || die "unsafe task record directory"
