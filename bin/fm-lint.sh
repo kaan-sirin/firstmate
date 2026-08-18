@@ -418,16 +418,15 @@ fm_lint_wait_workers() {
 }
 
 fm_lint_replay_unique_diagnostics() {  # <output>
-  awk '
-    BEGIN { RS=""; ORS="\n\n" }
-    {
-      key=""
-      lines=split($0, line, "\n")
-      for (i = 1; i <= lines; i++) {
-        if (line[i] ~ /:[0-9][0-9]*:[0-9][0-9]*: (error|warning|info|style): .* \[SC[0-9][0-9]*\]$/) key=line[i]
-      }
-      if (key != "" && seen[key]++) next
-      print
+  "$PERL_BIN" -0 -e '
+    $output = do { local $/; <> };
+    @parts = split(/(\n{2,})/, $output, -1);
+    for ($i = 0; $i < @parts; $i += 2) {
+      ($block, $separator) = @parts[$i, $i + 1];
+      @keys = $block =~ /^.*:\d+:\d+: (?:error|warning|info|style): .* \[SC\d+\]$/mg;
+      $key = $keys[-1] // q{};
+      next if length $key && $seen{$key}++;
+      print $block, ($separator // q{});
     }
   ' "$1"
 }
