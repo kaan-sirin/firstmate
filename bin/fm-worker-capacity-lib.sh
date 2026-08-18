@@ -15,14 +15,12 @@
 # Source after fm-backend.sh. Public functions:
 #   fm_worker_capacity_limit <config-dir>       -> positive integer or 0 absent
 #   fm_worker_capacity_active <state-dir>       -> active count
+#   fm_worker_capacity_pending_reserve <state-dir> <task-id>
+#   fm_worker_capacity_pending_release <state-dir> <task-id>
+#   fm_worker_capacity_pending_until_started <state-dir> <task-id>
 
-fm_worker_capacity_limit() {  # <config-dir>
-  local config=$1 file value links bytes
-  if [ -e "$config" ] || [ -L "$config" ]; then
-    [ -d "$config" ] && [ ! -L "$config" ] || return 1
-  fi
-  file="$config/max-active-workers"
-  [ -e "$file" ] || [ -L "$file" ] || { printf '0'; return 0; }
+fm_worker_capacity_file_valid() {  # <file>
+  local file=$1 value links bytes
   [ -f "$file" ] && [ ! -L "$file" ] || return 1
   if [ "$(uname)" = Darwin ]; then
     links=$(stat -f %l "$file" 2>/dev/null) || return 1
@@ -37,14 +35,71 @@ fm_worker_capacity_limit() {  # <config-dir>
   esac
   bytes=$(LC_ALL=C wc -c < "$file") || return 1
   bytes=${bytes//[[:space:]]/}
-  [ "$bytes" = "$(( ${#value} + 1 ))" ] || return 1
+  [ "$bytes" = "$(( ${#value} + 1 ))" ]
+}
+
+fm_worker_capacity_limit() {  # <config-dir>
+  local config=$1 file value
+  if [ -e "$config" ] || [ -L "$config" ]; then
+    [ -d "$config" ] && [ ! -L "$config" ] || return 1
+  fi
+  file="$config/max-active-workers"
+  [ -e "$file" ] || [ -L "$file" ] || { printf '0'; return 0; }
+  fm_worker_capacity_file_valid "$file" || return 1
+  value=$(<"$file")
   printf '%s' "$value"
 }
 
+fm_worker_capacity_pending_path() {  # <state-dir> <task-id>
+  local state=$1 id=$2
+  case "$id" in ''|*[!A-Za-z0-9._-]*) return 1 ;; esac
+  printf '%s/.worker-capacity-%s.pending\n' "$state" "$id"
+}
+
+fm_worker_capacity_pending_reserve() {  # <state-dir> <task-id>
+  local state=$1 id=$2 pending
+  pending=$(fm_worker_capacity_pending_path "$state" "$id") || return 1
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] || return 1
+  (umask 077; printf '%s\n' "$id" > "$pending") || return 1
+  [ -f "$pending" ] && [ ! -L "$pending" ]
+}
+
+fm_worker_capacity_pending_release() {  # <state-dir> <task-id>
+  local state=$1 id=$2 pending
+  pending=$(fm_worker_capacity_pending_path "$state" "$id") || return 1
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] && return 0
+  [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
+  rm -f -- "$pending"
+}
+
+fm_worker_capacity_pending_until_started() {  # <state-dir> <task-id>
+  local state=$1 id=$2 meta backend target verdict i=0 limit=${FM_WORKER_CAPACITY_START_POLLS:-100}
+  case "$limit" in [1-9]|[1-9][0-9]|[1-9][0-9][0-9]) ;; *) return 1 ;; esac
+  meta="$state/$id.meta"
+  while [ "$i" -lt "$limit" ]; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    backend=$(fm_backend_of_meta "$meta") || return 1
+    target=$(fm_backend_target_of_meta "$meta") || return 1
+    [ -n "$target" ] || return 1
+    verdict=$(fm_backend_agent_state "$backend" "$target") || return 1
+    case "$verdict" in
+      alive|ambiguous|unreadable|unverified) return 0 ;;
+      dead|missing) sleep 0.1 ;;
+      *) return 1 ;;
+    esac
+    i=$((i + 1))
+  done
+  return 1
+}
+
 fm_worker_capacity_active() {  # <state-dir>
-  local state=$1 meta backend target verdict count=0
+  local state=$1 meta pending backend target verdict count=0
   [ -d "$state" ] || { printf '0'; return 0; }
   shopt -s nullglob
+  for pending in "$state"/.worker-capacity-*.pending; do
+    [ -f "$pending" ] && [ ! -L "$pending" ] || return 1
+    count=$((count + 1))
+  done
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
     backend=$(fm_backend_of_meta "$meta") || return 1

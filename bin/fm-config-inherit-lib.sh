@@ -53,6 +53,8 @@
 #
 # shellcheck source=bin/fm-startup-memory-budget-lib.sh
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-startup-memory-budget-lib.sh"
+# shellcheck source=bin/fm-worker-capacity-lib.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/fm-worker-capacity-lib.sh"
 
 # The one shared data file in this inheritance contract. There is deliberately
 # no shared learnings file.
@@ -493,6 +495,22 @@ propagate_inheritable_config() {
           rc=1
           continue
         fi
+      fi
+    fi
+    if [ "$item" = max-active-workers ]; then
+      if ! fm_worker_capacity_limit "$src_config" >/dev/null; then
+        reason="unsafe or invalid primary source"
+        warn_inheritable_config_error "$item" "$src" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
+      fi
+      if ! fm_worker_capacity_limit "$dest_config" >/dev/null; then
+        reason="unsafe or invalid destination"
+        warn_inheritable_config_error "$item" "$dest" "$reason"
+        record_inheritable_config_result "$item" error "$reason"
+        rc=1
+        continue
       fi
     fi
     if [ -f "$src" ]; then

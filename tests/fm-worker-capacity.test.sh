@@ -22,6 +22,8 @@ fm_backend_agent_state() {
   esac
 }
 . "$ROOT/bin/fm-worker-capacity-lib.sh"
+# shellcheck source=bin/fm-config-inherit-lib.sh
+. "$ROOT/bin/fm-config-inherit-lib.sh"
 
 make_meta() {
   local state=$1 id=$2 verdict=$3
@@ -64,6 +66,41 @@ test_unsafe_config_directory_refuses_limit_lookup() {
   [ "$(fm_worker_capacity_limit "$dir/absent-config")" = 0 ] \
     || fail "absent config directory did not preserve unlimited behavior"
   pass "worker limit refuses unsafe config directories"
+}
+
+test_inherited_limit_rejects_unsafe_endpoints() {
+  local dir="$TMP_ROOT/inherit" source destination source_link destination_link
+  dir="$TMP_ROOT/inherit"
+  source="$dir/source"
+  destination="$dir/destination"
+  mkdir -p "$source" "$destination"
+  printf '1\n' > "$source/max-active-workers"
+  FM_INHERITABLE_CONFIG=max-active-workers \
+    propagate_inheritable_config "$source" "$destination" \
+    || fail "valid worker limit did not inherit"
+  [ "$(fm_worker_capacity_limit "$destination")" = 1 ] \
+    || fail "inherited worker limit was not usable"
+
+  source_link="$dir/source-link"
+  printf '2\n' > "$source_link"
+  rm -f "$source/max-active-workers"
+  ln "$source_link" "$source/max-active-workers"
+  FM_INHERITABLE_CONFIG=max-active-workers \
+    propagate_inheritable_config "$source" "$destination" \
+    && fail "hard-linked source worker limit was inherited"
+  [ "$(fm_worker_capacity_limit "$destination")" = 1 ] \
+    || fail "unsafe source changed the inherited worker limit"
+
+  rm -f "$source/max-active-workers"
+  printf '2\n' > "$source/max-active-workers"
+  destination_link="$dir/destination-link"
+  ln "$destination/max-active-workers" "$destination_link"
+  FM_INHERITABLE_CONFIG=max-active-workers \
+    propagate_inheritable_config "$source" "$destination" \
+    && fail "hard-linked destination worker limit was overwritten"
+  [ "$(<"$destination/max-active-workers")" = 1 ] \
+    || fail "unsafe destination changed the worker limit"
+  pass "worker limit inheritance rejects unsafe source and destination"
 }
 
 test_only_proven_dead_workers_free_slots() {
@@ -118,7 +155,10 @@ make_pending_launch_fakebin() {
 set -u
 case "$*" in
   *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
-  *'#{pane_current_command}'*) printf 'bash\n'; exit 0 ;;
+  *'#{pane_current_command}'*)
+    if [ -e "$FM_AGENT_READY" ]; then printf 'codex\n'; else printf 'bash\n'; fi
+    exit 0
+    ;;
   *'#{pane_id}'*) printf '@fake\n'; exit 0 ;;
   *'#S'*) printf 'firstmate\n'; exit 0 ;;
 esac
@@ -133,12 +173,7 @@ case "${1:-}" in
   send-keys)
     case "$*" in
       *'fm-first'*)
-        case "$*" in
-          *' -l '*)
-            : > "$FM_LAUNCH_TYPED"
-            while [ ! -e "$FM_ALLOW_LAUNCH" ]; do sleep 0.05; done
-            ;;
-        esac
+        [ "$#" -ne 4 ] || [ "${4:-}" != Enter ] || : > "$FM_ENTER_SENT"
         ;;
     esac
     ;;
@@ -160,7 +195,7 @@ run_pending_launch_spawn() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" codex --mode no-mistakes --yolo off
 }
 
-test_pending_launch_keeps_capacity_reserved() {
+test_post_enter_launch_keeps_capacity_reserved() {
   local dir="$TMP_ROOT/pending" home project worktree fakebin first_pid out status i
   dir="$TMP_ROOT/pending"
   home="$dir/home"
@@ -177,31 +212,32 @@ test_pending_launch_keeps_capacity_reserved() {
   git -C "$project" worktree add -q --detach "$worktree"
   fakebin=$(make_pending_launch_fakebin "$dir")
 
-  FM_LAUNCH_TYPED="$dir/launch-typed" FM_ALLOW_LAUNCH="$dir/allow-launch" \
+  FM_ENTER_SENT="$dir/enter-sent" FM_AGENT_READY="$dir/agent-ready" \
     run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" first > "$dir/first.out" 2>&1 &
   first_pid=$!
   for i in $(seq 1 100); do
-    [ -e "$dir/launch-typed" ] && break
+    [ -e "$dir/enter-sent" ] && break
     sleep 0.05
   done
-  [ -e "$dir/launch-typed" ] || fail "first spawn did not reach launch submission"
+  [ -e "$dir/enter-sent" ] || fail "first spawn did not submit the launch command"
 
-  out=$(FM_LAUNCH_TYPED="$dir/launch-typed" FM_ALLOW_LAUNCH="$dir/allow-launch" \
+  out=$(FM_ENTER_SENT="$dir/enter-sent" FM_AGENT_READY="$dir/agent-ready" \
     run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" second 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "second spawn started while first launch was pending"
   assert_absent "$home/state/second.meta" "pending launch admitted a second worker"
 
-  : > "$dir/allow-launch"
+  : > "$dir/agent-ready"
   wait "$first_pid"
   status=$?
   [ "$status" -eq 0 ] || fail "first spawn did not finish after launch was allowed"
-  pass "pending launch keeps its worker capacity reservation"
+  pass "post-Enter launch keeps its worker capacity reservation"
 }
 
 test_absent_limit_is_unlimited
 test_valid_limit_and_malformed_values
 test_unsafe_config_directory_refuses_limit_lookup
+test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
-test_pending_launch_keeps_capacity_reserved
+test_post_enter_launch_keeps_capacity_reserved
