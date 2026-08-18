@@ -425,6 +425,33 @@ test_bridge_recovers_a_hard_linked_claim_after_interruption() {
   pass "bridge recovers a hard-linked claim after interruption"
 }
 
+test_bridge_preserves_claimed_correction_against_delayed_handoff() {
+  local home="$TMP_ROOT/bridge-claimed-correction" id=claimed-correction-a1 original="$TMP_ROOT/bridge-claimed-correction-original.json" corrected="$TMP_ROOT/bridge-claimed-correction-corrected.json" handoff claim out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$original"
+  printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
+  write_bridge_handoff "$home" "$id" "$corrected" direct awaiting_approval 101 2 >/dev/null || fail "could not prepare claimed correction"
+  handoff="$home/state/agent-bridge/ship-preflight/$id.json"
+  claim="${handoff%/*}/.${id}.claim.interrupted"
+  mv -f -- "$handoff" "$claim" || fail "could not stage interrupted correction claim"
+  write_bridge_handoff "$home" "$id" "$original" direct approved 100 1 >/dev/null || fail "could not prepare delayed handoff"
+  out=$(bridge_env "$home" publish "$id" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a delayed handoff displaced a claimed correction"
+  assert_contains "$out" "competing private bridge handoffs" "competing handoff refusal was unclear"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$claim" >/dev/null \
+    || fail "delayed handoff changed the claimed correction"
+  jq -e '.producer_revision == 1 and .state == "approved" and .contract.outcome == "A tested PR"' "$handoff" >/dev/null \
+    || fail "competing handoff was not preserved for resolution"
+  assert_absent "$home/data/$id/ship-preflight.json" "competing handoffs published a preflight record"
+  rm -f -- "$handoff" || fail "could not remove delayed handoff"
+  bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not recover the claimed correction after conflict resolution"
+  jq -e '.producer_revision == 2 and .state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
+    || fail "recovered claim did not preserve the corrected preflight"
+  assert_absent "$claim" "recovered correction claim remained stranded"
+  pass "bridge preserves claimed corrections against delayed handoffs"
+}
+
 test_bridge_serializes_concurrent_publish_claims() {
   local home="$TMP_ROOT/bridge-concurrent" id=concurrent-a1 contract="$TMP_ROOT/bridge-concurrent-contract.json" fakebin real_mktemp first second attempts first_status second_status
   mkdir -p "$home/data" "$home/state"
@@ -1529,6 +1556,7 @@ test_bridge_claims_a_handoff_before_reading_it
 test_bridge_recovers_a_claim_after_interruption
 test_bridge_restores_a_claim_interrupted_after_rename
 test_bridge_recovers_a_hard_linked_claim_after_interruption
+test_bridge_preserves_claimed_correction_against_delayed_handoff
 test_bridge_serializes_concurrent_publish_claims
 test_bridge_preserves_approved_record_on_invalid_handoff
 test_bridge_rejects_stale_producer_revisions

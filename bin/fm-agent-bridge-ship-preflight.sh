@@ -47,7 +47,7 @@ record_producer_revision() {
   ' "$1"
 }
 recover_claim() {
-  local claim claim_inode handoff_inode
+  local claim claim_inode handoff_inode claim_revision handoff_revision
   local -a claims
   shopt -s nullglob
   claims=("$HANDOFF_DIR/.${ID}.claim."*)
@@ -66,6 +66,9 @@ recover_claim() {
       return 0
     fi
     valid_private_file "$claim" && valid_private_file "$HANDOFF" || die "no valid private bridge handoff"
+    claim_revision=$(record_producer_revision "$claim") || die "claimed preflight producer revision is malformed"
+    handoff_revision=$(record_producer_revision "$HANDOFF") || die "private bridge handoff producer revision is malformed"
+    die "competing private bridge handoffs: claimed revision $claim_revision and pending revision $handoff_revision"
   else
     valid_private_file "$claim" || die "invalid private bridge handoff claim"
     if ! ln "$claim" "$HANDOFF"; then
