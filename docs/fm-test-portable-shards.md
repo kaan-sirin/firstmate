@@ -81,11 +81,11 @@ Treat the estimates as balance evidence and shard-count sanity only; the measure
 
 | Lane | Script count | Estimated duration |
 |---|---:|---:|
-| `portable-serial-1of4` | 24 | 455937 ms (~455.9 s) |
-| `portable-serial-2of4` | 27 | 455940 ms (~455.9 s) |
-| `portable-serial-3of4` | 25 | 455948 ms (~455.9 s) |
-| `portable-serial-4of4` | 27 | 455937 ms (~455.9 s) |
-| imbalance | | 11 ms |
+| `portable-serial-1of4` | 25 | 460930 ms (~460.9 s) |
+| `portable-serial-2of4` | 26 | 460946 ms (~460.9 s) |
+| `portable-serial-3of4` | 24 | 460940 ms (~460.9 s) |
+| `portable-serial-4of4` | 29 | 460946 ms (~460.9 s) |
+| imbalance | | 16 ms |
 
 The single longest script, `tests/fm-pr-check-security.test.sh` at 199573 ms, is the floor for any shard count.
 

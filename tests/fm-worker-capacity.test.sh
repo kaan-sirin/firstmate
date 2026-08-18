@@ -173,7 +173,10 @@ case "${1:-}" in
   send-keys)
     case "$*" in
       *'fm-first'*)
-        [ "$#" -ne 4 ] || [ "${4:-}" != Enter ] || : > "$FM_ENTER_SENT"
+        if [ "$#" -eq 4 ] && [ "${4:-}" = Enter ]; then
+          : > "$FM_ENTER_SENT"
+          [ "${FM_TERMINATE_AFTER_ENTER:-0}" != 1 ] || kill -TERM "$PPID"
+        fi
         ;;
     esac
     ;;
@@ -234,6 +237,41 @@ test_post_enter_launch_keeps_capacity_reserved() {
   pass "post-Enter launch keeps its worker capacity reservation"
 }
 
+test_interrupted_submit_keeps_capacity_reserved() {
+  local dir="$TMP_ROOT/interrupted" home project worktree fakebin first_pid out status i
+  dir="$TMP_ROOT/interrupted"
+  home="$dir/home"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  mkdir -p "$home/state" "$home/config" "$home/data/first" "$home/data/second" "$home/projects"
+  printf '1\n' > "$home/config/max-active-workers"
+  printf 'first brief\n' > "$home/data/first/brief.md"
+  printf 'second brief\n' > "$home/data/second/brief.md"
+  git init -q -b main "$project"
+  git -C "$project" -c user.name=tests -c user.email=tests@example.invalid commit -q --allow-empty -m init
+  git clone -q --bare "$project" "$dir/origin.git"
+  git -C "$project" remote add origin "file://$dir/origin.git"
+  git -C "$project" worktree add -q --detach "$worktree"
+  fakebin=$(make_pending_launch_fakebin "$dir")
+
+  FM_ENTER_SENT="$dir/enter-sent" FM_AGENT_READY="$dir/agent-ready" FM_TERMINATE_AFTER_ENTER=1 \
+    run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" first > "$dir/first.out" 2>&1 &
+  first_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$dir/enter-sent" ] && break
+    sleep 0.05
+  done
+  [ -e "$dir/enter-sent" ] || fail "first spawn did not submit before interruption"
+  wait "$first_pid" || true
+
+  out=$(FM_ENTER_SENT="$dir/enter-sent" FM_AGENT_READY="$dir/agent-ready" \
+    run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" second 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "second spawn started after submit interruption"
+  assert_absent "$home/state/second.meta" "submit interruption admitted a second worker"
+  pass "interrupted submit keeps its worker capacity reservation"
+}
+
 test_absent_limit_is_unlimited
 test_valid_limit_and_malformed_values
 test_unsafe_config_directory_refuses_limit_lookup
@@ -241,3 +279,4 @@ test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
 test_post_enter_launch_keeps_capacity_reserved
+test_interrupted_submit_keeps_capacity_reserved
