@@ -130,6 +130,49 @@ test_direct_preflight_publisher_and_approval() {
   pass "direct publisher creates typed records and requires fresh approval"
 }
 
+test_direct_complete_plan_publisher_bypasses_duplicate_approval() {
+  local home="$TMP_ROOT/direct-complete-plan" contract="$TMP_ROOT/direct-complete-plan-contract.json" fp out status record
+  mkdir -p "$home"
+  make_contract "$contract" true
+  out=$(preflight_env "$home" 100 publish-direct direct-complete-plan-a1 --contract-file "$contract") || fail "approved direct plan should publish"
+  fp=${out#fingerprint=}
+  record="$home/data/direct-complete-plan-a1/ship-preflight.json"
+  jq -e '.origin == "direct" and .state == "approved" and .producer_revision == 1 and .approval.authority == "direct-captain" and .approval.evidence == "direct-captain" and .approval.complete_plan_bypass == true' "$record" >/dev/null \
+    || fail "approved direct plan did not preserve its trusted bypass"
+  preflight_env "$home" 101 verify direct-complete-plan-a1 --fingerprint "$fp" >/dev/null \
+    || fail "approved direct plan should authorize dispatch without another approval"
+  out=$(preflight_env "$home" 102 approve-direct direct-complete-plan-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "approved complete plan accepted duplicate approval"
+  assert_contains "$out" "not awaiting approval" "complete plan duplicate approval refusal was unclear"
+  pass "approved direct plans bypass only duplicate preflight approval"
+}
+
+test_preflight_rejects_oversized_inputs_before_publication() {
+  local home="$TMP_ROOT/preflight-size" contract="$TMP_ROOT/preflight-size-contract.json" handoff out status
+  mkdir -p "$home/data" "$home/state"
+  make_contract "$contract"
+  printf '%064d\n' 0 >> "$contract"
+  out=$(FM_SHIP_PREFLIGHT_MAX_BYTES=64 preflight_env "$home" 100 publish-direct direct-size-a1 --contract-file "$contract" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized direct contract published a preflight"
+  assert_contains "$out" "preflight input exceeds the bounded size" "oversized direct contract refusal was unclear"
+  assert_absent "$home/data/direct-size-a1/ship-preflight.json" "oversized direct contract wrote a record"
+
+  handoff="$home/state/agent-bridge/ship-preflight/bridge-size-a1.json"
+  mkdir -p "${handoff%/*}"
+  chmod 700 "$home/state/agent-bridge" "${handoff%/*}"
+  printf '%065d\n' 0 > "$handoff"
+  chmod 600 "$handoff"
+  out=$(FM_SHIP_PREFLIGHT_MAX_BYTES=64 bridge_env "$home" publish bridge-size-a1 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized bridge handoff published a preflight"
+  assert_contains "$out" "preflight input exceeds the bounded size" "oversized bridge handoff refusal was unclear"
+  [ -f "$handoff" ] || fail "oversized bridge handoff was consumed"
+  assert_absent "$home/data/bridge-size-a1/ship-preflight.json" "oversized bridge handoff wrote a record"
+  pass "preflight bounds direct and bridge inputs before publication"
+}
+
 test_direct_preflight_serializes_corrections() {
   local home="$TMP_ROOT/direct-publisher-lock" contract="$TMP_ROOT/direct-publisher-lock-contract.json" corrected="$TMP_ROOT/direct-publisher-lock-corrected.json" fp holder_pid publisher_pid attempts status out
   mkdir -p "$home"
@@ -401,7 +444,7 @@ test_bridge_preserves_handoff_when_record_directories_are_unsafe() {
 }
 
 test_bridge_claims_a_handoff_before_reading_it() {
-  local home="$TMP_ROOT/bridge-claim" id=claim-a1 original="$TMP_ROOT/bridge-claim-original.json" corrected="$TMP_ROOT/bridge-claim-corrected.json" handoff producer fakebin real_cat
+  local home="$TMP_ROOT/bridge-claim" id=claim-a1 original="$TMP_ROOT/bridge-claim-original.json" corrected="$TMP_ROOT/bridge-claim-corrected.json" handoff producer fakebin real_dd
   mkdir -p "$home/data" "$home/state"
   make_contract "$original"
   printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
@@ -414,17 +457,19 @@ test_bridge_claims_a_handoff_before_reading_it() {
 
   fakebin="$TMP_ROOT/bridge-claim-bin"
   mkdir -p "$fakebin"
-  real_cat=$(command -v cat)
-  cat > "$fakebin/cat" <<'SH'
+  real_dd=$(command -v dd)
+  cat > "$fakebin/dd" <<'SH'
 #!/usr/bin/env bash
 set -eu
-case "$1" in
-  "$FM_BRIDGE_RACE_DIR"/*) mv -f -- "$FM_BRIDGE_RACE_REPLACEMENT" "$FM_BRIDGE_RACE_HANDOFF" ;;
-esac
-exec "$FM_BRIDGE_REAL_CAT" "$@"
+for arg in "$@"; do
+  case "$arg" in
+    if="$FM_BRIDGE_RACE_DIR"/*) mv -f -- "$FM_BRIDGE_RACE_REPLACEMENT" "$FM_BRIDGE_RACE_HANDOFF" ;;
+  esac
+done
+exec "$FM_BRIDGE_REAL_DD" "$@"
 SH
-  chmod +x "$fakebin/cat"
-  PATH="$fakebin:$PATH" FM_BRIDGE_RACE_DIR="${handoff%/*}" FM_BRIDGE_RACE_REPLACEMENT="$producer" FM_BRIDGE_RACE_HANDOFF="$handoff" FM_BRIDGE_REAL_CAT="$real_cat" \
+  chmod +x "$fakebin/dd"
+  PATH="$fakebin:$PATH" FM_BRIDGE_RACE_DIR="${handoff%/*}" FM_BRIDGE_RACE_REPLACEMENT="$producer" FM_BRIDGE_RACE_HANDOFF="$handoff" FM_BRIDGE_REAL_DD="$real_dd" \
     bridge_env "$home" publish "$id" >/dev/null || fail "bridge did not publish its claimed handoff"
   jq -e '.state == "approved" and .contract.outcome == "A tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
     || fail "bridge did not publish the handoff it claimed"
@@ -508,7 +553,7 @@ SH
 }
 
 test_bridge_preserves_claimed_correction_on_cleanup_conflict() {
-  local home="$TMP_ROOT/bridge-cleanup-conflict" id=cleanup-conflict-a1 original="$TMP_ROOT/bridge-cleanup-conflict-original.json" corrected="$TMP_ROOT/bridge-cleanup-conflict-corrected.json" handoff claim fakebin real_cat ready release target_pid publisher attempts out status
+  local home="$TMP_ROOT/bridge-cleanup-conflict" id=cleanup-conflict-a1 original="$TMP_ROOT/bridge-cleanup-conflict-original.json" corrected="$TMP_ROOT/bridge-cleanup-conflict-corrected.json" handoff claim fakebin real_dd ready release target_pid publisher attempts out status
   mkdir -p "$home/data" "$home/state"
   make_contract "$original"
   printf '%s\n' '{"recommendation":"Build it","outcome":"Corrected tested PR","scope":"One change","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[]}' > "$corrected"
@@ -517,21 +562,23 @@ test_bridge_preserves_claimed_correction_on_cleanup_conflict() {
   claim="${handoff%/*}/.${id}.claim."
   fakebin="$TMP_ROOT/bridge-cleanup-conflict-bin"
   mkdir -p "$fakebin"
-  real_cat=$(command -v cat)
-  cat > "$fakebin/cat" <<'SH'
+  real_dd=$(command -v dd)
+  cat > "$fakebin/dd" <<'SH'
 #!/usr/bin/env bash
 set -eu
-if [[ "$1" == "$FM_BRIDGE_INTERRUPT_CLAIM"* ]]; then
-  printf '%s\n' "$PPID" > "$FM_BRIDGE_INTERRUPT_PID"
-  : > "$FM_BRIDGE_INTERRUPT_READY"
-  while [ ! -e "$FM_BRIDGE_INTERRUPT_RELEASE" ]; do sleep 0.01; done
-fi
-exec "$FM_BRIDGE_REAL_CAT" "$@"
+for arg in "$@"; do
+  if [[ "$arg" == if="$FM_BRIDGE_INTERRUPT_CLAIM"* ]]; then
+    printf '%s\n' "$PPID" > "$FM_BRIDGE_INTERRUPT_PID"
+    : > "$FM_BRIDGE_INTERRUPT_READY"
+    while [ ! -e "$FM_BRIDGE_INTERRUPT_RELEASE" ]; do sleep 0.01; done
+  fi
+done
+exec "$FM_BRIDGE_REAL_DD" "$@"
 SH
-  chmod +x "$fakebin/cat"
+  chmod +x "$fakebin/dd"
   ready="$home/cleanup-ready"
   release="$home/cleanup-release"
-  PATH="$fakebin:$PATH" FM_BRIDGE_INTERRUPT_CLAIM="$claim" FM_BRIDGE_REAL_CAT="$real_cat" FM_BRIDGE_INTERRUPT_PID="$home/cleanup-pid" FM_BRIDGE_INTERRUPT_READY="$ready" FM_BRIDGE_INTERRUPT_RELEASE="$release" \
+  PATH="$fakebin:$PATH" FM_BRIDGE_INTERRUPT_CLAIM="$claim" FM_BRIDGE_REAL_DD="$real_dd" FM_BRIDGE_INTERRUPT_PID="$home/cleanup-pid" FM_BRIDGE_INTERRUPT_READY="$ready" FM_BRIDGE_INTERRUPT_RELEASE="$release" \
     bridge_env "$home" publish "$id" > "$home/cleanup-publish.out" 2>&1 &
   publisher=$!
   attempts=0
@@ -1942,6 +1989,8 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 
 test_direct_and_bridge_owned_preflight_authority
 test_direct_preflight_publisher_and_approval
+test_direct_complete_plan_publisher_bypasses_duplicate_approval
+test_preflight_rejects_oversized_inputs_before_publication
 test_direct_preflight_serializes_corrections
 test_preflight_requires_typed_authority_evidence
 test_preflight_requires_a_bounded_producer_revision

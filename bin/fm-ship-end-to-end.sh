@@ -20,6 +20,7 @@ FM_HOME="${FM_HOME:-${FM_ROOT_OVERRIDE:-$FM_ROOT}}"
 DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 NOW=${FM_SHIP_PREFLIGHT_NOW:-$(date +%s)}
 MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
+MAX_BYTES=${FM_SHIP_PREFLIGHT_MAX_BYTES:-65536}
 
 usage() { sed -n '2,8p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
@@ -27,6 +28,13 @@ sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" |
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }
 links_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %l "$1"; else stat -c %h "$1"; fi; }
 owner_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %u "$1"; else stat -c %u "$1"; fi; }
+bytes_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %z "$1"; else stat -c %s "$1"; fi; }
+within_preflight_limit() {
+  local bytes
+  bytes=$(bytes_of "$1" 2>/dev/null) || return 1
+  case "$bytes" in ''|*[!0-9]*) return 1;; esac
+  [ "$bytes" -le "$MAX_BYTES" ]
+}
 valid_private() { [ -f "$1" ] && [ ! -L "$1" ] && [ "$(mode_of "$1" 2>/dev/null || true)" = 600 ] && [ "$(links_of "$1" 2>/dev/null || true)" = 1 ]; }
 valid_data_dir() {
   local path=$1 mode owner group other
@@ -54,6 +62,8 @@ ID=${1:-}; shift || true
 valid_id "$ID" || die "unsafe task id"
 case "$NOW" in ''|*[!0-9]*) die "FM_SHIP_PREFLIGHT_NOW must be an epoch";; esac
 case "$MAX_AGE" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_AGE must be a positive integer";; esac
+case "$MAX_BYTES" in ''|*[!0-9]*|0) die "FM_SHIP_PREFLIGHT_MAX_BYTES must be a positive integer";; esac
+[ "$MAX_BYTES" -le 1048576 ] || die "FM_SHIP_PREFLIGHT_MAX_BYTES exceeds the safe limit"
 
 FINGERPRINT=''
 CONTRACT_FILE=''
@@ -181,6 +191,7 @@ read_record() {
     die "no valid private preflight record"
   fi
   valid_private "$RECORD" || die "no valid private preflight record"
+  within_preflight_limit "$RECORD" || die "preflight record exceeds the bounded size"
   jq -e --arg id "$ID" '
     .schema_version == 1 and
     .workflow == "ship-end-to-end" and
@@ -222,12 +233,17 @@ case "$COMMAND" in
   publish-direct)
     [ -n "$CONTRACT_FILE" ] || die "--contract-file is required"
     [ -f "$CONTRACT_FILE" ] && [ ! -L "$CONTRACT_FILE" ] || die "contract file is unsafe"
+    within_preflight_limit "$CONTRACT_FILE" || die "preflight input exceeds the bounded size"
     prepare_record_dir
     acquire_direct_lock
     CONTRACT=$(jq -cS . "$CONTRACT_FILE") || die "malformed preflight contract"
     printf '%s\n' "$CONTRACT" | contract_valid || die "malformed preflight contract"
     REVISION=$(next_producer_revision)
-    publish_direct_record "$CONTRACT" awaiting_approval "$REVISION"
+    if printf '%s\n' "$CONTRACT" | jq -e '.complete_plan_approved == true' >/dev/null; then
+      publish_direct_record "$CONTRACT" approved "$REVISION"
+    else
+      publish_direct_record "$CONTRACT" awaiting_approval "$REVISION"
+    fi
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;
   approve-direct)
