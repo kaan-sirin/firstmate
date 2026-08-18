@@ -8,12 +8,11 @@
 # It excludes only endpoints proven dead or missing. This protects a small host
 # from an otherwise independent batch of agent launches exhausting memory.
 #
-# An absent file keeps the historical unlimited behaviour. A malformed or
-# unsafe file is an error, never an implicit unlimited value. The config is
+# A malformed or unsafe file is an error, never an implicit unlimited value. The config is
 # inherited by secondmate homes through fm-config-inherit-lib.sh.
 #
 # Source after fm-backend.sh. Public functions:
-#   fm_worker_capacity_limit <config-dir>       -> positive integer or 0 absent
+#   fm_worker_capacity_limit <config-dir>       -> positive integer
 #   fm_worker_capacity_active <state-dir>       -> active count
 #   fm_worker_capacity_active_host <state-dir>  -> active local-host count
 #   fm_worker_capacity_pending_reserve <state-dir> <task-id>
@@ -45,7 +44,7 @@ fm_worker_capacity_limit() {  # <config-dir>
     [ -d "$config" ] && [ ! -L "$config" ] || return 1
   fi
   file="$config/max-active-workers"
-  [ -e "$file" ] || [ -L "$file" ] || { printf '0'; return 0; }
+  [ -e "$file" ] || [ -L "$file" ] || { printf '1'; return 0; }
   fm_worker_capacity_file_valid "$file" || return 1
   value=$(<"$file")
   printf '%s' "$value"
