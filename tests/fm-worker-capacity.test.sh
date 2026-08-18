@@ -148,7 +148,7 @@ test_remote_routes_share_host_capacity_index() {
   dir="$TMP_ROOT/remote-host-index"
   host_state="$dir/root/.firstmate-worker-capacity"
   first="$dir/homes/first"
-  second="$dir/homes/second"
+  second="$dir/other-homes/second"
   first_route="$first/state/parent-route"
   second_route="$second/state/parent-route"
   mkdir -p "$first_route" "$second_route" "$dir/root"
@@ -240,13 +240,14 @@ EOF
 }
 
 test_remote_secondmate_uses_parent_route_capacity() {
-  local dir="$TMP_ROOT/remote-host-capacity" root home route fakebin out status
+  local dir="$TMP_ROOT/remote-host-capacity" root job_state home route fakebin out status
   dir="$TMP_ROOT/remote-host-capacity"
   root="$dir/root"
+  job_state="$dir/remote-job"
   home="$dir/home"
   route="$home/state/parent-route"
   fakebin="$dir/fakebin"
-  mkdir -p "$root" "$route" "$home/config" "$fakebin"
+  mkdir -p "$root" "$job_state" "$route" "$home/config" "$fakebin"
   printf 'remote-secondmate\n' > "$home/.fm-secondmate-home"
   printf '%s\n' \
     'schema=fm-secondmate-parent.v1' \
@@ -266,7 +267,7 @@ EOF
     '  *) : ;;' \
     'esac' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_SPAWN_NO_GUARD=1 \
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$home" FM_ROOT_OVERRIDE="$root" FM_REMOTE_JOB_STATE_ROOT="$job_state" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "remote secondmate started despite a full parent-route limit"
