@@ -676,7 +676,7 @@ CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
 worker_capacity_host_state() {
-  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker parent_home parent_state
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker parent_home parent_state route_state
   local id meta meta_home child_home
   if [ -z "$host_state" ]; then
     marker="$FM_HOME/$SUB_HOME_MARKER"
@@ -689,8 +689,36 @@ worker_capacity_host_state() {
         echo "error: local secondmate has no valid parent binding; cannot resolve host worker capacity" >&2
         return 1
       }
+      id=$(<"$marker")
+      fm_task_id_creation_valid "$id" || {
+        echo "error: secondmate identity is invalid; cannot resolve host worker capacity" >&2
+        return 1
+      }
       case "$FM_SECONDMATE_PARENT_ROUTE" in
-        remote) host_state=$STATE ;;
+        remote)
+          route_state="$STATE/parent-route"
+          [ -d "$route_state" ] && [ ! -L "$route_state" ] || {
+            echo "error: remote secondmate parent route is unsafe or unavailable; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          meta="$route_state/$id.meta"
+          [ -f "$meta" ] && [ ! -L "$meta" ] \
+            && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+              echo "error: remote secondmate parent record is unavailable; cannot resolve host worker capacity" >&2
+              return 1
+            }
+          meta_home=$(fm_meta_get "$meta" home)
+          child_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+          meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || {
+            echo "error: remote secondmate parent home binding is invalid; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          [ "$meta_home" = "$child_home" ] || {
+            echo "error: remote secondmate parent home binding does not match this home; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          host_state=$route_state
+          ;;
         local)
           parent_home=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
             echo "error: local secondmate parent home is unavailable; cannot resolve host worker capacity" >&2
@@ -699,11 +727,6 @@ worker_capacity_host_state() {
           parent_state="$parent_home/state"
           [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || {
             echo "error: local secondmate parent state is unsafe or unavailable; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          id=$(<"$marker")
-          fm_task_id_creation_valid "$id" || {
-            echo "error: local secondmate identity is invalid; cannot resolve host worker capacity" >&2
             return 1
           }
           meta="$parent_state/$id.meta"
