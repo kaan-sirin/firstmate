@@ -131,7 +131,7 @@ test_direct_preflight_publisher_and_approval() {
 }
 
 test_direct_complete_plan_publisher_bypasses_duplicate_approval() {
-  local home="$TMP_ROOT/direct-complete-plan" contract="$TMP_ROOT/direct-complete-plan-contract.json" fp out status record
+  local home="$TMP_ROOT/direct-complete-plan" contract="$TMP_ROOT/direct-complete-plan-contract.json" questions="$TMP_ROOT/direct-complete-plan-questions.json" fp question_fp out status record
   mkdir -p "$home"
   make_contract "$contract" true
   out=$(preflight_env "$home" 100 publish-direct direct-complete-plan-a1 --contract-file "$contract") || fail "approved direct plan should publish"
@@ -145,7 +145,42 @@ test_direct_complete_plan_publisher_bypasses_duplicate_approval() {
   status=$?
   [ "$status" -ne 0 ] || fail "approved complete plan accepted duplicate approval"
   assert_contains "$out" "not awaiting approval" "complete plan duplicate approval refusal was unclear"
+
+  jq '.questions = ["Choose a deployment window"]' "$contract" > "$questions" || fail "could not create complete plan with open questions"
+  out=$(preflight_env "$home" 103 publish-direct direct-complete-plan-a1 --contract-file "$questions") || fail "complete plan with open questions should publish for approval"
+  question_fp=${out#fingerprint=}
+  jq -e '.state == "awaiting_approval" and .approval == null' "$record" >/dev/null \
+    || fail "complete plan with open questions bypassed approval"
+  preflight_env "$home" 104 approve-direct direct-complete-plan-a1 --fingerprint "$question_fp" >/dev/null \
+    || fail "captain approval should resolve open complete-plan questions"
+  jq -e '.state == "approved" and .approval.complete_plan_bypass == false' "$record" >/dev/null \
+    || fail "explicit approval of open questions retained the bypass"
+  preflight_env "$home" 105 verify direct-complete-plan-a1 --fingerprint "$question_fp" >/dev/null \
+    || fail "explicitly approved complete plan with questions should authorize dispatch"
   pass "approved direct plans bypass only duplicate preflight approval"
+}
+
+test_direct_record_size_refusal_preserves_prior_record() {
+  local home="$TMP_ROOT/direct-record-size" contract="$TMP_ROOT/direct-record-size-contract.json" oversized="$TMP_ROOT/direct-record-size-oversized.json" padding fp out status record
+  mkdir -p "$home"
+  make_contract "$contract"
+  out=$(FM_SHIP_PREFLIGHT_MAX_BYTES=800 preflight_env "$home" 100 publish-direct direct-record-size-a1 --contract-file "$contract") || fail "could not publish initial bounded record"
+  fp=${out#fingerprint=}
+  record="$home/data/direct-record-size-a1/ship-preflight.json"
+  FM_SHIP_PREFLIGHT_MAX_BYTES=800 preflight_env "$home" 100 approve-direct direct-record-size-a1 --fingerprint "$fp" >/dev/null \
+    || fail "could not approve initial bounded record"
+  padding=$(printf '%*s' 450 '' | tr ' ' x)
+  jq --arg padding "$padding" '.scope = $padding' "$contract" > "$oversized" || fail "could not create near-limit contract"
+  [ "$(wc -c < "$oversized")" -le 800 ] || fail "near-limit contract was not within the input bound"
+  out=$(FM_SHIP_PREFLIGHT_MAX_BYTES=800 preflight_env "$home" 101 publish-direct direct-record-size-a1 --contract-file "$oversized" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "oversized serialized record replaced a valid record"
+  assert_contains "$out" "direct preflight record exceeds the bounded size" "oversized serialized record refusal was unclear"
+  FM_SHIP_PREFLIGHT_MAX_BYTES=800 preflight_env "$home" 102 verify direct-record-size-a1 --fingerprint "$fp" >/dev/null \
+    || fail "oversized record rejection invalidated the prior approval"
+  jq -e '.producer_revision == 2 and .fingerprint == $fp' --arg fp "$fp" "$record" >/dev/null \
+    || fail "oversized record rejection replaced the prior record"
+  pass "direct records reject oversized envelopes before replacement"
 }
 
 test_preflight_rejects_oversized_inputs_before_publication() {
@@ -1990,6 +2025,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 test_direct_and_bridge_owned_preflight_authority
 test_direct_preflight_publisher_and_approval
 test_direct_complete_plan_publisher_bypasses_duplicate_approval
+test_direct_record_size_refusal_preserves_prior_record
 test_preflight_rejects_oversized_inputs_before_publication
 test_direct_preflight_serializes_corrections
 test_preflight_requires_typed_authority_evidence

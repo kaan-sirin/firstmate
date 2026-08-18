@@ -160,13 +160,14 @@ next_producer_revision() {
   fi
 }
 publish_direct_record() {
-  local contract=$1 state=$2 revision=$3 approval tmp record
+  local contract=$1 state=$2 revision=$3 bypass=$4 approval tmp record
   case "$revision" in ''|*[!0-9]*) die "preflight producer revision is malformed";; esac
   [ "$revision" -le 9007199254740991 ] || die "preflight producer revision is malformed"
+  case "$bypass" in true|false) ;; *) die "direct approval bypass state is malformed";; esac
   preflight_fingerprint "$contract" >/dev/null || die "could not fingerprint direct preflight"
   FINGERPRINT=$(preflight_fingerprint "$contract")
   if [ "$state" = approved ]; then
-    approval=$(jq -cn --argjson now "$NOW" --argjson bypass "$(printf '%s' "$contract" | jq '.complete_plan_approved == true')" '{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:$bypass}') || die "could not create direct approval"
+    approval=$(jq -cn --argjson now "$NOW" --argjson bypass "$bypass" '{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:$bypass}') || die "could not create direct approval"
     record=$(jq -cn --arg id "$ID" --arg fp "$FINGERPRINT" --argjson contract "$contract" --argjson revision "$revision" --argjson approval "$approval" '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:$revision,approval:$approval}') || die "could not create direct preflight"
   else
     record=$(jq -cn --arg id "$ID" --arg fp "$FINGERPRINT" --argjson contract "$contract" --argjson revision "$revision" --argjson now "$NOW" '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"awaiting_approval",contract:$contract,producer_revision:$revision,created_at:$now}') || die "could not create direct preflight"
@@ -175,6 +176,10 @@ publish_direct_record() {
   if ! printf '%s\n' "$record" > "$tmp" || ! chmod 600 "$tmp" || ! valid_private "$tmp"; then
     rm -f -- "$tmp"
     die "could not prepare direct preflight"
+  fi
+  if ! within_preflight_limit "$tmp"; then
+    rm -f -- "$tmp"
+    die "direct preflight record exceeds the bounded size"
   fi
   mv -f -- "$tmp" "$RECORD" || die "could not publish direct preflight"
   read_record
@@ -219,7 +224,7 @@ verify_record() {
   ' "$RECORD" >/dev/null || die "preflight lacks typed approval authority evidence"
   bypass=$(jq -r 'if (.approval | has("complete_plan_bypass")) then .approval.complete_plan_bypass else "" end' "$RECORD")
   case "$bypass" in
-    true) jq -e '.contract.complete_plan_approved == true' "$RECORD" >/dev/null || die "approved-complete-plan record lacks its approved plan marker" ;;
+    true) jq -e '.contract.complete_plan_approved == true and (.contract.questions | length == 0)' "$RECORD" >/dev/null || die "approved-complete-plan record has unresolved questions" ;;
     false) ;;
     *) die "approval bypass state is malformed" ;;
   esac
@@ -239,10 +244,10 @@ case "$COMMAND" in
     CONTRACT=$(jq -cS . "$CONTRACT_FILE") || die "malformed preflight contract"
     printf '%s\n' "$CONTRACT" | contract_valid || die "malformed preflight contract"
     REVISION=$(next_producer_revision)
-    if printf '%s\n' "$CONTRACT" | jq -e '.complete_plan_approved == true' >/dev/null; then
-      publish_direct_record "$CONTRACT" approved "$REVISION"
+    if printf '%s\n' "$CONTRACT" | jq -e '.complete_plan_approved == true and (.questions | length == 0)' >/dev/null; then
+      publish_direct_record "$CONTRACT" approved "$REVISION" true
     else
-      publish_direct_record "$CONTRACT" awaiting_approval "$REVISION"
+      publish_direct_record "$CONTRACT" awaiting_approval "$REVISION" false
     fi
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;
@@ -256,7 +261,7 @@ case "$COMMAND" in
     [ "$(jq -r '.fingerprint' "$RECORD")" = "$FINGERPRINT" ] || die "preflight fingerprint does not match the awaiting contract"
     CONTRACT=$(jq -cS '.contract' "$RECORD") || die "malformed preflight contract"
     REVISION=$(next_producer_revision)
-    publish_direct_record "$CONTRACT" approved "$REVISION"
+    publish_direct_record "$CONTRACT" approved "$REVISION" false
     printf 'approved\n'
     ;;
   validate)

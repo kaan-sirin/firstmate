@@ -189,7 +189,7 @@ add_ship_task() {
   fi
   now=$(date +%s)
   jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract" --argjson now "$now" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:false}}' \
     > "$home/data/$id/ship-preflight.json" || fail "could not create approved preflight record"
   chmod 600 "$home/data/$id/ship-preflight.json"
   {

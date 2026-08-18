@@ -80,7 +80,7 @@ approve_preflight() {  # <home> <task-id>
   tmp=$(umask 077; mktemp "${handoff%/*}/.ship-preflight.XXXXXX") || return 1
   now=$(date +%s)
   jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract_json" --argjson now "$now" \
-    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"bridge-submission",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:false}}' > "$tmp" || { rm -f -- "$tmp"; return 1; }
   if ! chmod 600 "$tmp" || ! mv -f -- "$tmp" "$handoff"; then
     rm -f -- "$tmp"
     return 1
