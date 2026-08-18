@@ -178,8 +178,14 @@ test_correction_bypass_and_stale_refusal() {
   status=$?
   [ "$status" -ne 0 ] || fail "stale approval must refuse"
   assert_contains "$out" "stale" "stale refusal was unclear"
-  FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify-dispatched correction-a1 --fingerprint "$fp2" >/dev/null \
-    || fail "an approved dispatched task must resume after its approval ages"
+  out=$(FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify-dispatched correction-a1 --fingerprint "$fp2" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stale approval must stop dispatched work"
+  assert_contains "$out" "stale" "dispatched stale refusal was unclear"
+  out=$(FM_SHIP_PREFLIGHT_MAX_AGE=5 preflight_env "$home" 108 verify-recovery correction-a1 --fingerprint "$fp2" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "a stale approval must stop recovery work"
+  assert_contains "$out" "stale" "recovery stale refusal was unclear"
   out=$(preflight_env "$home" 108 verify-recovery correction-a1 --fingerprint "$fp" 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "recovery must refuse a replaced approved contract"

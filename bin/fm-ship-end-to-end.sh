@@ -162,7 +162,7 @@ case "$COMMAND" in
   verify-dispatched)
     valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
     read_record
-    verify_record "$FINGERPRINT" 0
+    verify_record "$FINGERPRINT"
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;
   verify-recovery)
@@ -171,7 +171,7 @@ case "$COMMAND" in
     if [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ]; then
       exit 4
     fi
-    verify_record "$FINGERPRINT" 0
+    verify_record "$FINGERPRINT"
     printf 'fingerprint=%s\n' "$FINGERPRINT"
     ;;
 esac
