@@ -76,6 +76,8 @@ done
 
 REC_DIR="$DATA/$ID"
 RECORD="$REC_DIR/ship-preflight.json"
+DIRECT_LOCK=
+DIRECT_LOCK_HELD=0
 
 contract_valid() {
   jq -e '
@@ -108,6 +110,36 @@ prepare_record_dir() {
     (umask 077; mkdir "$REC_DIR") || die "could not create task record directory"
     valid_private_dir "$REC_DIR" || die "unsafe task record directory"
   fi
+}
+require_record_dir() {
+  if ! { [ -e "$DATA" ] || [ -L "$DATA" ]; }; then
+    die "no valid private preflight record"
+  fi
+  valid_data_dir "$DATA" || die "unsafe task record directory"
+  if [ -e "$REC_DIR" ] || [ -L "$REC_DIR" ]; then
+    valid_private_dir "$REC_DIR" || die "unsafe task record directory"
+  else
+    die "no valid private preflight record"
+  fi
+}
+release_direct_lock() {
+  local status=$?
+  trap - EXIT
+  if [ "$DIRECT_LOCK_HELD" = 1 ]; then
+    DIRECT_LOCK_HELD=0
+    fm_lock_release "$DIRECT_LOCK" || true
+  fi
+  exit "$status"
+}
+acquire_direct_lock() {
+  STATE="$REC_DIR" FM_STATE_OVERRIDE="$REC_DIR" . "$SCRIPT_DIR/fm-wake-lib.sh"
+  DIRECT_LOCK="$REC_DIR/.ship-preflight.lock"
+  fm_lock_acquire_wait "$DIRECT_LOCK" || die "could not lock preflight record"
+  DIRECT_LOCK_HELD=1
+  trap release_direct_lock EXIT
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
 }
 next_producer_revision() {
   if [ -e "$RECORD" ] || [ -L "$RECORD" ]; then
@@ -191,6 +223,7 @@ case "$COMMAND" in
     [ -n "$CONTRACT_FILE" ] || die "--contract-file is required"
     [ -f "$CONTRACT_FILE" ] && [ ! -L "$CONTRACT_FILE" ] || die "contract file is unsafe"
     prepare_record_dir
+    acquire_direct_lock
     CONTRACT=$(jq -cS . "$CONTRACT_FILE") || die "malformed preflight contract"
     printf '%s\n' "$CONTRACT" | contract_valid || die "malformed preflight contract"
     REVISION=$(next_producer_revision)
@@ -199,6 +232,8 @@ case "$COMMAND" in
     ;;
   approve-direct)
     valid_fingerprint "$FINGERPRINT" || die "--fingerprint must be a SHA-256 fingerprint"
+    require_record_dir
+    acquire_direct_lock
     read_record
     [ "$(jq -r '.origin' "$RECORD")" = direct ] || die "direct approval requires a direct preflight"
     [ "$(jq -r '.state' "$RECORD")" = awaiting_approval ] || die "direct preflight is not awaiting approval"

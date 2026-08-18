@@ -130,6 +130,63 @@ test_direct_preflight_publisher_and_approval() {
   pass "direct publisher creates typed records and requires fresh approval"
 }
 
+test_direct_preflight_serializes_corrections() {
+  local home="$TMP_ROOT/direct-publisher-lock" contract="$TMP_ROOT/direct-publisher-lock-contract.json" corrected="$TMP_ROOT/direct-publisher-lock-corrected.json" fp holder_pid publisher_pid attempts status out
+  mkdir -p "$home"
+  make_contract "$contract"
+  jq '.scope = "Corrected locked change"' "$contract" > "$corrected" || fail "could not create locked corrected contract"
+  out=$(preflight_env "$home" 100 publish-direct direct-lock-a1 --contract-file "$contract") || fail "could not create lock test preflight"
+  fp=${out#fingerprint=}
+  preflight_env "$home" 101 approve-direct direct-lock-a1 --fingerprint "$fp" >/dev/null || fail "could not approve lock test preflight"
+  (
+    STATE="$home/data/direct-lock-a1"
+    FM_STATE_OVERRIDE="$STATE" . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$STATE/.ship-preflight.lock"
+    : > "$home/holder-ready"
+    while [ ! -e "$home/holder-release" ]; do sleep 0.01; done
+    fm_lock_release "$STATE/.ship-preflight.lock"
+  ) &
+  holder_pid=$!
+  attempts=0
+  while [ ! -e "$home/holder-ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/holder-ready" ]; then
+    wait "$holder_pid" || true
+    fail "direct preflight lock holder did not start"
+  fi
+  (
+    if preflight_env "$home" 102 publish-direct direct-lock-a1 --contract-file "$corrected" > "$home/publish.out" 2>&1; then
+      printf '%s\n' 0 > "$home/publish.status"
+    else
+      printf '%s\n' 1 > "$home/publish.status"
+    fi
+  ) &
+  publisher_pid=$!
+  attempts=0
+  while [ ! -e "$home/publish.status" ] && [ "$attempts" -lt 20 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ -e "$home/publish.status" ]; then
+    : > "$home/holder-release"
+    wait "$holder_pid" || true
+    wait "$publisher_pid" || true
+    fail "direct correction published while the shared preflight lock was held"
+  fi
+  : > "$home/holder-release"
+  wait "$holder_pid" || fail "could not release direct preflight lock"
+  wait "$publisher_pid"
+  status=$?
+  [ "$status" -eq 0 ] && [ "$(cat "$home/publish.status")" = 0 ] || fail "direct correction did not publish after the lock released"
+  out=$(preflight_env "$home" 103 verify direct-lock-a1 --fingerprint "$fp" 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "corrected direct contract retained the prior approval"
+  assert_contains "$out" "approval is missing" "corrected direct contract did not require approval"
+  pass "direct corrections wait for the shared preflight lock"
+}
+
 test_preflight_requires_typed_authority_evidence() {
   local home="$TMP_ROOT/preflight-authority" contract="$TMP_ROOT/preflight-authority-contract.json" fp out status record tmp
   mkdir -p "$home/data" "$home/state"
@@ -1864,6 +1921,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
 
 test_direct_and_bridge_owned_preflight_authority
 test_direct_preflight_publisher_and_approval
+test_direct_preflight_serializes_corrections
 test_preflight_requires_typed_authority_evidence
 test_preflight_requires_a_bounded_producer_revision
 test_grouped_questions_and_bounded_contract
