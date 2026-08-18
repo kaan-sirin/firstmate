@@ -198,6 +198,85 @@ run_pending_launch_spawn() {
     "$ROOT/bin/fm-spawn.sh" "$id" "$project" codex --mode no-mistakes --yolo off
 }
 
+run_capacity_relaunch() {
+  local home=$1 worktree=$2 fakebin=$3 id=$4
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$home/state" \
+    FM_FAKE_PANE_PATH="$worktree" TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" --relaunch
+}
+
+test_relaunch_respects_worker_capacity() {
+  local dir="$TMP_ROOT/relaunch" home project worktree fakebin out status
+  dir="$TMP_ROOT/relaunch"
+  home="$dir/home"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  mkdir -p "$home/state" "$home/config" "$home/data/old" "$home/projects"
+  printf '1\n' > "$home/config/max-active-workers"
+  printf 'old brief\n' > "$home/data/old/brief.md"
+  git init -q -b main "$project"
+  git -C "$project" -c user.name=tests -c user.email=tests@example.invalid commit -q --allow-empty -m init
+  git clone -q --bare "$project" "$dir/origin.git"
+  git -C "$project" remote add origin "file://$dir/origin.git"
+  git -C "$project" worktree add -q --detach "$worktree"
+  cat > "$home/state/old.meta" <<EOF
+window=firstmate:fm-old
+endpoint_task_id=old
+worktree=$worktree
+project=$project
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  cat > "$home/state/live.meta" <<EOF
+window=firstmate:fm-live
+endpoint_task_id=live
+worktree=$worktree
+project=$project
+harness=codex
+kind=ship
+mode=no-mistakes
+yolo=off
+EOF
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'EOF'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *'#{pane_current_command}'*)
+    case "$*" in *firstmate:fm-old*) printf 'bash\n' ;; *) printf 'codex\n' ;; esac
+    exit 0
+    ;;
+  *'#{pane_id}'*) printf '@fake\n'; exit 0 ;;
+  *'#S'*) printf 'firstmate\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  list-windows)
+    for meta in "$FM_FAKE_STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      printf 'fm-%s\n' "$(basename "$meta" .meta)"
+    done
+    ;;
+  new-window) printf '@fake\n' ;;
+esac
+EOF
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/treehouse"
+  chmod +x "$fakebin/treehouse"
+
+  out=$(run_capacity_relaunch "$home" "$worktree" "$fakebin" old 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "relaunch started despite a full worker limit"
+  assert_contains "$out" "worker capacity reached (1/1 active)" "relaunch refusal did not report the capacity state"
+  pass "fm-spawn applies worker capacity to relaunches"
+}
+
 test_post_enter_launch_keeps_capacity_reserved() {
   local dir="$TMP_ROOT/pending" home project worktree fakebin first_pid out status i
   dir="$TMP_ROOT/pending"
@@ -278,5 +357,6 @@ test_unsafe_config_directory_refuses_limit_lookup
 test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
+test_relaunch_respects_worker_capacity
 test_post_enter_launch_keeps_capacity_reserved
 test_interrupted_submit_keeps_capacity_reserved

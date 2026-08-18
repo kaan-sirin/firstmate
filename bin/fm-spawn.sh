@@ -95,9 +95,8 @@
 #   focus-sensitive presentation mutation.
 #   Every single-task invocation holds one task-id-scoped lock across backend
 #   creation through metadata publication, so concurrent same-id spawns serialize
-#   even when they select different backends. A fresh spawn first takes the
-#   per-home task-set lock and refuses rather than waits when forced teardown owns
-#   it; relaunch is exempt because the existing task's control lock covers it.
+#   even when they select different backends. A spawn first takes the per-home
+#   task-set lock and refuses rather than waits when forced teardown owns it.
 #   With no harness arg, a crewmate/scout spawn resolves the CREW harness only when
 #   config/crew-dispatch.json is absent. When that file exists, crewmate/scout
 #   spawns require an explicit harness so firstmate cannot silently skip dispatch
@@ -908,57 +907,50 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
-if [ "$RELAUNCH" -eq 0 ]; then
-  mkdir -p "$STATE" || {
-    echo "error: could not create parent state directory" >&2
+mkdir -p "$STATE" || {
+  echo "error: could not create parent state directory" >&2
+  exit 1
+}
+# A spawn that publishes task metadata must not interleave
+# with a forced teardown that has already enumerated that set: a record
+# published inside the enumerate-then-remove window is invisible to the
+# teardown's per-task preflight but visible to its cleanup, and gets mutated
+# while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
+# owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
+# through cleanup). Taken before this task's own locks, matching the
+# acquisition order documented there, and held through publication.
+#
+# Refusing rather than waiting is the fail-closed direction: the home may be
+# moments from removal, so there is nothing worth waiting for.
+SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
+  echo "error: could not resolve the task-set lock for $STATE" >&2
+  exit 1
+}
+if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
+  echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
+  exit 1
+fi
+SPAWN_TASK_SET_LOCK_HELD=1
+# This lock serializes spawns, so the active count and the later launch
+# submission form one admission decision.
+WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
+  echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
+  exit 1
+}
+if [ "$RELAUNCH" -eq 0 ] && [ "$WORKER_CAPACITY" -gt 0 ]; then
+  WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
+    echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
     exit 1
   }
-  # A FRESH spawn changes which tasks this home has, so it must not interleave
-  # with a forced teardown that has already enumerated that set: a record
-  # published inside the enumerate-then-remove window is invisible to the
-  # teardown's per-task preflight but visible to its cleanup, and gets mutated
-  # while never lifecycle-locked (bin/fm-wake-lib.sh's fm_task_set_lock_path
-  # owns the evidence; bin/fm-teardown.sh holds the same lock from enumeration
-  # through cleanup). Taken before this task's own locks, matching the
-  # acquisition order documented there, and held through publication.
-  #
-  # A relaunch is exempt: it republishes a task that already exists, so it is
-  # already covered by that task's control lock, which the teardown preflight
-  # tests.
-  #
-  # Refusing rather than waiting is the fail-closed direction: the home may be
-  # moments from removal, so there is nothing worth waiting for.
-  SPAWN_TASK_SET_LOCK=$(fm_task_set_lock_path "$STATE") || {
-    echo "error: could not resolve the task-set lock for $STATE" >&2
-    exit 1
-  }
-  if ! fm_lock_try_acquire "$SPAWN_TASK_SET_LOCK"; then
-    echo "error: this home's task set is locked by another operation (a forced teardown is enumerating or removing its tasks); refusing to create task $ID rather than racing it" >&2
+  if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+    echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
     exit 1
   fi
-  SPAWN_TASK_SET_LOCK_HELD=1
-  # This lock serializes fresh spawns, so the active count and the later launch
-  # submission form one admission decision. Relaunches do not enter here: they
-  # replace a known endpoint and must not consume a second worker slot.
-  WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
-    echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
+  if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+    echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
     exit 1
-  }
-  if [ "$WORKER_CAPACITY" -gt 0 ]; then
-    WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
-      echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
-      exit 1
-    }
-    if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
-      echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
-      exit 1
-    fi
-    if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
-      echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
-      exit 1
-    fi
-    SPAWN_CAPACITY_RESERVATION=$ID
   fi
+  SPAWN_CAPACITY_RESERVATION=$ID
 fi
 if [ "$KIND" = secondmate ]; then
   if spawn_remote_secondmate "$ID"; then
@@ -1044,6 +1036,21 @@ if [ "$RELAUNCH" -eq 1 ]; then
     echo "error: task $ID's endpoint reads '$RELAUNCH_STATE'; a relaunch requires a positively agent-free endpoint (stop the agent first with bin/fm-control.sh $ID exit)" >&2
     exit 1
   }
+  if [ "$WORKER_CAPACITY" -gt 0 ]; then
+    WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
+      echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    }
+    if [ "$WORKER_ACTIVE" -ge "$WORKER_CAPACITY" ]; then
+      echo "error: worker capacity reached ($WORKER_ACTIVE/$WORKER_CAPACITY active); queue this task or wait for a worker to finish" >&2
+      exit 1
+    fi
+    if ! fm_worker_capacity_pending_reserve "$STATE" "$ID"; then
+      echo "error: could not reserve worker capacity for $ID; refusing a new worker rather than risking host memory exhaustion" >&2
+      exit 1
+    fi
+    SPAWN_CAPACITY_RESERVATION=$ID
+  fi
   RELAUNCH_PRIOR_HARNESS=$(fm_meta_get "$RELAUNCH_META" harness)
   KIND=$(fm_meta_get "$RELAUNCH_META" kind)
   [ -n "$KIND" ] || KIND=ship
