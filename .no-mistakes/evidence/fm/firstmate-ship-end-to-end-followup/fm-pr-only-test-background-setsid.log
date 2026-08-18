@@ -1,0 +1,21 @@
+FM_TEST_BEGIN 2026-08-18T22:59:41Z tests/fm-ship-end-to-end.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - typed direct and bridge-owned Slack preflights preserve approval authority
+ok - direct publisher creates typed records and requires fresh approval
+ok - ship preflights accept only the pr-only delivery boundary
+ok - approved direct plans bypass only duplicate preflight approval
+ok - direct records reject oversized envelopes before replacement
+ok - direct preflight parses only its private bounded snapshot
+ok - preflight bounds direct and bridge inputs before publication
+ok - direct corrections wait for the shared preflight lock
+ok - preflight requires typed authority and bridge evidence
+ok - preflight requires a bounded producer revision
+ok - preflight keeps one grouped question set
+ok - corrections, stale approvals, and approved complete plans fail closed
+ok - preflight verifies its approved contract and approval clock
+ok - preflight refuses cross-task records and empty bridge contracts
+ok - bridge preserves handoffs when record directories are unsafe
+ok - bridge preserves a newer handoff published during record creation
+ok - bridge recovers a claimed handoff after interruption
+ok - bridge restores a claim interrupted after rename
+ok - bridge preserves claimed corrections on cleanup conflicts
+ok - bridge recovers a hard-linked claim after interruption

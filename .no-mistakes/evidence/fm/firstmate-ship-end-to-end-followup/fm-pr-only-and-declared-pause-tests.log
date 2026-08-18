@@ -1,0 +1,96 @@
+FM_TEST_BEGIN 2026-08-18T22:58:08Z tests/fm-ship-end-to-end.test.sh family=pure-contract-unit expected_gate_skip=none
+ok - typed direct and bridge-owned Slack preflights preserve approval authority
+ok - direct publisher creates typed records and requires fresh approval
+ok - ship preflights accept only the pr-only delivery boundary
+ok - approved direct plans bypass only duplicate preflight approval
+ok - direct records reject oversized envelopes before replacement
+ok - direct preflight parses only its private bounded snapshot
+ok - preflight bounds direct and bridge inputs before publication
+ok - direct corrections wait for the shared preflight lock
+ok - preflight requires typed authority and bridge evidence
+ok - preflight requires a bounded producer revision
+ok - preflight keeps one grouped question set
+ok - corrections, stale approvals, and approved complete plans fail closed
+ok - preflight verifies its approved contract and approval clock
+ok - preflight refuses cross-task records and empty bridge contracts
+ok - bridge preserves handoffs when record directories are unsafe
+ok - bridge preserves a newer handoff published during record creation
+ok - bridge recovers a claimed handoff after interruption
+ok - bridge restores a claim interrupted after rename
+ok - bridge preserves claimed corrections on cleanup conflicts
+ok - bridge recovers a hard-linked claim after interruption
+ok - bridge preserves claimed corrections against delayed handoffs
+ok - bridge preserves claimed corrections on link races
+ok - bridge serializes concurrent publish claims without an empty handoff
+ok - bridge preserves approved records when a handoff is malformed
+ok - bridge preserves corrections against stale producer revisions
+ok - bridge rejects unversioned current preflight records
+ok - spawn verifies the durable preflight without a brief marker
+ok - recovery holds preflight approval through replacement command submission
+ok - dashboard uses one private atomic projection with paused time excluded
+ok - dashboard omits active work until its producer provides exact timing
+ok - dashboard projects unknown launch work with exact timing
+ok - dashboard recovers stale publication locks
+ok - dashboard maps checking work and filters duplicate or stale alerts
+ok - run-state producer persists a compact canonical dashboard checkpoint
+ok - status events persist canonical transitions with status output
+ok - busy events persist exact active-time transitions
+ok - busy events replay an interrupted transition before later writes
+ok - spawn replay preserves active time across metadata updates
+ok - dashboard surfaces only exhausted worker recovery
+fm-ship-end-to-end: preflight approval is stale
+ok - dashboard defers awaiting preflight recovery without consuming attempts
+ok - dashboard recovery fails closed for missing preflights
+ok - dashboard recovery rechecks preflight while waiting for its lock
+ok - dashboard recovery holds preflight approval through replacement handoff
+ok - dashboard recovery signals stop blocked replacement spawns
+ok - dashboard recovery cancels an unregistered spawn
+ok - dashboard relaunches a confirmed dead endpoint
+ok - dashboard preserves a terminal task instead of relaunching it
+ok - dashboard preserves a legacy terminal receipt instead of relaunching it
+ok - dashboard preserves a resolved legacy terminal receipt instead of relaunching it
+ok - dashboard preserves a terminal receipt after later transitions
+ok - terminal status writer cancels a pending recovery launch
+ok - dashboard defers recovery while task control is busy
+ok - dashboard rechecks recovery eligibility after locking the task
+ok - missing-endpoint control contention is retryable
+ok - dashboard surfaces unsupported worker replacement
+ok - dashboard excludes confirmed endpoint outage time
+ok - dashboard retains only active task records
+ok - preflight remains private and separate from worker and production lifecycle
+ok - dashboard rejects unsafe records and bounds canonical input
+# all fm-ship-end-to-end tests passed
+FM_TEST_END 2026-08-18T22:59:10Z tests/fm-ship-end-to-end.test.sh exit=0 duration_ms=61631 gate_skip=false
+FM_TEST_BEGIN 2026-08-18T22:59:10Z tests/fm-watch-triage.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced
+ok - the Fast Repair retirement sweep completes a generation with no live progress child - unbound-array reproduction NOT exercised: no pre-4.4 Bash reachable (ambient 5.3.9(1)-release cannot fail this way; set FM_TEST_LEGACY_BASH, or FM_TEST_REQUIRE_LEGACY_BASH=1 to demand it)
+ok - Fast Repair timer retirement reaps the closing handshake of an already-exited child
+ok - a Fast Repair beat that declines a retiring generation clears its reservation and closing marker
+ok - a handoff the queue refuses stays durable for retry without shortening later waits
+ok - the local Fast Repair follow-up retires once the broader result is surfaced
+ok - the Fast Repair beat retires once its PR is green and its broader run passed
+ok - the Fast Repair wait stop refuses a pid this watcher did not fork
+ok - a signal racing the active-check group handoff still stops that check group
+ok - a signalled check capture removes its private output file
+ok - a Fast Repair result interrupts the push-transition wait instead of waiting out the poll budget
+ok - a Fast Repair beat reaped at a poll boundary stays due and a completed check owns its next due
+ok - a green rollup stops the Fast Repair forge poll while local broader failures still surface
+ok - an unchanged Fast Repair result never interrupts the watcher's wait
+ok - a terminated watcher stops its backend wait group and leaves no capture file
+ok - a handoff published before the wait is armed is consumed instead of waiting out the budget
+ok - a Fast Repair start that fails before forking re-arms on the ordinary interval
+ok - the forked backend wait preserves backend stderr diagnostics
+ok - Fast Repair uses a 20-second-class task-only progress cadence without changing ordinary watcher state
+ok - a Fast Repair progress marker commits only after its durable wake is queued
+ok - an eligible Fast Repair task keeps its own interval inside a much longer ordinary poll
+not ok - the mixed-fleet watcher never started its Fast Repair cadence
+/home/kaan/.no-mistakes/worktrees/064d42a48643/01M0BH3EWC4GCFECCWNXAAHQ6P/bin/fm-push-transition-lib.sh: line 78: /tmp/fm-watch-triage-tests.D0CQe8/fast-repair-mixed-poll/state/.watch-triage.log: No such file or directory
+touch: cannot touch '/tmp/fm-watch-triage-tests.D0CQe8/fast-repair-mixed-poll/state/.last-heartbeat': No such file or directory
+/home/kaan/.no-mistakes/worktrees/064d42a48643/01M0BH3EWC4GCFECCWNXAAHQ6P/bin/fm-watch.sh: line 2038: /tmp/fm-watch-triage-tests.D0CQe8/fast-repair-mixed-poll/state/.heartbeat-streak: No such file or directory
+/home/kaan/.no-mistakes/worktrees/064d42a48643/01M0BH3EWC4GCFECCWNXAAHQ6P/bin/fm-push-transition-lib.sh: line 78: /tmp/fm-watch-triage-tests.D0CQe8/fast-repair-mixed-poll/state/.watch-triage.log: No such file or directory
+FM_TEST_END 2026-08-18T23:00:19Z tests/fm-watch-triage.test.sh exit=1 duration_ms=68924 gate_skip=false
+FM_TEST_SUMMARY total=2 failed=1 skipped_gate=0 duration_ms=130726
+FM_TEST_SUMMARY_FAMILY family=pure-contract-unit count=1 duration_ms=61631 failed=0
+FM_TEST_SUMMARY_FAMILY family=watcher-wake-lock count=1 duration_ms=68924 failed=1
+FM_TEST_SLOWEST rank=1 script=tests/fm-watch-triage.test.sh duration_ms=68924
+FM_TEST_SLOWEST rank=2 script=tests/fm-ship-end-to-end.test.sh duration_ms=61631

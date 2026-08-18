@@ -1,0 +1,4 @@
+/dev/fd/63: line 717: WATCH: unbound variable
+tests/lib.sh: line 85: wait_for: No record of process 134640
+cat: /tmp/fm-watch-triage-tests.cX9MDt/nonterminal-stale-paused/watch.out: No such file or directory
+not ok - watcher exited for a fresh declared pause (should absorb): 

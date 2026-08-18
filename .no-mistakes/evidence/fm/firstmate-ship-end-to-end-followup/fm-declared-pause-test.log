@@ -1,0 +1,41 @@
+FM_TEST_BEGIN 2026-08-18T23:01:02Z tests/fm-watch-triage.test.sh family=watcher-wake-lock expected_gate_skip=none
+ok - signal_reason_is_actionable: benign absorbed, captain verbs and coalesced batches surfaced
+ok - the Fast Repair retirement sweep completes a generation with no live progress child - unbound-array reproduction NOT exercised: no pre-4.4 Bash reachable (ambient 5.3.9(1)-release cannot fail this way; set FM_TEST_LEGACY_BASH, or FM_TEST_REQUIRE_LEGACY_BASH=1 to demand it)
+ok - Fast Repair timer retirement reaps the closing handshake of an already-exited child
+ok - a Fast Repair beat that declines a retiring generation clears its reservation and closing marker
+ok - a handoff the queue refuses stays durable for retry without shortening later waits
+ok - the local Fast Repair follow-up retires once the broader result is surfaced
+ok - the Fast Repair beat retires once its PR is green and its broader run passed
+ok - the Fast Repair wait stop refuses a pid this watcher did not fork
+ok - a signal racing the active-check group handoff still stops that check group
+ok - a signalled check capture removes its private output file
+ok - a Fast Repair result interrupts the push-transition wait instead of waiting out the poll budget
+ok - a Fast Repair beat reaped at a poll boundary stays due and a completed check owns its next due
+ok - a green rollup stops the Fast Repair forge poll while local broader failures still surface
+ok - an unchanged Fast Repair result never interrupts the watcher's wait
+ok - a terminated watcher stops its backend wait group and leaves no capture file
+ok - a handoff published before the wait is armed is consumed instead of waiting out the budget
+ok - a Fast Repair start that fails before forking re-arms on the ordinary interval
+ok - the forked backend wait preserves backend stderr diagnostics
+ok - Fast Repair uses a 20-second-class task-only progress cadence without changing ordinary watcher state
+ok - a Fast Repair progress marker commits only after its durable wake is queued
+ok - an eligible Fast Repair task keeps its own interval inside a much longer ordinary poll
+ok - a Fast Repair timer leaves mixed-fleet normal polling unchanged
+ok - Fast Repair progress checks keep each eligible task independent
+ok - Fast Repair timer retirement stops its active Forge check group
+ok - stale_is_terminal: terminal status surfaces, non-terminal and no-status are benign
+ok - scan_captain_relevant_statuses lists only captain-relevant statuses
+ok - classifier primitives: keyed decisions and activity phases, captain relevance, window-to-task, and overrides
+ok - crew_is_provably_working: only working+run-step/pane is provable; idle/finished/parked/failed/unknown surface
+ok - status_is_paused: only the leading paused verb matches, and paused is not captain-relevant
+ok - crew_absorb_class: working/paused/none from one read; crew_is_paused and crew_is_provably_working agree
+ok - signal_crew_provably_working: benign only when every referenced crew is provably working
+ok - a secondmate's status signal is never absorbed as provably working; crewmates are unaffected
+ok - a no-verb signal whose crew is provably working is absorbed (no exit, no queue, suppressor advanced, beacon present)
+ok - a bare turn-end whose crew is provably working (busy pane) is absorbed
+ok - a bare turn-end whose crew is not provably working is surfaced (the swallowed-finish fix)
+ok - a no-verb working: note whose crew is idle with no running pipeline is surfaced
+ok - a secondmate's status note surfaces even while its own agent is busy
+ok - a self-announced close never wakes its own home, and the next real note still does
+ok - captain-relevant signal is surfaced (queue + exit) and marked surfaced
+ok - a stale pane sitting on a terminal status is surfaced (queue + exit)

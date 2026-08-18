@@ -1,0 +1,1 @@
+FM_TEST_BEGIN 2026-08-18T22:59:35Z tests/fm-ship-end-to-end.test.sh family=pure-contract-unit expected_gate_skip=none
