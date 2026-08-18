@@ -814,6 +814,7 @@ write_snapshot() {
 test_dashboard_projection_and_active_time() {
   local home="$TMP_ROOT/dashboard" mock="$TMP_ROOT/dashboard-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 100 0
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "initial dashboard refresh failed"
   write_snapshot "$mock" working '[]' 'https://slack.example/thread/1' pane '' 120 10
@@ -838,6 +839,7 @@ test_dashboard_projection_and_active_time() {
 test_dashboard_omits_uncheckpointed_active_work() {
   local home="$TMP_ROOT/dashboard-uncheckpointed" mock="$TMP_ROOT/dashboard-uncheckpointed-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   write_snapshot "$mock" working '[]' '' pane 'harness busy (grok-regex)' null null
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=150 "$DASHBOARD" refresh >/dev/null || fail "uncheckpointed Grok dashboard refresh failed"
   record="$home/data/dashboard.json"
@@ -857,6 +859,7 @@ test_dashboard_omits_uncheckpointed_active_work() {
 test_dashboard_recovers_stale_publication_lock() {
   local home="$TMP_ROOT/dashboard-stale-lock" mock="$TMP_ROOT/dashboard-stale-lock-snapshot" lock record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   write_snapshot "$mock" working '[]' '' pane '' 100 0
   lock="$home/data/.dashboard.lock"
   mkdir "$lock"
@@ -872,6 +875,7 @@ test_dashboard_recovers_stale_publication_lock() {
 test_dashboard_filters_and_checking_phase() {
   local home="$TMP_ROOT/dashboard-filter" mock="$TMP_ROOT/dashboard-filter-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   write_snapshot "$mock" working '[{"key":"d1","verb":"needs-decision","summary":"Choose"},{"key":"b1","verb":"blocked","summary":"Ignore duplicate"}]' '' run-step 'ci running'
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "checking dashboard refresh failed"
   record="$home/data/dashboard.json"
@@ -1019,6 +1023,7 @@ test_dashboard_replays_spawn_busy_event_across_metadata_updates() {
 test_dashboard_recovery_surfaces_only_exhausted_loss() {
   local home="$TMP_ROOT/dashboard-recovery" state_bin="$TMP_ROOT/dashboard-recovery-state" agent_bin="$TMP_ROOT/dashboard-recovery-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-spawn" mock="$TMP_ROOT/dashboard-recovery-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' > "$home/state/dash-a1.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
@@ -1419,6 +1424,7 @@ test_missing_recovery_control_lock_is_retryable() {
 test_dashboard_recovery_surfaces_unsupported_replacement() {
   local home="$TMP_ROOT/dashboard-recovery-unsupported" state_bin="$TMP_ROOT/dashboard-recovery-unsupported-state" agent_bin="$TMP_ROOT/dashboard-recovery-unsupported-agent" spawn_bin="$TMP_ROOT/dashboard-recovery-unsupported-spawn" mock="$TMP_ROOT/dashboard-recovery-unsupported-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   printf '%s\n' 'kind=ship' 'backend=zellij' 'window=main:worker' > "$home/state/dash-a2.meta"
   printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: none · endpoint gone\\n"' > "$state_bin"
   printf '%s\n' '#!/usr/bin/env bash' 'printf missing' > "$agent_bin"
@@ -1457,6 +1463,7 @@ test_dashboard_recovery_excludes_endpoint_outage() {
 test_dashboard_keeps_only_active_tasks() {
   local home="$TMP_ROOT/dashboard-active" mock="$TMP_ROOT/dashboard-active-snapshot" record
   mkdir -p "$home/data" "$home/state"
+  chmod 700 "$home/data"
   write_snapshot "$mock" working '[]'
   FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh >/dev/null || fail "active dashboard refresh failed"
   write_snapshot "$mock" "done" '[]'
@@ -1495,7 +1502,7 @@ test_dashboard_rejects_unsafe_or_oversized_inputs() {
   [ "$status" -ne 0 ] || fail "dashboard must reject a writable data directory when publishing"
   assert_contains "$out" "unsafe data directory" "unsafe dashboard publication refusal was unclear"
   assert_absent "$record" "unsafe dashboard directory received a private record"
-  chmod 755 "$home/data"
+  chmod 700 "$home/data"
   printf '%s\n' '{"schema_version":1,"technical":{"tasks":[]}}' > "$record"
   chmod 644 "$record"
   out=$(FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_TESTING=1 FM_DASHBOARD_TEST_SNAPSHOT_BIN="$mock" FM_DASHBOARD_NOW=100 "$DASHBOARD" refresh 2>&1)
