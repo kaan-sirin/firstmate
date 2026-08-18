@@ -403,6 +403,21 @@ fm_lint_wait_workers() {
   done
 }
 
+fm_lint_replay_unique_diagnostics() {  # <output>
+  awk '
+    BEGIN { RS=""; ORS="\n\n" }
+    {
+      key=""
+      lines=split($0, line, "\n")
+      for (i = 1; i <= lines; i++) {
+        if (line[i] ~ /:[0-9][0-9]*:[0-9][0-9]*: (error|warning|info|style): .* \[SC[0-9][0-9]*\]$/) key=line[i]
+      }
+      if (key != "" && seen[key]++) next
+      print
+    }
+  ' "$1"
+}
+
 if [ "$JOBS" -eq 1 ]; then
   worker=0
   while [ "$worker" -lt "$SHARD_COUNT" ]; do
@@ -422,10 +437,12 @@ fi
 # Replay both stable shards in deterministic order and select the first nonzero
 # shard status. ShellCheck processes every root in a shard after earlier findings.
 overall_rc=0
+REPLAY_OUTPUT="$TMP_ROOT/replay.out"
+: > "$REPLAY_OUTPUT"
 worker=0
 while [ "$worker" -lt "$SHARD_COUNT" ]; do
   output="$OUTPUT_DIR/shard.$worker"
-  [ ! -f "$output.out" ] || cat "$output.out"
+  [ ! -f "$output.out" ] || cat "$output.out" >> "$REPLAY_OUTPUT"
   if [ -f "$output.rc" ]; then
     rc=$(cat "$output.rc" 2>/dev/null || printf '2')
     case "$rc" in ''|*[!0-9]*) rc=2 ;; esac
@@ -438,6 +455,7 @@ while [ "$worker" -lt "$SHARD_COUNT" ]; do
   fi
   worker=$((worker + 1))
 done
+fm_lint_replay_unique_diagnostics "$REPLAY_OUTPUT"
 
 if [ -n "$TELEMETRY" ]; then
   TELEMETRY_END_EPOCH=$(date +%s)

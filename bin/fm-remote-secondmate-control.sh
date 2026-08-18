@@ -40,7 +40,8 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
-CAPACITY_STATE="$FM_ROOT/.firstmate-worker-capacity"
+REMOTE_JOB_STATE=${FM_REMOTE_JOB_STATE_ROOT:-${HOME:-}/.firstmate/remote-job}
+CAPACITY_STATE="$REMOTE_JOB_STATE/worker-capacity"
 REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
@@ -68,6 +69,8 @@ validate_home() { # <id> [allow-absent]
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
 
 ensure_capacity_state() {
+  [ -d "$REMOTE_JOB_STATE" ] && [ ! -L "$REMOTE_JOB_STATE" ] \
+    || die "remote job state is unavailable or unsafe"
   if [ -e "$CAPACITY_STATE" ] || [ -L "$CAPACITY_STATE" ]; then
     [ -d "$CAPACITY_STATE" ] && [ ! -L "$CAPACITY_STATE" ] \
       || die "remote worker capacity state is unsafe"

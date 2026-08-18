@@ -685,9 +685,58 @@ worker_capacity_parent_meta_matches_home() {
   [ "$meta_home" = "$home" ]
 }
 
+worker_capacity_remote_host_state() {
+  local home=$1 id=$2 route_state remote_job_state remote_capacity_state account_home
+  route_state="$home/state/parent-route"
+  [ -d "$route_state" ] && [ ! -L "$route_state" ] \
+    && worker_capacity_parent_meta_matches_home "$route_state" "$id" "$home" || {
+      echo "error: remote secondmate parent route is invalid; cannot resolve host worker capacity" >&2
+      return 1
+    }
+  remote_job_state=${FM_REMOTE_JOB_STATE_ROOT:-}
+  if [ -z "$remote_job_state" ]; then
+    account_home=${HOME:-}
+    account_home=$(CDPATH='' cd -- "$account_home" 2>/dev/null && pwd -P) || {
+      echo "error: remote account home is unavailable; cannot resolve host worker capacity" >&2
+      return 1
+    }
+    remote_job_state="$account_home/.firstmate/remote-job"
+  fi
+  remote_job_state=$(resolve_directory_input FM_REMOTE_JOB_STATE_ROOT "$remote_job_state") || return 1
+  [ -d "$remote_job_state" ] && [ ! -L "$remote_job_state" ] || {
+    echo "error: remote job state is unavailable or unsafe; cannot resolve host worker capacity" >&2
+    return 1
+  }
+  remote_capacity_state="$remote_job_state/worker-capacity"
+  fm_worker_capacity_remote_route_register "$remote_capacity_state" "$route_state" "$id" "$home" || {
+    echo "error: remote secondmate capacity route is invalid; cannot resolve host worker capacity" >&2
+    return 1
+  }
+  printf '%s\n' "$remote_capacity_state"
+}
+
 worker_capacity_host_state() {
-  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state route_state remote_capacity_state id
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state id
   local climbed=0 visited=$'\n'
+  if [ -n "$host_state" ]; then
+    home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+    marker="$home/$SUB_HOME_MARKER"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] \
+        && fm_secondmate_parent_record_parse "$home/$SUB_HOME_PARENT_MARKER" || {
+          echo "error: secondmate parent binding is invalid; cannot resolve host worker capacity" >&2
+          return 1
+        }
+      if [ "$FM_SECONDMATE_PARENT_ROUTE" = remote ]; then
+        id=$(<"$marker")
+        fm_task_id_creation_valid "$id" || {
+          echo "error: secondmate identity is invalid; cannot resolve host worker capacity" >&2
+          return 1
+        }
+        host_state=$(worker_capacity_remote_host_state "$home" "$id") || return 1
+      fi
+    fi
+  fi
   if [ -z "$host_state" ]; then
     home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
     while :; do
@@ -721,18 +770,7 @@ worker_capacity_host_state() {
       }
       case "$FM_SECONDMATE_PARENT_ROUTE" in
         remote)
-          route_state="$home/state/parent-route"
-          [ -d "$route_state" ] && [ ! -L "$route_state" ] \
-            && worker_capacity_parent_meta_matches_home "$route_state" "$id" "$home" || {
-              echo "error: remote secondmate parent route is invalid; cannot resolve host worker capacity" >&2
-              return 1
-            }
-          remote_capacity_state="$FM_ROOT/.firstmate-worker-capacity"
-          fm_worker_capacity_remote_route_register "$remote_capacity_state" "$route_state" "$id" "$home" || {
-            echo "error: remote secondmate capacity route is invalid; cannot resolve host worker capacity" >&2
-            return 1
-          }
-          host_state=$remote_capacity_state
+          host_state=$(worker_capacity_remote_host_state "$home" "$id") || return 1
           break
           ;;
         local)
@@ -2892,9 +2930,14 @@ if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
   capacity_state_env=
+  remote_job_state_env=
   if [ "$WORKER_CAPACITY" -gt 0 ]; then
     sq_capacity_state=$(shell_quote "$WORKER_CAPACITY_STATE")
     capacity_state_env="FM_WORKER_CAPACITY_HOST_STATE=$sq_capacity_state"
+  fi
+  if [ -n "${FM_REMOTE_JOB_STATE_ROOT:-}" ]; then
+    sq_remote_job_state=$(shell_quote "$FM_REMOTE_JOB_STATE_ROOT")
+    remote_job_state_env="FM_REMOTE_JOB_STATE_ROOT=$sq_remote_job_state"
   fi
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;
@@ -2907,7 +2950,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home $capacity_state_env FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home $capacity_state_env $remote_job_state_env FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
