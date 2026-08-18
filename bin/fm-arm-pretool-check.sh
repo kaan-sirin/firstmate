@@ -94,6 +94,9 @@ if [ "$CMD_SET" -eq 0 ]; then
   PAYLOAD=$(cat 2>/dev/null || true)
   [ -n "$PAYLOAD" ] || exit 0
   command -v jq >/dev/null 2>&1 || exit 0
+  # shellcheck source=bin/fm-hook-host-lib.sh
+  . "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/fm-hook-host-lib.sh"
+  fm_hook_payload_is_cursor "$PAYLOAD" && exit 0
   CMD=$(printf '%s' "$PAYLOAD" | jq -r '(.toolInput.command // .tool_input.command // empty)' 2>/dev/null) || exit 0
   [ -n "$CMD" ] || exit 0
   # Kept for transport parity only.

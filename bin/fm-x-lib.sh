@@ -12,14 +12,15 @@
 #                                and FMX_THREAD_MAX (env wins over .env)
 #   fmx_auth_header_file       - write the bearer header to a 0600 temp file
 #   fmx_extract_reply_context <json-file> - the single owner of reply-context
-#                                extraction: infer {platform, reply_max_chars}
+#                                extraction: infer {platform, reply_max_chars,
+#                                thread_url}
 #                                from any mention/relay payload file
 #   fmx_request_inbox_context <state> <request_id> - reply context from a stashed
 #                                mention payload (wrapper over the extractor)
 #   fmx_request_relay_context <request_id> - resolve reply platform/limit
 #                                AUTHORITATIVELY from the relay by request_id when
 #                                no local inbox payload survives
-#   fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]
+#   fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh] [thread-url]
 #                                - persist the durable per-request reply context;
 #                                refresh=1 resets its retention timestamp
 #   fmx_offer_registry_claim <state> <request_id> - atomically claim the durable
@@ -41,7 +42,7 @@
 #   fmx_post_json <endpoint> <payload-file> [body-file] - POST JSON to the relay,
 #                                printing HTTP code and writing response body
 #   fmx_meta_get <meta> <key>  - read one key=value line from a task meta file
-#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]
+#   fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [thread-url]
 #                                - (re)write the X-request link, defaulting
 #                                followups to 0
 #   fmx_meta_followups_set <meta> <n> - rewrite just the follow-up counter
@@ -304,7 +305,7 @@ fmx_load_config() {
 }
 
 # fmx_extract_reply_context <json-file>: the SINGLE owner of reply-context
-# extraction. Print {"platform":"...","reply_max_chars":"..."} inferred from a
+# extraction. Print {"platform":"...","reply_max_chars":"...","thread_url":"..."} inferred from a
 # mention/relay payload file. Explicit relay-provided platform/limit fields win;
 # absent those, the legacy tweet_id shape is used ("discord:<channel>:<message>"
 # means Discord, a numeric id means X). Empty fields mean unknown, and callers
@@ -330,6 +331,12 @@ fmx_extract_reply_context() {
         | select(type == "number" or type == "string")
         | tostring
         | select(test("^[0-9]+$"))][0] // "";
+    def first_url($items):
+      [$items[]
+        | select(type == "string")
+        | select(startswith("https://"))
+        | select(length <= 2048)
+        | select(test("^[^[:space:]]+$"))][0] // "";
     (first_string([.reply_platform, .platform, .target_platform, .source_platform, .provider]) | norm_platform) as $explicit_platform
     | ((.tweet_id // "") | tostring) as $tweet_id
     | {
@@ -337,7 +344,8 @@ fmx_extract_reply_context() {
           elif ($tweet_id | startswith("discord:")) then "discord"
           elif ($tweet_id | test("^[0-9]+$")) then "x"
           else "" end),
-        reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars])
+        reply_max_chars: first_limit([.reply_max_chars, .reply_max_characters, .message_max_chars, .message_limit, .max_chars]),
+        thread_url: first_url([.thread_url, .permalink, .url, .thread?.url?])
       }
   ' "$file"
 }
@@ -396,7 +404,8 @@ fmx_request_relay_context() {
   # A 200 that resolved neither a platform nor a limit is treated as unresolved so
   # the caller warns instead of recording a link with no split budget.
   if [ "$(printf '%s' "$ctx" | jq -r '.platform // ""')" = "" ] \
-    && [ "$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""')" = "" ]; then
+    && [ "$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""')" = "" ] \
+    && [ "$(printf '%s' "$ctx" | jq -r '.thread_url // ""')" = "" ]; then
     printf '%s\n' "$empty"; return 1
   fi
   printf '%s\n' "$ctx"
@@ -481,7 +490,7 @@ fmx_context_registry_prune() {
   return 0
 }
 
-# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh]:
+# fmx_context_registry_set <state> <request_id> <platform> <reply-max> [refresh] [thread-url]:
 # persist the durable per-request reply context atomically. Normalizes platform
 # (twitter -> x, anything unrecognized -> empty) and requires a numeric budget.
 # A refresh value of 1 resets the retention timestamp; ordinary writes preserve
@@ -489,7 +498,7 @@ fmx_context_registry_prune() {
 # never write an empty, useless record. Returns non-zero only on invalid input or
 # a write failure; callers treat the write as best-effort.
 fmx_context_registry_set() {
-  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} dir file dir_device now recorded_at
+  local state=$1 rid=$2 platform=${3:-} reply_max=${4:-} refresh=${5:-0} thread_url=${6:-} dir file dir_device now recorded_at prior_platform prior_max prior_url
   case "$rid" in
     ''|.*|*[!A-Za-z0-9._-]*) return 1 ;;
   esac
@@ -505,9 +514,13 @@ fmx_context_registry_set() {
     0|1) ;;
     *) return 1 ;;
   esac
-  if [ -z "$platform" ] && [ -z "$reply_max" ]; then
-    return 0
-  fi
+  case "$thread_url" in
+    https://*)
+      [ "${#thread_url}" -le 2048 ] || thread_url=
+      case "$thread_url" in *$'\n'*|*$'\r'*|*[[:space:]]*) thread_url= ;; esac
+      ;;
+    *) thread_url= ;;
+  esac
   dir="$state/x-context"
   dir_device=$(fmx_private_artifact_dir_prepare "$dir") || return 1
   file="$dir/$rid.json"
@@ -516,6 +529,24 @@ fmx_context_registry_set() {
     return 1
   fi
   fmx_context_registry_prune "$state"
+  if [ -f "$file" ]; then
+    IFS=$'\t' read -r prior_platform prior_max prior_url < <(
+      jq -r '[(.platform // ""),(.reply_max_chars // ""),(.thread_url // "")] | @tsv' "$file" 2>/dev/null || true
+    )
+    case "$prior_platform" in discord|x) [ -n "$platform" ] || platform=$prior_platform ;; esac
+    case "$prior_max" in ''|*[!0-9]*) ;; *) [ -n "$reply_max" ] || reply_max=$prior_max ;; esac
+    case "$prior_url" in
+      https://*)
+        [ "${#prior_url}" -le 2048 ] || prior_url=
+        case "$prior_url" in *$'\n'*|*$'\r'*|*[[:space:]]*) prior_url= ;; esac
+        ;;
+      *) prior_url= ;;
+    esac
+    [ -n "$thread_url" ] || thread_url=$prior_url
+  fi
+  if [ -z "$platform" ] && [ -z "$reply_max" ] && [ -z "$thread_url" ]; then
+    return 0
+  fi
   now=${FMX_NOW_OVERRIDE:-$(date +%s)}
   case "$now" in
     ''|*[!0-9]*) return 1 ;;
@@ -528,9 +559,9 @@ fmx_context_registry_set() {
   if [ -z "$recorded_at" ]; then
     recorded_at=$now
   fi
-  (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" \
+  (set -o pipefail; jq -cn --arg rid "$rid" --arg platform "$platform" --arg max "$reply_max" --arg thread_url "$thread_url" \
     --argjson recorded_at "$recorded_at" \
-    '{request_id:$rid, platform:$platform, reply_max_chars:$max, recorded_at:$recorded_at}' \
+    '{request_id:$rid, platform:$platform, reply_max_chars:$max, thread_url:$thread_url, recorded_at:$recorded_at}' \
     | fmx_private_artifact_publish_stdin "$dir" "$rid.json" 600) || return 1
 }
 
@@ -561,22 +592,26 @@ fmx_offer_registry_claim() {
 }
 
 # fmx_context_registry_get <state> <request_id>: print the durable per-request
-# reply context as {"platform":"...","reply_max_chars":"..."} (the same shape as
+# reply context as {"platform":"...","reply_max_chars":"...","thread_url":"..."} (the same shape as
 # the inbox and relay extractors), or the empty shape when no record exists.
 fmx_context_registry_get() {
   local state=$1 rid=$2 dir file
   case "$rid" in
-    ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":""}\n'; return 0 ;;
+    ''|.*|*[!A-Za-z0-9._-]*) printf '{"platform":"","reply_max_chars":"","thread_url":""}\n'; return 0 ;;
   esac
   dir="$state/x-context"
   file="$dir/$rid.json"
   if ! fmx_private_artifact_file_valid "$dir" "$rid.json" 600; then
-    printf '{"platform":"","reply_max_chars":""}\n'
+    printf '{"platform":"","reply_max_chars":"","thread_url":""}\n'
     return 0
   fi
   fmx_context_registry_prune "$state"
-  jq -c '{platform:(.platform // ""), reply_max_chars:(.reply_max_chars // "")}' "$file" 2>/dev/null \
-    || printf '{"platform":"","reply_max_chars":""}\n'
+  jq -c '
+    def valid_url:
+      if type == "string" then startswith("https://") and length <= 2048 and test("^[^[:space:]]+$") else false end;
+    {platform:(.platform // ""), reply_max_chars:(.reply_max_chars // ""), thread_url:(.thread_url // "" | if valid_url then . else "" end)}
+  ' "$file" 2>/dev/null \
+    || printf '{"platform":"","reply_max_chars":"","thread_url":""}\n'
 }
 
 # fmx_context_registry_clear <state> <request_id>: drop the durable record.
@@ -599,7 +634,7 @@ fmx_context_registry_clear() {
 #      and concurrent requests - the primary source after this fix);
 #   2. the still-present inbox payload;
 #   3. when <allow-relay> is 1, an AUTHORITATIVE relay lookup by request_id.
-# Prints {"platform":"...","reply_max_chars":"..."}; each axis is filled from
+# Prints {"platform":"...","reply_max_chars":"...","thread_url":"..."}; each axis is filled from
 # the first source that provides it, continuing through later sources until both
 # are present or the sources are exhausted. <allow-relay>
 # must be 0 in dry-run / no-token / no-network contexts; the caller gates it
@@ -608,7 +643,7 @@ fmx_context_registry_clear() {
 fmx_resolve_reply_context() {
   # Bash local accepts p= and m= as explicit empty assignment arguments.
   # shellcheck disable=SC1007
-  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m p= m=
+  local state=$1 rid=$2 allow_relay=${3:-0} src ctx source_p source_m source_u p= m= u=
   for src in registry inbox relay; do
     case "$src" in
       registry) ctx=$(fmx_context_registry_get "$state" "$rid" 2>/dev/null) || ctx= ;;
@@ -621,12 +656,21 @@ fmx_resolve_reply_context() {
     [ -n "$ctx" ] || continue
     source_p=$(printf '%s' "$ctx" | jq -r '.platform // ""' 2>/dev/null) || source_p=
     source_m=$(printf '%s' "$ctx" | jq -r '.reply_max_chars // ""' 2>/dev/null) || source_m=
+    source_u=$(printf '%s' "$ctx" | jq -r '.thread_url // ""' 2>/dev/null) || source_u=
     case "$source_p" in discord|x) [ -n "$p" ] || p=$source_p ;; esac
     case "$source_m" in ''|*[!0-9]*) ;; *) [ -n "$m" ] || m=$source_m ;; esac
-    [ -n "$p" ] && [ -n "$m" ] && break
+    case "$source_u" in
+      https://*)
+        [ "${#source_u}" -le 2048 ] || source_u=
+        case "$source_u" in *$'\n'*|*$'\r'*|*[[:space:]]*) source_u= ;; esac
+        ;;
+      *) source_u= ;;
+    esac
+    [ -n "$u" ] || u=$source_u
+    [ -n "$p" ] && [ -n "$m" ] && [ -n "$u" ] && break
   done
-  jq -cn --arg platform "$p" --arg max "$m" \
-    '{platform:$platform, reply_max_chars:$max}'
+  jq -cn --arg platform "$p" --arg max "$m" --arg thread_url "$u" \
+    '{platform:$platform, reply_max_chars:$max, thread_url:$thread_url}'
   return 0
 }
 
@@ -928,7 +972,7 @@ fmx_meta_tmp() {
   mktemp "$dir/.${base}.fm-x.XXXXXX"
 }
 
-# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max]:
+# fmx_meta_link_set <meta> <request_id> <epoch> [followups] [platform] [max] [thread-url]:
 # atomically (re)write the x_request/x_request_ts/x_followups lines plus optional
 # reply-platform context, dropping any prior link and preserving every other meta
 # line. <followups> defaults to 0 (a fresh link); pass the prior task's count to
@@ -936,13 +980,17 @@ fmx_meta_tmp() {
 # budget against a binding the relay already knows about. Returns non-zero if
 # <meta> is missing or the rewrite fails.
 fmx_meta_link_set() {
-  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} tmp lock
+  local meta=$1 rid=$2 ts=$3 followups=${4:-0} platform=${5:-} reply_max=${6:-} thread_url=${7:-} prior_rid tmp lock
   [ -f "$meta" ] || return 1
   lock=$(fm_meta_lock_path "$meta") || return 1
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 1; }
+  if [ -z "$thread_url" ]; then
+    prior_rid=$(fmx_meta_get "$meta" x_request)
+    [ "$prior_rid" != "$rid" ] || thread_url=$(fmx_meta_get "$meta" x_thread_url)
+  fi
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_thread_url=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   printf 'x_request=%s\n' "$rid" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
@@ -954,6 +1002,17 @@ fmx_meta_link_set() {
   case "$reply_max" in
     ''|*[!0-9]*) ;;
     *) printf 'x_reply_max_chars=%s\n' "$reply_max" >> "$tmp" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; } ;;
+  esac
+  case "$thread_url" in
+    https://*)
+      if [ "${#thread_url}" -gt 2048 ]; then
+        rm -f -- "$tmp"; fm_lock_release "$lock"; return 1
+      fi
+      case "$thread_url" in
+        *$'\n'*|*$'\r'*|*[[:space:]]*) rm -f -- "$tmp"; fm_lock_release "$lock"; return 1 ;;
+      esac
+      printf 'x_thread_url=%s\n' "$thread_url" >> "$tmp" || { rm -f -- "$tmp"; fm_lock_release "$lock"; return 1; }
+      ;;
   esac
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }
   fm_lock_release "$lock"
@@ -988,7 +1047,7 @@ fmx_meta_link_clear() {
   fm_lock_acquire_wait "$lock"
   [ -f "$meta" ] || { fm_lock_release "$lock"; return 0; }
   tmp=$(fmx_meta_tmp "$meta") || { fm_lock_release "$lock"; return 1; }
-  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=' "$meta" || true; } > "$tmp"; then
+  if ! { grep -vE '^x_request=|^x_request_ts=|^x_followups=|^x_platform=|^x_reply_max_chars=|^x_thread_url=' "$meta" || true; } > "$tmp"; then
     rm -f "$tmp"; fm_lock_release "$lock"; return 1
   fi
   mv -f "$tmp" "$meta" || { rm -f "$tmp"; fm_lock_release "$lock"; return 1; }

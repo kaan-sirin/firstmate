@@ -112,6 +112,7 @@ install_guard_scripts() {
   cp "$ROOT/bin/fm-operational-input.sh" "$dir/bin/fm-operational-input.sh"
   cp "$ROOT/bin/fm-supervision-instructions.sh" "$dir/bin/fm-supervision-instructions.sh"
   cp "$ROOT/bin/fm-harness.sh" "$dir/bin/fm-harness.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
@@ -623,6 +624,16 @@ test_hook_silent_without_stdin() {
   pass "fm-turnend-guard: silent no-op on empty stdin"
 }
 
+test_hook_cursor_payload_is_silent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/hook-cursor-payload")
+  : > "$dir/state/task1.meta"
+  out=$(printf '%s' '{"cursor_version":"2026.08.11","stop_hook_active":false}' | FM_HOME="$dir" bash "$dir/bin/fm-turnend-guard.sh" 2>&1); status=$?
+  expect_code 0 "$status" "Cursor compatibility payload"
+  [ -z "$out" ] || fail "Cursor compatibility payload produced output: $out"
+  pass "fm-turnend-guard: Cursor compatibility payload is silent"
+}
+
 test_hook_runs_fast() {
   local dir start elapsed_s
   dir=$(make_primary_dir "$TMP_ROOT/hook-timing")
@@ -1117,10 +1128,12 @@ record_autoarm_owner() {
 install_integrated_autoarm() {
   local dir=$1
   cp "$ROOT/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-claude-stop-autoarm.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-primary-scope-lib.sh" "$dir/bin/fm-primary-scope-lib.sh"
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
   ln -s /bin/bash "$dir/fake-claude"
@@ -1630,6 +1643,7 @@ test_hook_exempts_linked_worktree_with_non_ascii_marker
 test_hook_silent_in_crewmate_worktree
 test_hook_silent_without_jq
 test_hook_silent_without_stdin
+test_hook_cursor_payload_is_silent
 test_hook_runs_fast
 test_grok_adapter_forces_one_resume_when_unhealthy
 test_grok_adapter_loop_guard_skips_resume

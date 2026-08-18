@@ -83,8 +83,27 @@ case "$FM_CREW_STATE_RUNS_LIMIT" in ''|*[!0-9]*) FM_CREW_STATE_RUNS_LIMIT=200 ;;
 SEP=' · '
 
 # Emit the one canonical line and exit 0. Detail is optional.
-emit() {  # <state> <source> [detail]
+status_transition_at() {  # <state>
+  local expected=$1 record recorded_state recorded_incarnation recorded_at incarnation
+  case "$expected" in working|parked|paused|blocked|failed|done|unknown) ;; *) return 1 ;; esac
+  record="$STATE/dashboard-transitions/$ID.json"
+  [ -f "$record" ] && [ ! -L "$record" ] || return 1
+  incarnation=$(meta_value dashboard_incarnation)
+  case "$incarnation" in ''|*[!A-Za-z0-9._-]*) incarnation="legacy-$ID" ;; esac
+  IFS=$'\t' read -r recorded_state recorded_incarnation recorded_at < <(
+    jq -r '[.state // "",(.incarnation // "" | tostring),(.transition_at // "" | tostring)] | @tsv' "$record" 2>/dev/null || true
+  )
+  [ "$recorded_state" = "$expected" ] && [ "$recorded_incarnation" = "$incarnation" ] || return 1
+  case "$recorded_at" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$recorded_at"
+}
+
+emit() {  # <state> <source> [detail] [transition-at]
   local line="state: $1${SEP}source: $2"
+  case "${4:-}" in
+    ''|*[!0-9]*) ;;
+    *) line="$line${SEP}transition_at: $4" ;;
+  esac
   [ -n "${3:-}" ] && line="$line${SEP}$3"
   printf '%s\n' "$line"
   exit 0
@@ -166,6 +185,24 @@ crew_busy_verdict() {  # <target>
     grok*) tail40=$(fm_backend_capture "$TASK_BACKEND" "$1" 40 "$EXPECTED_LABEL" 2>/dev/null) || tail40='' ;;
   esac
   fm_busy_classify "$TASK_BACKEND" "$1" "$HARNESS" "$ID" "$STATE" "$tail40"
+}
+
+confirmed_endpoint_loss_state() {
+  local endpoint_state
+  case "$KIND" in ship|scout) ;; *) return 1 ;; esac
+  [ -n "$BACKEND_TARGET" ] || return 1
+  endpoint_state=$(fm_backend_agent_state "$TASK_BACKEND" "$BACKEND_TARGET")
+  case "$endpoint_state" in dead|missing) printf '%s' "$endpoint_state" ;; *) return 1 ;; esac
+}
+
+busy_transition_at() {
+  local record busy_state busy_source busy_at
+  record=$(fm_busy_record_read "$STATE" "$ID" 2>/dev/null) || return 1
+  read -r busy_state busy_source _ _ busy_at <<< "$record"
+  [ "$busy_state" = busy ] || return 1
+  [ "$busy_source" = "${BUSY_VERDICT#* }" ] || return 1
+  case "$busy_at" in ''|*[!0-9]*) return 1 ;; esac
+  printf '%s' "$busy_at"
 }
 
 # --- no-mistakes run lookup (authoritative when a run matches this branch) --
@@ -496,9 +533,18 @@ if [ "$HAVE_RUN" = 1 ]; then
     fi
   fi
 
+  case "$RUN_STATE" in
+    done|failed) ;;
+    *)
+      if ENDPOINT_LOSS=$(confirmed_endpoint_loss_state); then
+        emit unknown endpoint "confirmed endpoint loss ($ENDPOINT_LOSS)" "$(date +%s)"
+      fi
+      ;;
+  esac
+
   if [ "$RUN_STATE" = working ] && log_reports_ci_ready; then
     if [ "$RUN_SOURCE" = coarse ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at "done" || true)"
     fi
     [ -n "$CI_STEP_STATUS" ] || CI_STEP_STATUS=$(nm_effective_ci_step_status)
     if [ "$RUN_STATUS" = fixing ]; then
@@ -509,7 +555,7 @@ if [ "$HAVE_RUN" = 1 ]; then
       CI_LOG_STATE=not-ready
     fi
     if [ "$CI_LOG_STATE" != not-ready ]; then
-      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR"
+      emit "done" status-log "$(status_line_note "$LOG_LINE")${SEP}run still monitoring PR" "$(status_transition_at "done" || true)"
     fi
   fi
 
@@ -528,7 +574,8 @@ if [ "$HAVE_RUN" = 1 ]; then
       ;;
   esac
 
-  emit "$RUN_STATE" run-step "$RUN_DETAIL"
+  RUN_TRANSITION_AT=$(status_transition_at "$RUN_STATE" || true)
+  emit "$RUN_STATE" run-step "$RUN_DETAIL" "$RUN_TRANSITION_AT"
 fi
 
 # --- fallback: no run attributed to this crew ------------------------------
@@ -537,6 +584,9 @@ fi
 # is no run to consult, so a dead/unreadable target means the crew is gone: report
 # unknown rather than trusting a possibly-stale status log as the current state.
 [ -n "$BACKEND_TARGET" ] || emit unknown none "no backend target recorded"
+if ENDPOINT_LOSS=$(confirmed_endpoint_loss_state); then
+  emit unknown endpoint "confirmed endpoint loss ($ENDPOINT_LOSS)" "$(date +%s)"
+fi
 pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACKEND_TARGET"
 
 # Secondmates idle on their own watcher (idle pane = healthy), so the busy
@@ -547,7 +597,7 @@ pane_readable "$BACKEND_TARGET" || emit unknown none "backend target gone: $BACK
 if [ "$KIND" != secondmate ]; then
   BUSY_VERDICT=$(crew_busy_verdict "$BACKEND_TARGET")
   case "${BUSY_VERDICT%% *}" in
-    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" ;;
+    busy) emit working pane "harness busy (${BUSY_VERDICT#* })" "$(busy_transition_at || true)" ;;
     idle) ;;
     *) emit unknown pane "harness state unavailable ($BUSY_VERDICT)" ;;
   esac
@@ -566,7 +616,7 @@ fi
 if [ -n "$LOG_VERB" ]; then
   LOG_STATE=$(map_log_state "$LOG_LINE")
   if [ "$LOG_STATE" != unknown ]; then
-    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")"
+    emit "$LOG_STATE" status-log "$(status_line_note "$LOG_LINE")" "$(status_transition_at "$LOG_STATE" || true)"
   fi
 fi
 

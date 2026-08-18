@@ -25,11 +25,11 @@
 # check only exists in a home that opted into the relay, and it is an O(1)
 # directory presence test plus a signature compare, with no tasks-axi call and no
 # backlog scan. A home with no pending terminal results pays nothing for it.
-# The full object is stashed verbatim, so any conversation context the relay
-# includes (in_reply_to: {author_handle, text}, null for a fresh mention) is
-# preserved for fmx-respond to handle follow-ups with continuity. The durable
-# context record lets a delayed follow-up recover the ORIGINAL platform/budget
-# even after this inbox file is drained.
+# The full object is stashed verbatim, so every conversation-context field the
+# relay includes is preserved for fmx-respond to handle with continuity; the
+# Relay section of docs/configuration.md owns that payload's wire contract. The
+# durable context record lets a delayed follow-up recover the ORIGINAL
+# platform/budget even after this inbox file is drained.
 #
 # Config (home .env, FMX_ENV_FILE, or env): FMX_PAIRING_TOKEN (required),
 # FMX_RELAY_URL (default https://myfirstmate.io). Auth: Authorization: Bearer
@@ -173,7 +173,8 @@ POLL_CTX=$(fmx_extract_reply_context "$BODY_FILE" 2>/dev/null) || POLL_CTX=
 if [ -n "$POLL_CTX" ]; then
   POLL_PLATFORM=$(printf '%s' "$POLL_CTX" | jq -r '.platform // ""' 2>/dev/null) || POLL_PLATFORM=
   POLL_MAX=$(printf '%s' "$POLL_CTX" | jq -r '.reply_max_chars // ""' 2>/dev/null) || POLL_MAX=
-  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 2>/dev/null || true
+  POLL_THREAD_URL=$(printf '%s' "$POLL_CTX" | jq -r '.thread_url // ""' 2>/dev/null) || POLL_THREAD_URL=
+  fmx_context_registry_set "$STATE" "$REQ" "$POLL_PLATFORM" "$POLL_MAX" 0 "$POLL_THREAD_URL" 2>/dev/null || true
 fi
 
 fmx_offer_registry_claim "$STATE" "$REQ"

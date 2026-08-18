@@ -86,6 +86,31 @@ sha256_file() {
   fi
 }
 
+write_delta_result() {
+  local result=$1 line=$2 payload empty payload_bytes payload_hash empty_hash
+  payload="$result.payload"
+  empty="$result.empty"
+  printf '%s\n' "$line" > "$payload"
+  : > "$empty"
+  payload_bytes=$(LC_ALL=C wc -c < "$payload" | tr -d '[:space:]')
+  payload_hash=$(sha256_file "$payload") || fail "could not hash remote delta payload"
+  empty_hash=$(sha256_file "$empty") || fail "could not hash empty remote delta prefix"
+  {
+    printf 'schema=fm-remote-delta.v1\n'
+    printf 'status=delta\n'
+    printf 'path=state/parent-replies.status\n'
+    printf 'from_offset=0\n'
+    printf 'to_offset=%s\n' "$payload_bytes"
+    printf 'from_prefix_sha256=%s\n' "$empty_hash"
+    printf 'to_prefix_sha256=%s\n' "$payload_hash"
+    printf 'payload_sha256=%s\n' "$payload_hash"
+    printf 'payload_bytes=%s\n' "$payload_bytes"
+    printf 'reason=fixture\n\n'
+    cat "$payload"
+  } > "$result"
+  rm -f -- "$payload" "$empty"
+}
+
 ADAPTER="$ROOT/bin/fm-procevent-remote-reply.sh"
 SID=$(remote_env "$ADAPTER" source-id ios)
 out=$(remote_env "$ADAPTER" arm ios)
@@ -103,8 +128,17 @@ if [ -z "$RESULT" ]; then
   fail "the remote reply delta was not durably captured"
 fi
 assert_grep 'done [corr=0123456789abcdef]' "$RESULT" "captured delta lost the correlated status line"
-assert_grep "procevent remote-reply $SID 1" "$PARENT/state/.wake-queue" "runner did not publish the normalized remote-reply event"
-assert_no_grep 'build verified' "$PARENT/state/.wake-queue" "reply payload leaked into the event queue"
+# One remote note, one announcement: the adapter declares self-announcing, so a
+# fully autohandled capture publishes NO check wake - the mirrored status bytes
+# are the single announcement, observed here through the same signature-vs-seen
+# gate the watcher's signal scan and the drain's annotation check consume.
+if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID 1" "$PARENT/state/.wake-queue"; then
+  fail "an autohandled remote-reply capture still published a duplicate check wake"
+fi
+FM_STATE_OVERRIDE="$PARENT/state" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_wake_signal_seen_current "$2/state" "$2/state/ios.status"
+' _ "$ROOT" "$PARENT" && fail "the mirrored reply bytes are not visible to the watcher signal scan"
 cmp -s "$SOURCE_BEFORE" "$REMOTE/state/parent-replies.status" \
   && fail "fixture did not append the expected source line"
 SOURCE_AFTER="$TMP_ROOT/source-after"
@@ -122,6 +156,36 @@ assert_present "$PARENT/state/procevent-inbox/$SID.1.handled" \
 assert_present "$PARENT/state/procevent/$SID.source" \
   "applying the capture left the relay unarmed for the next delta"
 pass "a captured delta is applied, acknowledged, and re-armed without a handler"
+
+TIMING_BIN="$TMP_ROOT/timing-bin"
+TIMING_RESULT="$TMP_ROOT/timing.result"
+TIMING_FAIL_ONCE="$TMP_ROOT/timing-transition-failed"
+cp -R "$ROOT/bin" "$TIMING_BIN"
+write_delta_result "$TIMING_RESULT" 'done: timing retry fixture'
+printf '%s\n' 'kind=ship' > "$PARENT/state/timing.meta"
+cat > "$TIMING_BIN/fm-dashboard-transition.sh" <<EOF
+#!/usr/bin/env bash
+if [ ! -e "$TIMING_FAIL_ONCE" ]; then
+  : > "$TIMING_FAIL_ONCE"
+  exit 1
+fi
+exec "$ROOT/bin/fm-dashboard-transition.sh" "\$@"
+EOF
+chmod +x "$TIMING_BIN/fm-dashboard-transition.sh"
+set +e
+remote_env "$TIMING_BIN/fm-procevent-remote-reply.sh" ingest timing "$TIMING_RESULT" > "$TMP_ROOT/timing-first.out" 2>&1
+timing_rc=$?
+set -e
+[ "$timing_rc" -ne 0 ] || fail "failed dashboard transition accepted a remote status"
+assert_absent "$PARENT/state/timing.status" "failed dashboard transition wrote a remote status"
+assert_absent "$PARENT/state/dashboard-transitions/timing.json" "failed dashboard transition wrote timing state"
+remote_env "$TIMING_BIN/fm-procevent-remote-reply.sh" ingest timing "$TIMING_RESULT" > "$TMP_ROOT/timing-retry.out" 2>&1 \
+  || fail "remote status retry did not recover after transition failure"
+assert_contains "$(cat "$TMP_ROOT/timing-retry.out")" 'ingested: timing appended=1' "remote retry did not accept its status"
+assert_grep 'done: timing retry fixture' "$PARENT/state/timing.status" "remote retry did not append its status"
+jq -e '.state == "done" and (.transition_at | type == "number")' "$PARENT/state/dashboard-transitions/timing.json" >/dev/null \
+  || fail "remote retry did not persist canonical timing"
+pass "remote status retries persist timing before accepting the status"
 
 # Now the handler's own retry path, from the state a crash between applying and
 # acknowledging leaves behind: the acknowledgement is gone and re-arming fails.
@@ -304,6 +368,12 @@ remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
 RESULT_EIGHT="$PARENT/state/procevent-inbox/$SID.8.result"
 assert_absent "$PARENT/state/procevent-inbox/$SID.8.handled" \
   "a capture whose automatic application failed was acknowledged anyway"
+# The self-announcing declaration never silences a capture the adapter could
+# NOT fully apply: this one must still publish its check wake for the handler.
+assert_grep "procevent remote-reply $SID 8" "$PARENT/state/.wake-queue" \
+  "a not-fully-applied capture lost its check-wake announcement"
+assert_no_grep 'retry local storage' "$PARENT/state/.wake-queue" \
+  "reply payload leaked into the event queue"
 retry_cursor_before=$(cat "$PARENT/state/remote-replies/ios.cursor")
 set +e
 remote_env "$ADAPTER" handle ios 8 "$RESULT_EIGHT" > "$TMP_ROOT/handle-local-document-failure.out" 2>&1
@@ -385,6 +455,38 @@ assert_not_contains "$(status_open_decisions "$PARENT/state/ios.status")" \
 unset FM_PENDING_REPLY_GRACE_SECS
 pass "a reply that arrives after escalation resolves it and clears the open decision"
 
+# The observed already-handled replay class: a lost cursor (an update or
+# convergence retire) makes the next armed source recapture the WHOLE remote
+# log from offset 0. Every line is already mirrored, so the at-most-once
+# append adds no bytes, the adapter acknowledges the generation, and the
+# self-announcing runner publishes nothing - the replay stays completely
+# quiet, observed through the same seen-signature gate the watcher consumes.
+FM_STATE_OVERRIDE="$PARENT/state" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  sig=$(fm_wake_signal_sig "$2/state/ios.status") || exit 1
+  printf "%s" "$sig" > "$(fm_wake_signal_seen_path "$2/state" "$2/state/ios.status")"
+' _ "$ROOT" "$PARENT" || fail "could not prime the seen marker for the replay leg"
+cp "$PARENT/state/ios.status" "$TMP_ROOT/ios-status-before-replay"
+mv "$PARENT/state/.wake-queue" "$TMP_ROOT/wake-queue-before-replay" 2>/dev/null || true
+rm -f "$PARENT/state/remote-replies/ios.cursor"
+remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" >/dev/null 2>&1 \
+  || fail "the cursor-loss recapture was not captured"
+assert_present "$PARENT/state/procevent-inbox/$SID.11.handled" \
+  "the whole-log recapture was not acknowledged by the adapter"
+cmp -s "$TMP_ROOT/ios-status-before-replay" "$PARENT/state/ios.status" \
+  || fail "the whole-log recapture duplicated already-mirrored lines"
+if [ -e "$PARENT/state/.wake-queue" ] && grep -q "procevent remote-reply $SID 11" "$PARENT/state/.wake-queue"; then
+  fail "an already-mirrored recapture still published a check wake"
+fi
+FM_STATE_OVERRIDE="$PARENT/state" bash -c '
+  . "$1/bin/fm-wake-lib.sh"
+  fm_wake_signal_seen_current "$2/state" "$2/state/ios.status"
+' _ "$ROOT" "$PARENT" || fail "a byte-identical recapture left unannounced status bytes behind"
+replay_offset=$(LC_ALL=C wc -c < "$REMOTE/state/parent-replies.status" | tr -d ' ')
+assert_grep "offset=$replay_offset" "$PARENT/state/remote-replies/ios.cursor" \
+  "the recapture did not rebuild the lost cursor"
+pass "a cursor-loss whole-log recapture is acknowledged quietly with no duplicate wake"
+
 # The adapter re-armed at the committed cursor. Truncation is detected from the
 # next blocking source and escalated once; it is never silently treated as a new
 # log or re-armed past the break.
@@ -392,23 +494,23 @@ printf 'failed [corr=fedcba9876543210]: source was replaced\n' > "$REMOTE/state/
 remote_env "$ROOT/bin/fm-procevent.sh" start "$SID" > "$TMP_ROOT/start-two.out" 2>&1 &
 RUNNER=$!
 wait "$RUNNER" || fail "continuity break was not captured as a structured result"
-RESULT_ELEVEN=$(find "$PARENT/state/procevent-inbox" -name "$SID.11.result" -print -quit)
-[ -n "$RESULT_ELEVEN" ] || fail "continuity break produced no durable result"
-[ "$(remote_env "$ADAPTER" classify "$RESULT_ELEVEN")" = continuity-broken ] \
+RESULT_TWELVE=$(find "$PARENT/state/procevent-inbox" -name "$SID.12.result" -print -quit)
+[ -n "$RESULT_TWELVE" ] || fail "continuity break produced no durable result"
+[ "$(remote_env "$ADAPTER" classify "$RESULT_TWELVE")" = continuity-broken ] \
   || fail "truncated source was not classified as a continuity break"
 set +e
-remote_env "$ADAPTER" handle ios 11 "$RESULT_ELEVEN" > "$TMP_ROOT/handle-nine.out" 2>&1
+remote_env "$ADAPTER" handle ios 12 "$RESULT_TWELVE" > "$TMP_ROOT/handle-nine.out" 2>&1
 handle_rc=$?
 set -e
 [ "$handle_rc" -eq 3 ] || fail "continuity handling returned an unexpected status: $handle_rc"
 assert_grep 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status" "continuity break did not escalate"
 assert_absent "$PARENT/state/procevent/$SID.source" "continuity break was re-armed without an operator rebase"
-remote_env "$ADAPTER" ingest ios "$RESULT_ELEVEN" >/dev/null 2>&1 || true
+remote_env "$ADAPTER" ingest ios "$RESULT_TWELVE" >/dev/null 2>&1 || true
 [ "$(grep -cF 'blocked [key=remote-reply-continuity-ios]' "$PARENT/state/ios.status")" -eq 1 ] \
   || fail "continuity replay duplicated the escalation"
 pass "truncation is detected, escalated once, and not silently rebased"
 
-rm -f "$PARENT/state/procevent-inbox/$SID.11.handled"
+rm -f "$PARENT/state/procevent-inbox/$SID.12.handled"
 if remote_env "$ADAPTER" retire ios > "$TMP_ROOT/retire-pending.out" 2>&1; then
   fail "remote reply retirement accepted an unhandled captured result"
 fi
@@ -416,7 +518,7 @@ assert_grep 'unhandled captured result' "$TMP_ROOT/retire-pending.out" \
   "remote reply retirement did not explain its pending-result refusal"
 assert_absent "$PARENT/state/procevent/$SID.source" \
   "refused retirement left the reply source running past its pending-result check"
-remote_env "$ADAPTER" handle ios 11 "$RESULT_ELEVEN" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
+remote_env "$ADAPTER" handle ios 12 "$RESULT_TWELVE" >/dev/null 2>&1 || [ "$?" -eq 3 ] \
   || fail "pending continuity result could not be acknowledged after retirement refusal"
 remote_env "$ADAPTER" retire ios >/dev/null
 assert_absent "$PARENT/state/remote-replies/ios.cursor" "adapter retirement left its cursor"

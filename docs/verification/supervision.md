@@ -64,8 +64,8 @@ The third is recorded below.
 Two harness-specific consequences are load-bearing rather than incidental.
 
 Codex's interactive TUI fired no project `SessionStart` hook at all in the same lab where `codex exec` fired it reliably, which matches the earlier 2026-07-28 finding for 0.145.0.
-Codex's run tier is therefore verified only for `codex exec`.
-The interactive TUI remains on the tracked nudge floor through `AGENTS.md` and the Ahoy fallback; Firstmate ships no global hook and does not depend on one.
+Codex's run tier is therefore verified only for `codex exec` startup and context-preserving resume.
+The interactive TUI is a known uncovered gap: Firstmate has no tracked session-open, compaction, or re-emit channel there, ships no global hook, and does not claim instruction-refresh delivery for that surface.
 
 Pi compaction was verified on 2026-08-05 with Pi 0.82.0 in the same throwaway lab after setting `.pi/settings.json` `compaction.keepRecentTokens` to 200 and completing one substantial assistant-prose turn before issuing `/compact`.
 Pi reported `Compacted from 7,697 tokens`, the recorder observed `session_compact`, and the model quoted the freshly injected `source=compact` token back.
@@ -79,8 +79,34 @@ Compacted from 7,697 tokens
 compact
 ```
 
-Pi disagrees with Claude and Codex on `resume`: a NEW Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
-That is correct for the run tier rather than a problem, because a new process holds no lock and must take the helm; the routing table in [`../sessionstart-nudge.md`](../sessionstart-nudge.md#source-routing) is written to whichever source each harness actually reports.
+Pi disagrees with Claude and Codex on `resume`: a new Pi process continuing a session reports `startup`, and Pi's `resume` reason is reserved for an in-process session switch.
+The current adapter classification and baseline mechanics are owned by [`../sessionstart-nudge.md`](../sessionstart-nudge.md#harness-transports) and the `bin/fm-session-start.sh` header.
+Their continuation classification is covered by portable tests, not claimed as live validation in this record.
+
+### Post-start instruction refresh
+
+The isolated real-Pi instruction-refresh regression ran on 2026-08-11 with Pi 0.84.0.
+It used a scratch `FM_HOME`, a private tmux socket, and a disposable Firstmate checkout.
+The historical `origin/main` implementation first reproduced the stale original marker after a real compaction.
+The current implementation then recorded `source=startup`, changed and committed the lab's `AGENTS.md`, compacted the same real Pi session, and answered with the replacement marker.
+The fixed run also proved that the true-start baseline remained different from the updated file after compaction.
+
+```sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_REF=origin/main \
+FM_SESSIONSTART_INSTRUCTION_REFRESH_EXPECT=stale \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 reproduces stale AGENTS.md after a real compact
+
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 \
+tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
+# ok - Pi 0.84.0 re-injects updated AGENTS.md after a real compact in an isolated session
+```
+
+This is live coverage only for Pi compaction.
+The portable session-start tests cover continuation classification, baseline immutability, and source-routing behavior.
+Pi compaction is the only supported stale-cache refresh pair.
+Codex exec exposes only startup and context-preserving resume through tracked registration; Codex interactive reset behavior remains uncovered rather than inferred from direct wrapper invocation.
 
 ### Detached session-open workers survive the hook
 
@@ -121,7 +147,7 @@ SECONDMATE_SYNC: secondmate ios: skipped: remote inheritance failed on remote-ma
 
 The unreachable route was preserved rather than relaunched in both runs, and the result surfaced durably as a queued `check: startup-network` wake once the worker finished.
 
-Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for every installed run-tier harness and is the command that refreshes this record.
+Codex and Pi were not installed as run-tier labs in this measurement, so their evidence for this fact is NOT refreshed; `tests/fm-sessionstart-hook-live-e2e.test.sh` asserts it for each installed Claude, Codex exec, and Pi adapter and is the command that refreshes their record.
 A harness that did reap the worker degrades loudly rather than silently: the leftover record reads as an abandoned run needing a rerun, and the next session start re-derives every finding, because these sweeps are idempotent detectors.
 
 Current deterministic and live entry points:
@@ -131,12 +157,13 @@ tests/fm-sessionstart-nudge.test.sh
 tests/fm-session-start.test.sh
 tests/fm-startup-network.test.sh
 FM_SESSIONSTART_HOOK_LIVE_E2E=1 tests/fm-sessionstart-hook-live-e2e.test.sh
+FM_SESSIONSTART_INSTRUCTION_REFRESH_LIVE_E2E=1 tests/fm-sessionstart-instruction-refresh-live-e2e.test.sh
 FM_PI_LIVE_E2E=1 tests/fm-pi-primary-live-e2e.test.sh
 FM_OPENCODE_LIVE_E2E=1 tests/fm-opencode-primary-live-e2e.test.sh
 ```
 
-`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the table above; run it after every run-tier harness upgrade.
-It reports an absent harness explicitly, asserts Pi compaction rather than noting it, and refuses to pass when no run-tier harness was installed at all.
+`tests/fm-sessionstart-hook-live-e2e.test.sh` is the command that refreshes the Claude, Codex exec, and Pi table above; run it after upgrading any of those harnesses.
+It reports an absent adapter explicitly, asserts Pi compaction rather than noting it, and refuses to pass when none of those three adapters was installed.
 
 The Ahoy first-message boundary was reverified on 2026-07-22 with Pi 0.81.1 and OpenCode 1.17.18.
 Marked current operational input and the two exact legacy compatibility shapes selected Bearings, while genuine near-miss captain messages remained real boundaries.
@@ -178,7 +205,7 @@ tests/fm-crew-state.test.sh
 
 ## Turn-end guard
 
-The direct and passive mechanisms were validated across all five harnesses on 2026-07-08 through 2026-07-12, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
+The blocking and bounded-follow-up mechanisms were validated across the supported primary harnesses on 2026-07-08 through 2026-08-13, with Claude's replacement Stop-owned path revalidated on 2026-07-24.
 
 | Harness | Version verified | Mechanism | Observed result |
 | --- | --- | --- | --- |
@@ -187,7 +214,6 @@ The direct and passive mechanisms were validated across all five harnesses on 20
 | OpenCode | 1.17.6 | Passive `session.idle` callback | Throwing could not block, while `promptAsync` scheduled one TUI follow-up; headless remained fail-open. |
 | Pi | 0.80.5 | Passive `agent_settled` callback | Exactly one guard follow-up ran for an unhealthy cycle, with no recursion across tool turns. |
 | Grok | 0.2.112 native and 0.2.73 pre-native | Running-payload adaptive `Stop` | Native false-to-true continuation stayed in one process with two model turns and zero resume launches; the field-absent pre-native process launched exactly one guarded resume. |
-
 The Grok adaptive matrix ran on 2026-07-28 with separate scratch repositories and homes, dedicated tmux sockets, one target plus one control window, ambient tmux variables removed, and a socket-bound wrapper first in `PATH`.
 
 ```sh
@@ -216,7 +242,7 @@ Harness identity is read from the executable path and `argv[0]` as well as the c
 `tests/fm-session-lock-ancestry.test.sh` pins both platforms' reporting semantics behind a deterministic process table and runs the real Stop auto-arm in version-named, daemon-parented, and combined real process trees.
 `tests/fm-watch-arm.test.sh` runs real watcher and arm cycles against durable on-disk state to verify that a delivered reason survives until post-handling acknowledgement and stops replaying after acknowledgement, while an unrelated queue append cannot make a watcher cycle that delivered nothing look successful.
 The same suite ingests a keyed remote-secondmate parent reply through the real adapter, establishes the incremental OPEN DECISIONS cursor, interrupts supervision, and proves re-arm replays every unacknowledged queue row plus the still-open decision through the ordinary drain path.
-It also covers decision-only recovery, interrupted handling, stale acknowledgement rejection, and a persistent successor remaining live after recovery is acknowledged.
+It also covers decision-only recovery, interrupted handling, handling-window generation reuse, non-fatal moved-generation acknowledgement with sequence-bounded consumption, and a persistent successor remaining live after recovery is acknowledged.
 
 The Claude product live path ran with Claude Code 2.1.219 on 2026-07-24:
 
@@ -271,6 +297,42 @@ Observed output:
 fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
 fm-doc-audience-check: ok surfaces=64 local_links=188
 FM_TEST_SUMMARY total=4 failed=0 skipped_gate=0 duration_ms=80078
+```
+
+The Pi extension-model pull-guard correction (`bin/fm-guard.sh` no longer reports a false watcher-down on a Pi primary during the extension's own watcher hand-off) was verified on 2026-08-13 with the installed ShellCheck 0.11.0 and isolated behavior suites.
+The guard verdict itself reads only state files and process liveness, so the portable suites are the enforcing evidence; `bin/fm-harness.sh`'s Pi marker detection, which selects the model, is exercised in the same suite through `PI_CODING_AGENT`.
+
+```sh
+bin/fm-lint.sh
+bin/fm-doc-audience-check.sh
+bin/fm-test-run.sh tests/fm-guard-stale-banner.test.sh tests/fm-turnend-guard.test.sh tests/fm-session-start.test.sh tests/fm-pi-watch-extension.test.sh tests/fm-watch-arm.test.sh
+```
+
+Observed output:
+
+```text
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+fm-doc-audience-check: ok surfaces=67 local_links=243
+FM_TEST_SUMMARY total=5 failed=0 skipped_gate=0 duration_ms=280160
+```
+
+The same correction was verified against a live Pi primary's own supervision evidence on 2026-08-13.
+The hand-off was captured live at beacon age 63s, then the home's `state/.lock`, `state/.last-watcher-beat`, both `state/.pi-*-extension-loaded` markers, and both `.pi/extensions/*.ts` builds were copied into an isolated fixture with no watcher lock.
+The fixture's copied beacon was fresh at 0s in the output below; the deterministic stale-beacon case separately verifies the grace boundary.
+
+```sh
+FM_SUPERVISION_MODEL=persistent FM_GUARD_READ_ONLY=1 bin/fm-guard.sh
+FM_SUPERVISION_MODEL=extension FM_GUARD_READ_ONLY=1 bin/fm-guard.sh
+```
+
+Observed output, before and after the model correction, then with the recorded Pi session pid replaced by a dead one:
+
+```text
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
+(silent)
+●  WATCHER DOWN - SUPERVISION IS OFF
+●  1 task(s) in flight, but no live watcher process holds this home lock (last beat: 0s ago).
 ```
 
 The broader relevant regression pass was rerun on 2026-08-02 without live-home or daemon mutation.

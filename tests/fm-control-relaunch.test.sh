@@ -24,6 +24,8 @@ set -u
 # shellcheck source=/dev/null
 . "$ROOT/bin/fm-control-lib.sh"
 # shellcheck source=/dev/null
+. "$ROOT/bin/fm-busy-lib.sh"
+# shellcheck source=/dev/null
 . "$ROOT/bin/fm-trace-context-lib.sh"
 
 CONTROL="$ROOT/bin/fm-control.sh"
@@ -77,12 +79,18 @@ case "${1:-}" in
           ;;
         *'encode launch-brief'*)
           cat "$D/becomes" > "$D/command"
+          [ -z "${FM_FAKE_TERMINAL_STATUS:-}" ] || printf '%s\n' 'done: terminal status raced recovery submission' > "$FM_FAKE_TERMINAL_STATUS"
           [ -z "${FM_FAKE_LAUNCH_TRANSPORT_FAIL_AFTER_START:-}" ] || exit 1
           ;;
       esac
     else
       printf '%s\n' "$payload" >> "$D/keys"
       case "$payload" in
+        Enter)
+          if [ -n "${FM_FAKE_DASHBOARD_STATE:-}" ]; then
+            jq -r '.state // "absent"' "$FM_FAKE_DASHBOARD_STATE" > "$D/dashboard-state-on-enter"
+          fi
+          ;;
         'export GOTMPDIR='*)
           if [ -n "${FM_FAKE_TRACE_PREPARE:-}" ]; then
             : > "$FM_FAKE_TRACE_PREPARE"
@@ -101,8 +109,10 @@ case "${1:-}" in
         *cursor_y*) printf '1\n'; exit 0 ;;
         *pane_current_command*) cat "$D/command"; printf '\n'; exit 0 ;;
         *pane_current_path*)
-          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ]; then
+          if [ -n "${FM_FAKE_CWD_RACE_READY:-}" ] \
+             && [ ! -e "${FM_FAKE_CWD_RACE_READY}.released" ]; then
             : > "$FM_FAKE_CWD_RACE_READY"
+            : > "${FM_FAKE_CWD_RACE_READY}.released"
             /bin/sleep 1
           fi
           cat "$D/cwd"; printf '\n'; exit 0 ;;
@@ -111,6 +121,8 @@ case "${1:-}" in
     printf 'fakepane\n'; exit 0 ;;
   capture-pane) printf '╭────╮\n│    │\n╰────╯\n'; exit 0 ;;
   list-windows) [ -f "$D/windows" ] && cat "$D/windows"; exit 0 ;;
+  new-window) printf '@1\n'; exit 0 ;;
+  kill-window) printf '%s\n' "$*" >> "$D/killed"; exit 0 ;;
 esac
 exit 0
 SH
@@ -120,6 +132,30 @@ SH
 exit 0
 SH
   chmod +x "$fb/sleep"
+}
+
+make_recovery_busy_probe() {  # <case-dir>
+  local root="$1/fm-root"
+  mkdir -p "$root/bin"
+  cat > "$root/bin/fm-busy-event.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+if [ "${1:-}" = apply ] && [ "${10:-}" = replacement-start ]; then
+  if [ -d "$2/dashboard-transitions/$3.lock" ]; then
+    printf 'locked\n' > "$FM_BUSY_LOCK_PROBE"
+  else
+    printf 'unlocked\n' > "$FM_BUSY_LOCK_PROBE"
+  fi
+  "$FM_REAL_BUSY_EVENT" "$@"
+  rc=$?
+  if [ -n "${FM_BUSY_DELAY_AFTER_REPLACEMENT_START:-}" ]; then
+    /bin/sleep "$FM_BUSY_DELAY_AFTER_REPLACEMENT_START"
+  fi
+  exit "$rc"
+fi
+exec "$FM_REAL_BUSY_EVENT" "$@"
+SH
+  chmod +x "$root/bin/fm-busy-event.sh"
 }
 
 # new_case <name> [id] -> echoes a case dir with a live claude ship task.
@@ -137,11 +173,25 @@ new_case() {
 
 # add_ship_task <case-dir> <id> [harness]
 add_ship_task() {
-  local dir=$1 id=$2 harness=${3:-claude}
+  local dir=$1 id=$2 harness=${3:-claude} contract bound fingerprint now
   local home="$dir/home" proj="$dir/proj" wt="$dir/wt"
   fm_git_worktree "$proj" "$wt" "task-$id"
   mkdir -p "$home/data/$id"
+  chmod 755 "$home/data"
+  chmod 700 "$home/data/$id"
   printf '# brief for %s\n\nDo the thing.\n' "$id" > "$home/data/$id/brief.md"
+  contract='{"recommendation":"Continue approved work","outcome":"A tested PR","scope":"Recorded task work","non_goals":"No deploy","delivery_boundary":"PR only","external_boundaries":"No production write","questions":[],"complete_plan_approved":false}'
+  bound=$(jq -cn --arg id "$id" --argjson contract "$contract" '{task_id:$id,contract:$contract}' | jq -cS .) || fail "could not create preflight binding"
+  if command -v sha256sum >/dev/null 2>&1; then
+    fingerprint=$(printf '%s' "$bound" | sha256sum | awk '{print $1}')
+  else
+    fingerprint=$(printf '%s' "$bound" | shasum -a 256 | awk '{print $1}')
+  fi
+  now=$(date +%s)
+  jq -n --arg id "$id" --arg fp "$fingerprint" --argjson contract "$contract" --argjson now "$now" \
+    '{schema_version:1,workflow:"ship-end-to-end",task_id:$id,fingerprint:$fp,origin:"direct",state:"approved",contract:$contract,producer_revision:1,approval:{authority:"direct-captain",evidence:"direct-captain",approved_at:$now,complete_plan_bypass:false}}' \
+    > "$home/data/$id/ship-preflight.json" || fail "could not create approved preflight record"
+  chmod 600 "$home/data/$id/ship-preflight.json"
   {
     echo "window=fmses:fm-$id"
     echo "endpoint_task_id=$id"
@@ -154,6 +204,7 @@ add_ship_task() {
     echo "tasktmp=/tmp/fm-$id"
     echo "model=default"
     echo "effort=default"
+    echo "preflight_fingerprint=$fingerprint"
   } > "$home/state/$id.meta"
   printf '%s\n' "fm-$id" > "$dir/fake/windows"
   printf '%s' "$wt" > "$dir/fake/cwd"
@@ -371,7 +422,7 @@ test_disabled_relaunch_clears_prior_trace_context() {
   expect_code 0 "$rc" "disabled relaunch should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl33 traceparent)" ] \
     || fail "disabled relaunch must remove the prior trace carrier from metadata"
-  grep -q '^unset TRACEPARENT; .*claude' "$dir/fake/literal" \
+  grep -q 'unset TRACEPARENT; .*claude' "$dir/fake/literal" \
     || fail "disabled relaunch must clear the pane carrier before replacement launch"
   ! grep -q '^export TRACEPARENT=' "$dir/fake/literal" \
     || fail "disabled relaunch must not export a replacement trace carrier"
@@ -771,93 +822,6 @@ test_ship_relaunch_ignores_the_crew_harness_config() {
   pass "fm-control relaunch: a ship task keeps its recorded harness instead of re-reading crew config"
 }
 
-# Fast Repair's profile is part of its delivery contract, so the recovery command
-# for a wedged Fast Repair crewmate must work with no profile flags, exactly as it
-# does for the recorded harness above.
-test_spawn_relaunch_reuses_a_fast_repair_profile() {
-  local dir out status meta
-  dir=$(new_case fastrepairprofile rl40)
-  add_ship_task "$dir" rl40 codex
-  meta="$dir/home/state/rl40.meta"
-  sed -e 's/^mode=.*/mode=fast-repair/' \
-      -e 's/^model=.*/model=gpt-5.6-luna/' \
-      -e 's/^effort=.*/effort=medium/' "$meta" > "$meta.tmp"
-  printf 'fast_repair=eligible\n' >> "$meta.tmp"
-  mv -f "$meta.tmp" "$meta"
-  printf 'Delivery contract: mode=fast-repair\n' > "$dir/home/data/rl40/brief.md"
-  git -C "$dir/wt" commit --quiet --allow-empty -m 'repair fixture head'
-  FM_HOME="$dir/home" "$ROOT/bin/fm-fast-repair.sh" intake rl40 \
-    --request 'fast-repair: fixture' --reproduction reproduced --reproduction-revision "$(git -C "$dir/wt" rev-parse HEAD~1)" --root-cause confirmed \
-    --isolation isolated --schema none --authentication none --authorization none \
-    --secrets none --financial none --legal none --side-effects none >/dev/null \
-    || fail "the Fast Repair eligibility fixture could not be recorded"
-  printf 'zsh' > "$dir/fake/command"
-
-  out=$(run_spawn "$dir" rl40 --relaunch)
-  status=$?
-  [ "$status" -eq 0 ] || fail "a Fast Repair relaunch needed profile flags it never had to pass: $out"
-  [ "$(meta_field "$dir" rl40 model)" = gpt-5.6-luna ] \
-    || fail "a Fast Repair relaunch lost its recorded model, got '$(meta_field "$dir" rl40 model)'"
-  [ "$(meta_field "$dir" rl40 effort)" = medium ] \
-    || fail "a Fast Repair relaunch lost its recorded effort, got '$(meta_field "$dir" rl40 effort)'"
-  [ "$(meta_field "$dir" rl40 mode)" = fast-repair ] \
-    || fail "a Fast Repair relaunch lost its delivery mode"
-  pass "fm-spawn --relaunch: a Fast Repair task reuses its recorded profile with no flags"
-}
-
-# The dispatch-time reproduction proof asserts a PRISTINE worktree still sitting
-# on the reproduction commit, which is only true before the crewmate branches,
-# edits, and commits. Recovering a wedged Fast Repair crewmate always happens
-# after that, so the recovery must adopt the worktree with its unlanded repair
-# intact instead of refusing it for being dirty - while the authorization that
-# made the task a Fast Repair in the first place stays mandatory.
-test_spawn_relaunch_preserves_unlanded_fast_repair_work() {
-  local dir out status meta
-  dir=$(new_case fastrepairdirty rl41)
-  add_ship_task "$dir" rl41 codex
-  meta="$dir/home/state/rl41.meta"
-  sed -e 's/^mode=.*/mode=fast-repair/' \
-      -e 's/^model=.*/model=gpt-5.6-luna/' \
-      -e 's/^effort=.*/effort=medium/' "$meta" > "$meta.tmp"
-  printf 'fast_repair=eligible\n' >> "$meta.tmp"
-  mv -f "$meta.tmp" "$meta"
-  printf 'Delivery contract: mode=fast-repair\n' > "$dir/home/data/rl41/brief.md"
-  git -C "$dir/wt" commit --quiet --allow-empty -m 'repair fixture head'
-  FM_HOME="$dir/home" "$ROOT/bin/fm-fast-repair.sh" intake rl41 \
-    --request 'fast-repair: fixture' --reproduction reproduced --reproduction-revision "$(git -C "$dir/wt" rev-parse HEAD~1)" --root-cause confirmed \
-    --isolation isolated --schema none --authentication none --authorization none \
-    --secrets none --financial none --legal none --side-effects none >/dev/null \
-    || fail "the Fast Repair eligibility fixture could not be recorded"
-
-  # What a wedged crewmate leaves behind: its own branch, a landed repair commit,
-  # and edits it never got to commit.
-  git -C "$dir/wt" checkout --quiet -b fm/rl41
-  printf 'repaired\n' > "$dir/wt/repair.txt"
-  git -C "$dir/wt" add -- repair.txt
-  git -C "$dir/wt" commit --quiet -m 'repair the reported defect'
-  printf 'still editing\n' >> "$dir/wt/repair.txt"
-  printf 'zsh' > "$dir/fake/command"
-
-  out=$(run_spawn "$dir" rl41 --relaunch)
-  status=$?
-  [ "$status" -eq 0 ] || fail "the stuck-crewmate recovery was refused for a Fast Repair worktree holding unlanded work: $out"
-  [ "$(git -C "$dir/wt" rev-parse --abbrev-ref HEAD)" = fm/rl41 ] \
-    || fail "the relaunch moved the Fast Repair task off its own branch"
-  [ "$(cat "$dir/wt/repair.txt")" = "$(printf 'repaired\nstill editing')" ] \
-    || fail "the relaunch discarded the crewmate's uncommitted repair work"
-  [ "$(meta_field "$dir" rl41 mode)" = fast-repair ] \
-    || fail "the relaunch lost the Fast Repair delivery mode"
-
-  # The dirty worktree is forgiven; a missing authorization is not.
-  rm -f "$dir/home/data/rl41/fast-repair-eligibility"
-  printf 'zsh' > "$dir/fake/command"
-  out=$(run_spawn "$dir" rl41 --relaunch)
-  status=$?
-  [ "$status" -ne 0 ] || fail "a relaunch launched a Fast Repair task whose eligibility evidence is gone"
-  assert_contains "$out" 'typed eligibility evidence is absent or incomplete' \
-    "the unauthorized-relaunch refusal was not actionable"
-  pass "fm-spawn --relaunch: a Fast Repair recovery keeps unlanded work but still requires its authorization"
-}
 
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one() {
   local dir out
@@ -916,6 +880,89 @@ test_muse_session_binding_is_retired_on_a_harness_switch() {
   [ ! -e "$dir/home/state/rl31.muse-session-current" ] \
     || fail "the retired muse incarnation's resolved session pin must not outlive it"
   pass "fm-spawn --relaunch: switching away from muse retires its session binding"
+}
+
+test_cursor_session_binding_is_retired_on_a_harness_switch() {
+  local dir
+  dir=$(new_case cursorwiring rl35)
+  add_ship_task "$dir" rl35 cursor
+  printf 'workspace=%s\nprior_conversation=old-conversation\n' "$dir/wt" \
+    > "$dir/home/state/rl35.cursor-session"
+  printf 'zsh' > "$dir/fake/command"
+  run_spawn "$dir" rl35 --relaunch --harness claude >/dev/null
+  [ ! -e "$dir/home/state/rl35.cursor-session" ] \
+    || fail "the retired cursor incarnation's session binding must not outlive it"
+  pass "fm-spawn --relaunch: switching away from cursor retires its session binding"
+}
+
+test_spawn_relaunch_refuses_a_legacy_ship_without_a_preflight_record() {
+  local dir out rc meta
+  dir=$(new_case legacy-preflight rl36)
+  add_ship_task "$dir" rl36 claude
+  meta="$dir/home/state/rl36.meta"
+  sed '/^preflight_fingerprint=/d' "$meta" > "$meta.legacy" \
+    && mv "$meta.legacy" "$meta" || fail "could not prepare legacy task metadata"
+  rm -f "$dir/home/data/rl36/ship-preflight.json"
+  cp "$meta" "$dir/rl36.meta.before" || fail "could not preserve legacy task metadata"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl36 --relaunch); rc=$?
+  expect_code 1 "$rc" "a legacy ship relaunch without a workflow record must refuse"
+  assert_contains "$out" "no valid recorded preflight fingerprint" \
+    "legacy ship refusal did not name its missing approval fingerprint"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "legacy ship recovery launched a replacement without approval"
+  cmp -s "$meta" "$dir/rl36.meta.before" \
+    || fail "legacy ship refusal changed its task metadata"
+  [ ! -e "$dir/home/data/rl36/ship-preflight.json" ] \
+    || fail "legacy recovery must not invent a ship workflow record"
+  ! grep -q '^preflight_fingerprint=' "$meta" \
+    || fail "legacy recovery must not invent a preflight fingerprint"
+  pass "fm-spawn --relaunch: legacy ships require approved workflow records"
+}
+
+test_spawn_recovers_a_legacy_missing_ship_requires_a_preflight_record() {
+  local dir out rc meta
+  dir=$(new_case legacy-missing-preflight rl37)
+  add_ship_task "$dir" rl37 claude
+  meta="$dir/home/state/rl37.meta"
+  sed '/^preflight_fingerprint=/d' "$meta" > "$meta.legacy" \
+    && mv "$meta.legacy" "$meta" || fail "could not prepare legacy missing task metadata"
+  rm -f "$dir/home/data/rl37/ship-preflight.json"
+  cp "$meta" "$dir/rl37.meta.before" || fail "could not preserve legacy missing task metadata"
+  : > "$dir/fake/windows"
+
+  out=$(run_spawn "$dir" rl37 --recover-missing); rc=$?
+  expect_code 1 "$rc" "a legacy missing-endpoint recovery without a workflow record must refuse"
+  assert_contains "$out" "no valid recorded preflight fingerprint" \
+    "legacy missing-endpoint refusal did not name its missing approval fingerprint"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "legacy missing-endpoint recovery launched a replacement without approval"
+  cmp -s "$meta" "$dir/rl37.meta.before" \
+    || fail "legacy missing-endpoint refusal changed its task metadata"
+  [ ! -e "$dir/home/data/rl37/ship-preflight.json" ] \
+    || fail "legacy missing-endpoint recovery must not invent a ship workflow record"
+  ! grep -q '^preflight_fingerprint=' "$meta" \
+    || fail "legacy missing-endpoint recovery must not invent a preflight fingerprint"
+  pass "fm-spawn --recover-missing: legacy ships require approved workflow records"
+}
+
+test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode() {
+  local dir out rc meta
+  dir=$(new_case unsupported-mode rl11b)
+  add_ship_task "$dir" rl11b claude
+  meta="$dir/home/state/rl11b.meta"
+  sed 's/^mode=no-mistakes$/mode=unsupported/' "$meta" > "$meta.tmp" \
+    && mv "$meta.tmp" "$meta" || fail "could not prepare an unsupported ship mode"
+  printf 'zsh' > "$dir/fake/command"
+
+  out=$(run_spawn "$dir" rl11b --relaunch); rc=$?
+  expect_code 1 "$rc" "an unsupported recorded ship mode should refuse"
+  assert_contains "$out" "unsupported recorded ship mode" \
+    "the refusal should identify the unsupported recorded mode"
+  [ -z "$(cat "$dir/fake/literal")" ] \
+    || fail "an unsupported recorded ship mode must not launch a replacement agent"
+  pass "fm-spawn --relaunch: unsupported recorded ship modes refuse before launch"
 }
 
 # --- 3 and 4. refusals before the agent is touched ---------------------------
@@ -1304,7 +1351,263 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock() {
   assert_contains "$out" "another lifecycle action is already running" \
     "direct relaunch spawn should name lifecycle contention"
   [ -z "$(cat "$dir/fake/literal")" ] || fail "contended direct relaunch spawn must deliver no launch bytes"
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_try_acquire "$lock" || exit 1
+    sleep 30
+  ) &
+  holder=$!
+  i=0
+  while [ ! -e "$lock" ] && [ "$i" -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+  done
+  [ -e "$lock" ] || fail "could not restage the lifecycle lock"
+  out=$(run_spawn "$dir" rl26 --relaunch --dashboard-recovery --harness claude); rc=$?
+  kill "$holder" 2>/dev/null || true
+  wait "$holder" 2>/dev/null || true
+  expect_code 4 "$rc" "dashboard relaunch should defer a held lifecycle lock"
+  assert_contains "$out" "another lifecycle action is already running" \
+    "dashboard relaunch should name lifecycle contention"
+  [ -z "$(cat "$dir/fake/literal")" ] || fail "contended dashboard relaunch must deliver no launch bytes"
   pass "fm-spawn relaunch: direct entry participates in lifecycle serialization"
+}
+
+test_dashboard_recovery_marks_launch_before_submit() {
+  local dir id claim out rc state root busy_probe busy_state busy_source busy_event busy_seq busy_at transition_at
+  id=rl41
+  dir=$(new_case dashboard-launch "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'dashboard_incarnation=i-dashboard-launch\n' >> "$dir/home/state/$id.meta"
+  printf 'zsh' > "$dir/fake/command"
+  make_recovery_busy_probe "$dir"
+  root="$dir/fm-root"
+  busy_probe="$dir/fake/busy-lock-at-replacement-start"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+  out=$(FM_ROOT_OVERRIDE="$root" FM_REAL_BUSY_EVENT="$ROOT/bin/fm-busy-event.sh" \
+    FM_BUSY_LOCK_PROBE="$busy_probe" FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+    FM_BUSY_DELAY_AFTER_REPLACEMENT_START=1 \
+    FM_FAKE_DASHBOARD_STATE="$dir/home/state/dashboard-transitions/$id.json" \
+    run_spawn "$dir" "$id" --relaunch --dashboard-recovery --harness claude)
+  rc=$?
+  expect_code 0 "$rc" "dashboard recovery relaunch should succeed"
+  [ "$(cat "$busy_probe")" = unlocked ] \
+    || fail "dashboard recovery held the transition lock while applying busy state"
+  state=$(cat "$dir/fake/dashboard-state-on-enter")
+  [ "$state" = working ] || fail "dashboard recovery submitted a launch before recording working state"
+  read -r busy_state busy_source busy_event busy_seq busy_at < <(fm_busy_record_read "$dir/home/state" "$id")
+  transition_at=$(jq -r '.transition_at' "$dir/home/state/dashboard-transitions/$id.json")
+  [ "$transition_at" = "$busy_at" ] \
+    || fail "dashboard recovery must retain the replacement-start timestamp"
+  pass "fm-spawn dashboard recovery records launch state before submit"
+}
+
+test_dashboard_recovery_cancellation_wins_before_submit() {
+  local dir id claim guard_dir guard lock ready continue spawn_pid status attempts
+  id=rl43
+  dir=$(new_case dashboard-cancel "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-cancel\n' >> "$dir/home/state/$id.meta"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+  guard_dir="$dir/home/state/dashboard-recovery/.${id}.cancel.test"
+  guard="$guard_dir/cancelled"
+  lock="$guard_dir/handoff.lock"
+  ready="$dir/handoff-ready"
+  continue="$dir/handoff-continue"
+  mkdir -p "$guard_dir"
+  FM_DASHBOARD_RECOVERY_CLAIM="$claim" FM_DASHBOARD_RECOVERY_CANCEL_GUARD="$guard" \
+    FM_SPAWN_TESTING=1 FM_SPAWN_TEST_RECOVERY_HANDOFF_READY="$ready" FM_SPAWN_TEST_RECOVERY_HANDOFF_CONTINUE="$continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    "$SPAWN" "$id" --relaunch --dashboard-recovery --harness claude > "$dir/spawn.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$spawn_pid" || true
+    fail "dashboard recovery did not reach its submission handoff"
+  fi
+  (
+    . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$lock" || exit 1
+    : > "$guard"
+    fm_lock_release "$lock"
+  ) || fail "could not cancel dashboard recovery at its submission handoff"
+  : > "$continue"
+  if wait "$spawn_pid"; then status=0; else status=$?; fi
+  expect_code 4 "$status" "dashboard recovery cancellation should defer submission"
+  ! grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "cancelled dashboard recovery submitted a replacement literal"
+  pass "fm-spawn dashboard recovery serializes cancellation before submit"
+}
+
+test_dashboard_recovery_cancellation_blocks_enter_after_literal() {
+  local dir id claim guard_dir guard ready continue spawn_pid status attempts
+  id=rl44
+  dir=$(new_case dashboard-cancel-enter "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-cancel-enter\n' >> "$dir/home/state/$id.meta"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+  guard_dir="$dir/home/state/dashboard-recovery/.${id}.cancel.test"
+  guard="$guard_dir/cancelled"
+  ready="$dir/literal-ready"
+  continue="$dir/literal-continue"
+  mkdir -p "$guard_dir"
+  FM_DASHBOARD_RECOVERY_CLAIM="$claim" FM_DASHBOARD_RECOVERY_CANCEL_GUARD="$guard" \
+    FM_SPAWN_TESTING=1 FM_SPAWN_TEST_RECOVERY_LITERAL_READY="$ready" FM_SPAWN_TEST_RECOVERY_LITERAL_CONTINUE="$continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    python3 -c 'import os, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_DFL); os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' \
+    "$SPAWN" "$id" --relaunch --dashboard-recovery --harness claude > "$dir/spawn.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$spawn_pid" || true
+    fail "dashboard recovery did not reach the literal-to-Enter handoff"
+  fi
+  : > "$guard"
+  kill -TERM "$spawn_pid" || fail "could not cancel recovery after literal input"
+  : > "$continue"
+  if wait "$spawn_pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 143 ] || fail "literal-to-Enter cancellation did not stop recovery ($status): $(cat "$dir/spawn.out")"
+  grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "literal-to-Enter fixture did not receive the unsubmitted launch"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "literal-to-Enter cancellation submitted the replacement command"
+  pass "fm-spawn dashboard recovery cancellation blocks Enter after literal"
+}
+
+test_dashboard_recovery_parent_cancellation_blocks_enter_after_final_check() {
+  local dir id state_bin agent_bin ready continue recovery_pid status attempts
+  id=rl45
+  dir=$(new_case dashboard-parent-cancel "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-parent-cancel\n' >> "$dir/home/state/$id.meta"
+  state_bin="$dir/recovery-state"
+  agent_bin="$dir/recovery-agent"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  chmod +x "$state_bin" "$agent_bin"
+  ready="$dir/final-ready"
+  continue="$dir/final-continue"
+  FM_DASHBOARD_RECOVERY_TESTING=1 FM_SPAWN_TESTING=1 \
+    FM_SPAWN_TEST_RECOVERY_FINAL_READY="$ready" FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE="$continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" \
+    python3 -c 'import os, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_DFL); os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' \
+    "$ROOT/bin/fm-dashboard-recovery.sh" observe "$id" > "$dir/recovery.out" 2>&1 &
+  recovery_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$recovery_pid" || true
+    fail "dashboard recovery did not reach its final submission check"
+  fi
+  kill -TERM "$recovery_pid" || fail "could not cancel recovery after its final submission check"
+  if wait "$recovery_pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 143 ] || fail "final-check cancellation did not stop recovery ($status): $(cat "$dir/recovery.out")"
+  grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "final-check fixture did not receive the unsubmitted launch"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "final-check cancellation submitted the replacement command"
+  pass "dashboard recovery parent cancellation blocks Enter after final check"
+}
+
+test_dashboard_recovery_parent_cancellation_blocks_unregistered_handoff() {
+  local dir id state_bin agent_bin pid_ready pid_continue handoff_ready handoff_continue recovery_pid status attempts
+  id=rl46
+  dir=$(new_case dashboard-parent-unregistered "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-parent-unregistered\n' >> "$dir/home/state/$id.meta"
+  state_bin="$dir/recovery-state"
+  agent_bin="$dir/recovery-agent"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  chmod +x "$state_bin" "$agent_bin"
+  pid_ready="$dir/pid-ready"
+  pid_continue="$dir/pid-continue"
+  handoff_ready="$dir/handoff-ready"
+  handoff_continue="$dir/handoff-continue"
+  FM_DASHBOARD_RECOVERY_TESTING=1 FM_SPAWN_TESTING=1 \
+    FM_DASHBOARD_RECOVERY_TEST_PID_READY="$pid_ready" FM_DASHBOARD_RECOVERY_TEST_PID_CONTINUE="$pid_continue" \
+    FM_SPAWN_TEST_RECOVERY_REGISTRATION_READY="$handoff_ready" FM_SPAWN_TEST_RECOVERY_REGISTRATION_CONTINUE="$handoff_continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" \
+    python3 -c 'import os, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_DFL); os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' \
+    "$ROOT/bin/fm-dashboard-recovery.sh" observe "$id" > "$dir/recovery.out" 2>&1 &
+  recovery_pid=$!
+  attempts=0
+  while [ ! -e "$pid_ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$pid_ready" ]; then
+    : > "$pid_continue"
+    : > "$handoff_continue"
+    wait "$recovery_pid" || true
+    fail "dashboard recovery did not reach child registration"
+  fi
+  : > "$pid_continue"
+  attempts=0
+  while [ ! -e "$handoff_ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$handoff_ready" ]; then
+    : > "$pid_continue"
+    : > "$handoff_continue"
+    wait "$recovery_pid" || true
+    fail "unregistered recovery did not reach the final spawn handoff"
+  fi
+  kill -TERM "$recovery_pid" || fail "could not cancel unregistered recovery"
+  : > "$handoff_continue"
+  if wait "$recovery_pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 143 ] || fail "unregistered final handoff did not stop recovery ($status): $(cat "$dir/recovery.out")"
+  ! grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "unregistered cancellation submitted a replacement literal"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "unregistered cancellation submitted the replacement command"
+  pass "dashboard recovery blocks an unregistered final spawn handoff"
+}
+
+test_dashboard_recovery_removes_unsubmitted_missing_endpoint() {
+  local dir id claim out rc
+  id=rl42
+  dir=$(new_case dashboard-terminal-race "$id")
+  add_ship_task "$dir" "$id" claude
+  printf '%s\n' 'dashboard_incarnation=i-dashboard-terminal-race' >> "$dir/home/state/$id.meta"
+  : > "$dir/fake/windows"
+  claim=$("$ROOT/bin/fm-dashboard-transition.sh" recovery-claim "$dir/home/state" "$id" 100) \
+    || fail "dashboard recovery claim was not created"
+
+  out=$(FM_DASHBOARD_RECOVERY_CLAIM="$claim" \
+    FM_FAKE_TERMINAL_STATUS="$dir/home/state/$id.status" \
+    run_spawn "$dir" "$id" --recover-missing --dashboard-recovery --harness claude)
+  rc=$?
+  expect_code 4 "$rc" "terminal status must cancel missing-endpoint recovery"
+  assert_grep "fm-$id" "$dir/fake/killed" \
+    "terminal recovery cancellation did not remove the unsubmitted endpoint"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "terminal recovery cancellation submitted the replacement command"
+  pass "fm-spawn recovery removes an endpoint when terminal status cancels submission"
 }
 
 # shellcheck disable=SC2031
@@ -1409,10 +1712,12 @@ test_secondmate_relaunch_onto_a_crewmate_only_adapter_refuses_before_stop
 test_explicit_secondmate_harness_ignores_configured_profile_axes
 test_ship_relaunch_ignores_the_crew_harness_config
 test_spawn_relaunch_without_a_harness_reuses_the_recorded_one
-test_spawn_relaunch_reuses_a_fast_repair_profile
-test_spawn_relaunch_preserves_unlanded_fast_repair_work
 test_prefixed_prior_harness_wiring_is_still_retired
 test_muse_session_binding_is_retired_on_a_harness_switch
+test_cursor_session_binding_is_retired_on_a_harness_switch
+test_spawn_relaunch_refuses_a_legacy_ship_without_a_preflight_record
+test_spawn_recovers_a_legacy_missing_ship_requires_a_preflight_record
+test_spawn_relaunch_refuses_an_unsupported_recorded_ship_mode
 test_missing_worktree_refuses_before_stopping_anything
 test_missing_instructions_refuse_before_stopping_anything
 test_checkpoint_refusal_leaves_the_record_byte_identical
@@ -1429,6 +1734,12 @@ test_secondmate_relaunch_refuses_an_unmarked_home
 test_secondmate_checkpoint_refuses_unreadable_child_state
 test_concurrent_relaunch_is_refused
 test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
+test_dashboard_recovery_marks_launch_before_submit
+test_dashboard_recovery_cancellation_wins_before_submit
+test_dashboard_recovery_cancellation_blocks_enter_after_literal
+test_dashboard_recovery_parent_cancellation_blocks_enter_after_final_check
+test_dashboard_recovery_parent_cancellation_blocks_unregistered_handoff
+test_dashboard_recovery_removes_unsubmitted_missing_endpoint
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent
 test_spawn_relaunch_refuses_contradicting_flags

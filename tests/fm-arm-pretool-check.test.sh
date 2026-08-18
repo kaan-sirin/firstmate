@@ -299,6 +299,15 @@ test_stdin_unrelated_command_allowed() {
   pass "stdin: unrelated command is a fast allow"
 }
 
+test_cursor_payload_is_silent() {
+  local out rc
+  out=$(printf '%s' '{"cursor_version":"2026.08.11","tool_input":{"command":"bin/fm-watch-arm.sh &"}}' | "$CHECK" 2>&1)
+  rc=$?
+  [ "$rc" -eq 0 ] || fail "Cursor compatibility payload must be silent, got exit $rc"
+  [ -z "$out" ] || fail "Cursor compatibility payload produced output: $out"
+  pass "stdin Cursor compatibility payload is silent"
+}
+
 test_prefilter_is_strict_superset() {
   local rc
   # A command with no fm-watch substring is fast-allowed by the transport
@@ -440,11 +449,18 @@ test_allow_is_silent_both_modes() {
 # --- harness wiring: each adapter invokes the shared checker -----------------
 
 # --- shellcheck (belt-and-suspenders; CI/CONTRIBUTING.md also runs this) -----
+#
+# Delegated to bin/fm-lint.sh rather than calling shellcheck directly, because
+# that script is the single owner of the lint definition - the file set, the
+# pinned version, and the options, including --external-sources. Calling the
+# linter directly here would be a second, weaker copy of that definition, and it
+# disagreed with the owner the moment this checker sourced a shared library.
 
 test_shellcheck_clean() {
+  local out
   command -v shellcheck >/dev/null 2>&1 || { pass "shellcheck not installed, skipping"; return; }
-  shellcheck "$CHECK" >/dev/null 2>&1 || fail "bin/fm-arm-pretool-check.sh is not shellcheck-clean"
-  pass "bin/fm-arm-pretool-check.sh is shellcheck-clean"
+  out=$("$ROOT/bin/fm-lint.sh" "$CHECK" 2>&1)     || fail "bin/fm-arm-pretool-check.sh is not lint-clean under the pinned definition: $out"
+  pass "bin/fm-arm-pretool-check.sh is clean under bin/fm-lint.sh"
 }
 
 test_full_acceptance_matrix
@@ -456,6 +472,7 @@ test_stdin_grok_schema_deny
 test_stdin_claude_codex_schema_allow
 test_stdin_claude_codex_schema_deny
 test_stdin_unrelated_command_allowed
+test_cursor_payload_is_silent
 test_prefilter_is_strict_superset
 test_failopen_empty_stdin
 test_failopen_garbage_stdin

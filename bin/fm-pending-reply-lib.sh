@@ -638,7 +638,7 @@ fm_pending_reply_fallback_idle_eligible() {  # <record-path>
 # pane is healthy and it runs no supervised turn sequence of its own. This
 # observation exists only to notice a busy-then-idle transition around one
 # delivered request, so it is a delivery-confirmation signal in the same
-# category as the submit acknowledgement in bin/fm-tmux-lib.sh - never task
+# category as the submit acknowledgement matcher in bin/fm-composer-lib.sh - never task
 # state, and never a source consumers can confuse with semantic state.
 #
 # It stays harness-scoped (fm_busy_lines_match with the recorded harness, no
@@ -879,6 +879,16 @@ fm_pending_reply_escalation_line() {  # <status-file> <record-path> <corr_id>
   printf '%s' "$found"
 }
 
+fm_pending_reply_append_status() {  # <state-dir> <record-path> <status-line>
+  local state=$1 rec=$2 line=$3 mode=${4:-append} task_id parent_status state_real
+  task_id=$(fm_pending_reply_get "$rec" task_id)
+  parent_status=$(fm_pending_reply_get "$rec" parent_status)
+  [ -n "$task_id" ] && [ -n "$parent_status" ] || return 1
+  state_real=$(cd "$state" 2>/dev/null && pwd) || return 1
+  [ "$parent_status" = "$state_real/$task_id.status" ] || return 1
+  "$_FM_PENDING_REPLY_LIB_DIR/fm-status-event.sh" "$mode" "$state_real" "$task_id" "$line"
+}
+
 # Close the durable status decision a previous escalation opened for <corr_id>.
 # Idempotent, and safe to retry until it succeeds: it appends the closing line
 # only while that exact keyed decision is still open in
@@ -904,7 +914,7 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 }
 
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
-  local state=$1 corr=$2 rec escalated closed parent_status escalation key note
+  local state=$1 corr=$2 rec escalated closed parent_status escalation key note line
   local open_line open_key open_note now
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
@@ -926,10 +936,10 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       open_note=${open_line#*$'\t'}
       open_note=${open_note#*$'\t'}
       [ "$open_note" = "$note" ] || continue
-      printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s\n' \
+      printf -v line 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s' \
         "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
-        "$(fm_pending_reply_get "$rec" resolved_via)" \
-        >> "$parent_status" 2>/dev/null || return 1
+        "$(fm_pending_reply_get "$rec" resolved_via)"
+      fm_pending_reply_append_status "$state" "$rec" "$line" self-resolve || return 1
       break
     done <<EOF
 $(status_open_decisions "$parent_status")
@@ -992,10 +1002,9 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   esac
   payload=$(fm_pending_reply_escalation_payload "$rec" "$kind") || return 1
   [ -n "$parent_status" ] || return 1
-  mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
   if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
+    fm_pending_reply_append_status "$state" "$rec" "$line" || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1

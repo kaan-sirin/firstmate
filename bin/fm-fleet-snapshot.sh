@@ -198,7 +198,7 @@ last_nonempty_line() {  # <file>
 }
 
 crew_state_json() {  # <id>
-  local id=$1 raw rest state source detail sep
+  local id=$1 raw rest state source detail transition_at sep
   raw=$(
     FM_ROOT_OVERRIDE="$FM_ROOT" \
       FM_HOME="$FM_HOME" \
@@ -213,6 +213,7 @@ crew_state_json() {  # <id>
   state=unknown
   source=none
   detail=
+  transition_at=null
   case "$raw" in
     state:\ *"$sep"source:\ *)
       rest=${raw#state: }
@@ -222,10 +223,22 @@ crew_state_json() {  # <id>
         *"$sep"*) source=${rest%%"$sep"*}; detail=${rest#*"$sep"} ;;
         *) source=$rest ;;
       esac
+      case "$detail" in
+        transition_at:\ *"$sep"*)
+          transition_at=${detail#transition_at: }
+          transition_at=${transition_at%%"$sep"*}
+          detail=${detail#*"$sep"}
+          ;;
+        transition_at:\ *)
+          transition_at=${detail#transition_at: }
+          detail=
+          ;;
+      esac
       ;;
   esac
-  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" \
-    '{state:$state,source:$source,detail:$detail,raw:$raw}'
+  case "$transition_at" in ''|*[!0-9]*) transition_at=null ;; esac
+  jq -n --arg raw "$raw" --arg state "$state" --arg source "$source" --arg detail "$detail" --argjson transition_at "$transition_at" \
+    '{state:$state,source:$source,detail:$detail,transition_at:$transition_at,raw:$raw}'
 }
 
 status_event_json() {  # <status-log>
@@ -401,10 +414,10 @@ backlog_json() {  # [<backlog-path>] - defaults to this home's $BACKLOG
 }
 
 task_json_lines() {
-  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path
+  local meta id kind harness mode yolo project worktree home projects backend target status_log report_path x_thread_url x_request
   local remote_host remote_root remote_state remote_rc remote_home_present
   local pr pr_source event_json current_json endpoint_exists agent_alive meta_json status_json report_json worktree_json home_json
-  local last_event_raw current_state current_source pending_decision blocked_event report_present=0 pr_from_status
+  local last_event_raw current_state current_source current_transition_at current_active_seconds current_activity_state transition_file transition_state transition_epoch transition_incarnation task_incarnation transition_active_seconds recovery_file recovery_json pending_decision blocked_event report_present=0 pr_from_status
   local open_decisions_tsv open_decisions_json
 
   for meta in "$STATE"/*.meta; do
@@ -433,6 +446,8 @@ task_json_lines() {
     status_log="$STATE/$id.status"
     report_path="$DATA/$id/report.md"
     pr=$(meta_value "$meta" pr)
+    x_thread_url=$(meta_value "$meta" x_thread_url)
+    x_request=$(meta_value "$meta" x_request)
     pr_source=meta
     if [ -z "$pr" ]; then
       pr_from_status=$(first_pr_url_in_file "$status_log" || true)
@@ -448,6 +463,43 @@ task_json_lines() {
     last_event_raw=$(printf '%s' "$event_json" | jq -r '.last_event.raw // ""')
     current_state=$(printf '%s' "$current_json" | jq -r '.state // ""')
     current_source=$(printf '%s' "$current_json" | jq -r '.source // ""')
+    current_transition_at=$(printf '%s' "$current_json" | jq -r '.transition_at // "null"')
+    current_active_seconds=null
+    current_activity_state=$current_state
+    transition_file="$STATE/dashboard-transitions/$id.json"
+    recovery_file="$STATE/dashboard-recovery/$id.json"
+    recovery_json='{"state":"none"}'
+    if [ -f "$recovery_file" ] && [ ! -L "$recovery_file" ] && [ "$(file_mode_octal "$recovery_file")" = 600 ]; then
+      recovery_json=$(jq -c '
+        if .schema_version == 1 and (.state == "pending" or .state == "unrecoverable")
+          and (.attempts | type) == "number" and (.confirmed_at | type) == "number" and (.reason | type) == "string"
+        then {state,attempts,confirmed_at,reason} else {state:"none"} end
+      ' "$recovery_file" 2>/dev/null || printf '%s' '{"state":"none"}')
+    fi
+    task_incarnation=$(meta_value "$meta" dashboard_incarnation)
+    case "$task_incarnation" in ''|*[!A-Za-z0-9._-]*) task_incarnation="legacy-$id" ;; esac
+    if [ -f "$transition_file" ] && [ ! -L "$transition_file" ] \
+       && [ "$(file_mode_octal "$transition_file")" = 600 ]; then
+      IFS=$'\t' read -r transition_state transition_epoch transition_incarnation transition_active_seconds < <(
+        jq -r '[.state // "",(.transition_at // "" | tostring),(.incarnation // "" | tostring),(.active_seconds // "" | tostring)] | @tsv' "$transition_file" 2>/dev/null || true
+      )
+      case "$transition_epoch" in ''|*[!0-9]*) ;; *)
+        case "$transition_incarnation" in ''|*[!A-Za-z0-9._-]*) ;; *)
+          case "$transition_active_seconds" in ''|*[!0-9]*) ;; *)
+            if [ "$transition_incarnation" = "$task_incarnation" ] \
+               && { [ "$transition_state" = "$current_state" ] \
+                    || { [ "$current_state" = unknown ] && [ "$transition_state" = working ]; }; }; then
+              current_transition_at=$transition_epoch
+              current_active_seconds=$transition_active_seconds
+              current_activity_state=$transition_state
+            fi
+            ;;
+          esac
+          ;;
+        esac
+        ;;
+      esac
+    fi
 
     # Durable keyed open-decision set: fold the WHOLE status stream
     # (fm-classify-lib.sh's status_open_decisions) so a later unrelated event can
@@ -543,11 +595,17 @@ task_json_lines() {
       --arg remote_host "$remote_host" \
       --arg remote_root "$remote_root" \
       --arg pr "$pr" \
+      --arg x_thread_url "$x_thread_url" \
+      --arg x_request "$x_request" \
       --arg pr_source "$pr_source" \
       --arg agent_alive "$agent_alive" \
       --arg observed_at "$SNAPSHOT_NOW" \
       --arg last_event_raw "$last_event_raw" \
+      --arg current_activity_state "$current_activity_state" \
       --argjson current_state "$current_json" \
+      --argjson current_transition_at "$current_transition_at" \
+      --argjson current_active_seconds "$current_active_seconds" \
+      --argjson recovery "$recovery_json" \
       --argjson meta_path "$meta_json" \
       --argjson status_log "$status_json" \
       --argjson report "$report_json" \
@@ -575,13 +633,16 @@ task_json_lines() {
           report:$report
         },
         secondmate_projects:($projects | if . == "" then [] else split(",") | map(gsub("^[[:space:]]+|[[:space:]]+$"; "")) | map(select(. != "")) end),
-        current_state:($current_state + {observed_at:$observed_at,freshness:"fresh"}),
+        current_state:($current_state + {observed_at:$observed_at,transition_at:$current_transition_at,active_seconds:$current_active_seconds,activity_state:$current_activity_state,freshness:"fresh"}),
+        recovery:$recovery,
         endpoint:{target:($target | if . == "" then null else . end),exists:$endpoint_exists,agent_alive:$agent_alive,
           status:(if $endpoint_exists == false then "absent"
                   elif $agent_alive == "alive" or $agent_alive == "dead" then $agent_alive
                   else "unknown" end),
           observed_at:$observed_at,freshness:"fresh"},
         pr:{url:($pr | if . == "" then null else . end),source:$pr_source},
+        x_thread_url:($x_thread_url | if . == "" then null else . end),
+        x_request:($x_request | if . == "" then null else . end),
         hints:{
           pending_decision:$pending_decision,
           blocked_event:$blocked_event,

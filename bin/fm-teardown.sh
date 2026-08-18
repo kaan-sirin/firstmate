@@ -152,6 +152,8 @@ SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 . "$SCRIPT_DIR/fm-control-lib.sh"
 # shellcheck source=bin/fm-lock-lib.sh
 . "$SCRIPT_DIR/fm-lock-lib.sh"
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 # shellcheck source=bin/fm-gate-refuse-lib.sh
 . "$SCRIPT_DIR/fm-gate-refuse-lib.sh"
 # shellcheck source=bin/fm-pr-lib.sh
@@ -392,8 +394,8 @@ remote_secondmate_teardown() {
   tmp="$SECONDMATE_REG.tmp.$$"
   grep -vE "^- $ID( |$)" "$SECONDMATE_REG" > "$tmp" || true
   mv -f -- "$tmp" "$SECONDMATE_REG"
-  rm -f -- "$STATE/$ID.status" "$STATE/$ID.meta" "$STATE/$ID.turn-ended" \
-    "$STATE/.$ID.open-decisions-cursor"
+  status_retire_presentation_task "$STATE" "$ID" || return 1
+  rm -f -- "$STATE/$ID.meta" "$STATE/$ID.turn-ended"
   printf 'teardown %s complete (remote %s:%s)\n' "$ID" "$remote_host" "$remote_home"
   return 0
 }
@@ -754,40 +756,6 @@ remove_pr_poll_artifacts() {
       rmdir "$quarantine" 2>/dev/null || true
     fi
   fi
-}
-
-# Fast Repair progress artifacts are named <prefix>-<id>-<generation> (child and
-# sequence records) or <prefix>-<id>-<generation>-<sequence> (handoff records),
-# and a task id may itself contain hyphens, so a bare <prefix>-<id>-* glob also
-# matches every OTHER task whose id begins with "<id>-". Tearing task `fix` down
-# would then delete live `fix-2` markers, leaving that task's progress child
-# unsignalled at the poll boundary and its undrained handoffs gone. Ownership is
-# decided on the remainder instead of the glob: it must be exactly the expected
-# count of numeric fields, followed by nothing or by one of the dot-suffixes the
-# watcher's writers append (.ready, .starting, .starting.closing, .lock,
-# .attempts, and mkstemp temporaries).
-fast_repair_artifact_fields_match() {  # <remainder> <field-count>
-  local rest=$1 fields=$2 head
-  while [ "$fields" -gt 0 ]; do
-    head=${rest%%[!0-9]*}
-    [ -n "$head" ] || return 1
-    rest=${rest#"$head"}
-    fields=$((fields - 1))
-    if [ "$fields" -gt 0 ]; then
-      case "$rest" in -*) rest=${rest#-} ;; *) return 1 ;; esac
-    fi
-  done
-  case "$rest" in ''|.*) return 0 ;; esac
-  return 1
-}
-
-remove_fast_repair_progress_artifacts() {  # <state-dir> <prefix> <task-id> <field-count>
-  local state_dir=$1 prefix=$2 id=$3 fields=$4 path
-  for path in "$state_dir/$prefix-$id-"*; do
-    [ -e "$path" ] || [ -L "$path" ] || continue
-    fast_repair_artifact_fields_match "${path#"$state_dir/$prefix-$id-"}" "$fields" || continue
-    rm -rf "$path" || return 1
-  done
 }
 
 # Resolve the PR number for a worktree branch via gh-axi. Echoes the number on a
@@ -2289,10 +2257,12 @@ cleanup_firstmate_home_children() {
       child_busy_gen=$(cat "$sub_state/$child_id.busy-gen" 2>/dev/null || true)
     fi
     retire_busy_state "$sub_state" "$child_id" "$child_busy_gen" || return 1
-    rm -f "$sub_state/$child_id.status" "$sub_state/$child_id.turn-ended" \
+    status_retire_presentation_task "$sub_state" "$child_id" || return 1
+    rm -f "$sub_state/$child_id.turn-ended" \
       "$sub_state/$child_id.meta" "$sub_state/$child_id.pi-ext.ts" \
       "$sub_state/$child_id.grok-turnend-token" "$sub_state/$child_id.kimi-turnend-token" \
-      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current"
+      "$sub_state/$child_id.muse-session" "$sub_state/$child_id.muse-session-current" \
+      "$sub_state/$child_id.cursor-session"
   done
 }
 
@@ -2567,25 +2537,14 @@ fm_backend_clear_transition "$BACKEND" "$STATE" "$T" || true
 [ -n "$TASK_TMP" ] && rm -rf "$TASK_TMP"
 remove_pr_poll_artifacts "$STATE" "$ID" || exit 1
 retire_busy_state "$STATE" "$ID" "$BUSY_GEN" || exit 1
-rm -f "$STATE/$ID.status" "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
+status_retire_presentation_task "$STATE" "$ID" || exit 1
+rm -f "$STATE/$ID.turn-ended" "$STATE/$ID.meta" \
   "$STATE/$ID.pi-ext.ts" "$STATE/$ID.grok-turnend-token" \
   "$STATE/$ID.kimi-turnend-token" "$STATE/$ID.muse-session" \
-  "$STATE/$ID.muse-session-current" \
+  "$STATE/$ID.muse-session-current" "$STATE/$ID.cursor-session" \
   "$STATE/.$ID.open-decisions-cursor" \
   "$STATE/$ID.control-relaunch" "$STATE/$ID.control-relaunch.meta-prior" \
-  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note" \
-  "$STATE/$ID.fast-repair-tests" "$STATE/$ID.fast-repair-tests.log" \
-  "$STATE/$ID.fast-repair-broader" "$STATE/$ID.fast-repair-broader.log" \
-  "$STATE/.fast-repair-progress-$ID" "$STATE/.fast-repair-progress-generation-$ID" \
-  "$STATE/.last-fast-repair-progress-$ID" "$STATE/.fast-repair-progress-next-due-$ID" \
-  "$STATE/.fast-repair-progress-green-$ID"
-# The Fast Repair authorization proves this task's own request, so it dies with
-# the task: a later task reusing this id must present its own intake evidence.
-# Only that exact record goes; the report and the rest of data/<id>/ stay.
-rm -f "$DATA/$ID/fast-repair-eligibility"
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-handoff "$ID" 2 || exit 1
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-sequence "$ID" 1 || exit 1
-remove_fast_repair_progress_artifacts "$STATE" .fast-repair-progress-child "$ID" 1 || exit 1
+  "$STATE/$ID.control-relaunch.brief-prior" "$STATE/$ID.control-relaunch.note"
 fm_lock_release "$META_LOCK"
 META_LOCK_HELD=0
 if [ "$KIND" != scout ] && [ "$KIND" != secondmate ] && [ "$MODE" != local-only ]; then

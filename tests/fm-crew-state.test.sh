@@ -83,9 +83,20 @@ SH
 #!/usr/bin/env bash
 set -u
 case "${1:-}" in
+  list-windows)
+    if [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ]; then
+      printf "can't find session: %s\n" "${3:-unknown}" >&2
+      exit 1
+    fi
+    printf '%s\n' "${FM_FAKE_TMUX_WINDOWS:-}"
+    ;;
   display-message)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
-    printf '%%1\n' ;;
+    case "$*" in
+      *'#{pane_current_command}'*) printf '%s\n' "${FM_FAKE_TMUX_COMMAND:-claude}" ;;
+      *) printf '%%1\n' ;;
+    esac
+    ;;
   capture-pane)
     [ "${FM_FAKE_TMUX_MISSING:-0}" = 1 ] && exit 1
     if [ "${FM_FAKE_BUSY:-0}" = 1 ]; then printf 'work in progress\n%s\n' "${FM_FAKE_BUSY_TEXT:-esc to interrupt}"
@@ -140,7 +151,10 @@ make_no_timeout_toolbin() {  # <dir> -> echoes toolbin path
 # Run the helper for one case dir. FM_FAKE_* env (run output, busy flag) are read
 # from the caller's environment by the fakes above.
 run_crew_state() {  # <case-dir> <id>
-  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" "$CREW_STATE" "$2"
+  local target
+  target=$(sed -n 's/^window=//p' "$1/state/$2.meta" | tail -1)
+  PATH="$1/fakebin:$PATH" FM_STATE_OVERRIDE="$1/state" \
+    FM_FAKE_TMUX_WINDOWS="${target#*:}" "$CREW_STATE" "$2"
 }
 
 new_case() {  # <name> -> echoes case dir with an empty state/
@@ -166,11 +180,13 @@ reset_fakes() {
   FM_FAKE_BUSY=0
   FM_FAKE_BUSY_TEXT=
   FM_FAKE_TMUX_MISSING=0
+  FM_FAKE_TMUX_WINDOWS=""
+  FM_FAKE_TMUX_COMMAND=claude
   FM_FAKE_HERDR_BUSY=0
   FM_FAKE_HERDR_MISSING=0
   FM_FAKE_HERDR_AGENT_STATUS=""
   FM_FAKE_CI_LOGS=""
-  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING
+  export FM_FAKE_AXI_STATUS FM_FAKE_AXI_STATUS_RUN FM_FAKE_RUNS_LIST FM_FAKE_BUSY FM_FAKE_BUSY_TEXT FM_FAKE_TMUX_MISSING FM_FAKE_TMUX_WINDOWS FM_FAKE_TMUX_COMMAND
   export FM_FAKE_HERDR_BUSY FM_FAKE_HERDR_MISSING FM_FAKE_HERDR_AGENT_STATUS FM_FAKE_CI_LOGS
 }
 
@@ -1030,6 +1046,44 @@ test_no_run_idle_secondmate_resolved_event_not_state() {
   pass "a trailing resolved: event does not corrupt state render (idle stays idle)"
 }
 
+test_resolved_answer_uses_canonical_transition() {
+  reset_fakes
+  local d out fake_date
+  d=$(new_case resolved-answer)
+  make_repo_on_branch "$d/wt" fm/feat-resolved-answer
+  make_fakebin "$d" >/dev/null
+  mkdir -p "$d/datebin"
+  fake_date="$d/datebin/date"
+  # shellcheck disable=SC2016 # Variables expand in the generated date fixture.
+  printf '%s\n' '#!/usr/bin/env bash' 'if [ "$1" = +%s ]; then printf "%s\\n" "$FM_FAKE_NOW"; else command date "$@"; fi' > "$fake_date"
+  chmod +x "$fake_date"
+  fm_write_meta "$d/state/resolved-answer.meta" "window=fm:fm-resolved-answer" "worktree=$d/wt" "kind=ship" "harness=claude" "dashboard_incarnation=resolved-answer-1"
+  printf 'needs-decision [key=scope]: choose the scope\n' > "$d/state/resolved-answer.status"
+  PATH="$d/datebin:$PATH" FM_FAKE_NOW=100 "$ROOT/bin/fm-status-event.sh" resolve "$d/state" resolved-answer 'resolved [key=scope]: captain answered' \
+    || fail "resolution event could not record canonical timing"
+  FM_FAKE_AXI_STATUS=$(run_running fm/feat-resolved-answer)
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" resolved-answer)
+  assert_contains "$out" "state: working" "resolved answer did not preserve the active run"
+  assert_contains "$out" "transition_at: 100" "resolved answer did not use canonical transition time"
+  pass "resolved answers use the canonical transition timestamp"
+}
+
+test_run_step_omits_observed_duration_timestamp() {
+  reset_fakes
+  local d out
+  d=$(new_case run-duration)
+  make_repo_on_branch "$d/wt" fm/feat-run-duration
+  make_fakebin "$d" >/dev/null
+  fm_write_meta "$d/state/run-duration.meta" "window=fm:fm-run-duration" "worktree=$d/wt" "kind=ship" "harness=claude"
+  FM_FAKE_AXI_STATUS=$(run_running fm/feat-run-duration | sed 's/review,running,0,0/review,running,0,60000/')
+  FM_FAKE_BUSY=0
+  out=$(run_crew_state "$d" run-duration)
+  assert_contains "$out" "state: working" "run-step duration fixture did not report working"
+  assert_not_contains "$out" "transition_at:" "run-step synthesized a timestamp from observed duration"
+  pass "run-step duration does not become a producer transition timestamp"
+}
+
 test_dead_window_ignores_stale_status_log() {
   reset_fakes
   local d; d=$(new_case dead-window)
@@ -1042,7 +1096,7 @@ test_dead_window_ignores_stale_status_log() {
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead)
   assert_contains "$out" "state: unknown" "dead window -> unknown"
-  assert_contains "$out" "source: none" "dead window -> none source"
+  assert_contains "$out" "source: endpoint" "dead window -> endpoint source"
   assert_not_contains "$out" "source: status-log" "dead window does not reuse stale log"
   pass "dead window ignores stale status log"
 }
@@ -1067,9 +1121,7 @@ test_dead_window_still_reports_terminal_run_step() {
   pass "closed pane still reports a terminal run-step"
 }
 
-# The same for an active run: an agent pane that crashed mid-validation while the
-# daemon-backed run continues must report the live run-step, not unknown.
-test_dead_window_still_reports_active_run_step() {
+test_dead_window_overrides_active_run_step() {
   reset_fakes
   local d; d=$(new_case dead-window-active)
   make_repo_on_branch "$d/wt" fm/feat-dead-act
@@ -1078,10 +1130,11 @@ test_dead_window_still_reports_active_run_step() {
   FM_FAKE_AXI_STATUS="$(run_running fm/feat-dead-act)"
   FM_FAKE_TMUX_MISSING=1
   local out; out=$(run_crew_state "$d" feat-dead-act)
-  assert_contains "$out" "state: working" "closed pane still reports active run-step"
-  assert_contains "$out" "source: run-step" "closed pane does not mask the active run-step"
-  assert_not_contains "$out" "state: unknown" "closed pane with an active run must never be unknown"
-  pass "closed pane still reports an active run-step"
+  assert_contains "$out" "state: unknown" "confirmed endpoint loss overrides an active run-step"
+  assert_contains "$out" "source: endpoint" "confirmed endpoint loss has its own state source"
+  assert_contains "$out" "confirmed endpoint loss (missing)" "endpoint-loss detail names the confirmed verdict"
+  assert_not_contains "$out" "state: working" "confirmed endpoint loss cannot remain working"
+  pass "confirmed endpoint loss overrides an active run-step"
 }
 
 test_no_timeout_uses_perl_bound() {
@@ -1106,7 +1159,7 @@ SH
   "$ROOT/bin/fm-busy-event.sh" apply "$d/state" feat-timeout busy --gen "$gen" \
     --source claude-hook --event user-prompt-submit
   start=$SECONDS
-  out=$(FM_FAKE_NM_CALLS="$calls_file" PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
+  out=$(FM_FAKE_NM_CALLS="$calls_file" FM_FAKE_TMUX_WINDOWS=fm-feat-timeout PATH="$d/fakebin:$toolbin" FM_STATE_OVERRIDE="$d/state" FM_CREW_STATE_NM_TIMEOUT=1 "$CREW_STATE" feat-timeout)
   elapsed=$((SECONDS - start))
   assert_contains "$out" "state: working" "timed-out no-mistakes falls back to pane"
   assert_contains "$out" "source: pane" "timed-out no-mistakes -> pane source"
@@ -1182,7 +1235,7 @@ test_provably_working_via_runs_list_fallback() {
   running    fm/feat-provable ${short}  2026-07-02 22:05
 EOF
 )"
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-provable \
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_WINDOWS=fm-feat-provable crew_is_provably_working feat-provable \
     || fail "cross-branch attribution via the runs list was not treated as provably working"
   pass "crew_is_provably_working absorbs a validating crew found only via the runs-list fallback"
 }
@@ -1202,7 +1255,7 @@ test_not_provably_working_when_stopped() {
 EOF
 )"
   FM_FAKE_BUSY=0
-  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" crew_is_provably_working feat-stopped \
+  PATH="$d/fakebin:$PATH" FM_STATE_OVERRIDE="$d/state" FM_FAKE_TMUX_WINDOWS=fm-feat-stopped crew_is_provably_working feat-stopped \
     && fail "a stopped crew with no run anywhere and an idle pane was treated as provably working"
   pass "crew_is_provably_working still surfaces a genuinely stopped crew (safety property preserved)"
 }
@@ -1344,9 +1397,11 @@ test_no_run_idle_pane_uses_keyed_log
 test_no_run_idle_pane_paused
 test_no_run_idle_pane_custom_paused_verb
 test_no_run_idle_secondmate_resolved_event_not_state
+test_resolved_answer_uses_canonical_transition
+test_run_step_omits_observed_duration_timestamp
 test_dead_window_ignores_stale_status_log
 test_dead_window_still_reports_terminal_run_step
-test_dead_window_still_reports_active_run_step
+test_dead_window_overrides_active_run_step
 test_no_timeout_uses_perl_bound
 test_scout_skips_run_lookup
 test_torn_down_worktree
