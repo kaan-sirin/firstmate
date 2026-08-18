@@ -66,26 +66,24 @@ cleanup() {
 recovery_mark_cancelled() {
   local held=0
   [ -n "$RECOVERY_CANCEL_GUARD" ] || return 0
+  (umask 077; : > "$RECOVERY_CANCEL_GUARD") || return 1
   if [ -n "$RECOVERY_CANCEL_LOCK" ]; then
     fm_lock_acquire_wait "$RECOVERY_CANCEL_LOCK" || return 1
     held=1
   fi
-  (umask 077; : > "$RECOVERY_CANCEL_GUARD") || {
-    [ "$held" = 0 ] || fm_lock_release "$RECOVERY_CANCEL_LOCK" || true
-    return 1
-  }
   [ "$held" = 0 ] || fm_lock_release "$RECOVERY_CANCEL_LOCK" || return 1
 }
 recovery_signal() {
   local signal=$1 status=$2
   RECOVERY_CANCELLED=1
-  recovery_mark_cancelled || true
+  [ -z "$RECOVERY_CANCEL_GUARD" ] || (umask 077; : > "$RECOVERY_CANCEL_GUARD") || true
   if [ -n "$RECOVERY_PID" ]; then
     kill -s "$signal" -- "-$RECOVERY_PID" 2>/dev/null || kill -s "$signal" "$RECOVERY_PID" 2>/dev/null || true
     wait "$RECOVERY_PID" 2>/dev/null || true
     RECOVERY_PID=
     RECOVERY_CHILD_REAPED=1
   fi
+  recovery_mark_cancelled || true
   exit "$status"
 }
 trap cleanup EXIT

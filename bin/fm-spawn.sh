@@ -703,6 +703,9 @@ RECOVERY_CLAIM_VALUE=
 REPLACEMENT_START_AT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
+SPAWN_RECOVERY_HANDOFF_LOCK=
+SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+SPAWN_RECOVERY_HANDOFF_GUARD=
 
 spawn_busy_event() {
   if [ "$DASHBOARD_RECOVERY" -eq 1 ] && [ -n "${FM_DASHBOARD_RECOVERY_CLAIM:-}" ]; then
@@ -762,8 +765,28 @@ spawn_recovery_submit() {
     return 4
   fi
   spawn_send_literal "$@" || status=$?
-  fm_lock_release "$lock" || return 1
+  if [ "$status" -ne 0 ]; then
+    fm_lock_release "$lock" || return 1
+    return "$status"
+  fi
+  SPAWN_RECOVERY_HANDOFF_LOCK=$lock
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=1
+  SPAWN_RECOVERY_HANDOFF_GUARD=$guard
+  if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_LITERAL_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_LITERAL_CONTINUE:-}" ]; then
+    : > "$FM_SPAWN_TEST_RECOVERY_LITERAL_READY" || return 1
+    while [ ! -e "$FM_SPAWN_TEST_RECOVERY_LITERAL_CONTINUE" ]; do sleep 0.01; done
+  fi
   return "$status"
+}
+
+spawn_recovery_handoff_cancelled() {
+  [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ] || return 1
+  [ -e "$SPAWN_RECOVERY_HANDOFF_GUARD" ] || [ -L "$SPAWN_RECOVERY_HANDOFF_GUARD" ] || return 1
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+  fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || return 1
+  rm -f -- "$SPAWN_RECOVERY_HANDOFF_GUARD" 2>/dev/null || true
+  rmdir "${SPAWN_RECOVERY_HANDOFF_GUARD%/cancelled}" 2>/dev/null || true
+  return 0
 }
 
 parse_orca_worktree_result() {
@@ -785,6 +808,10 @@ parse_orca_worktree_result() {
 
 spawn_abort_cleanup() {
   local status=$?
+  if [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ]; then
+    SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+    fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || true
+  fi
   if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
     RECOVERY_CLAIM_LOCK_HELD=0
     fm_lock_release "$RECOVERY_CLAIM_LOCK" || true
@@ -3143,7 +3170,18 @@ if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
     *) echo "error: could not publish dashboard recovery launch for $ID" >&2; exit 1 ;;
   esac
 fi
+if spawn_recovery_handoff_cancelled; then
+  echo "error: dashboard recovery was cancelled for $ID" >&2
+  exit 4
+fi
 spawn_send_key "$T" Enter
+if [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ]; then
+  SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
+  fm_lock_release "$SPAWN_RECOVERY_HANDOFF_LOCK" || {
+    echo "error: could not release dashboard recovery handoff for $ID" >&2
+    exit 1
+  }
+fi
 RECOVERY_ENDPOINT_PENDING=0
 if [ "$RECOVERY_CLAIM_LOCK_HELD" = 1 ]; then
   RECOVERY_CLAIM_LOCK_HELD=0
