@@ -2,7 +2,7 @@
 # fm-worker-capacity-lib.sh - fail-closed local worker-capacity guard.
 #
 # A FirstMate home can set config/max-active-workers to one positive base-10
-# integer. fm-spawn consults this guard while holding the home task-set lock,
+# integer. fm-spawn consults this guard while holding the host admission lock,
 # before it creates a new endpoint. The guard counts each recorded direct
 # report whose endpoint is alive, ambiguous, unreadable, or not yet verifiable.
 # It excludes only endpoints proven dead or missing. This protects a small host
@@ -15,6 +15,7 @@
 # Source after fm-backend.sh. Public functions:
 #   fm_worker_capacity_limit <config-dir>       -> positive integer or 0 absent
 #   fm_worker_capacity_active <state-dir>       -> active count
+#   fm_worker_capacity_active_host <state-dir>  -> active local-host count
 #   fm_worker_capacity_pending_reserve <state-dir> <task-id>
 #   fm_worker_capacity_pending_release <state-dir> <task-id>
 #   fm_worker_capacity_pending_until_started <state-dir> <task-id>
@@ -93,7 +94,11 @@ fm_worker_capacity_pending_until_started() {  # <state-dir> <task-id>
 }
 
 fm_worker_capacity_active() {  # <state-dir>
-  local state=$1 meta pending backend target verdict count=0
+  fm_worker_capacity_active_in_state "$1" 0
+}
+
+fm_worker_capacity_active_in_state() {  # <state-dir> <skip-remote-secondmates>
+  local state=$1 skip_remote=$2 meta pending backend target verdict kind remote_host count=0
   [ -d "$state" ] || { printf '0'; return 0; }
   shopt -s nullglob
   for pending in "$state"/.worker-capacity-*.pending; do
@@ -102,6 +107,11 @@ fm_worker_capacity_active() {  # <state-dir>
   done
   for meta in "$state"/*.meta; do
     [ -f "$meta" ] && [ ! -L "$meta" ] || return 1
+    if [ "$skip_remote" = 1 ]; then
+      kind=$(fm_meta_get "$meta" kind)
+      remote_host=$(fm_meta_get "$meta" remote_host)
+      [ "$kind" = secondmate ] && [ -n "$remote_host" ] && continue
+    fi
     backend=$(fm_backend_of_meta "$meta") || return 1
     target=$(fm_backend_target_of_meta "$meta") || return 1
     [ -n "$target" ] || return 1
@@ -111,6 +121,29 @@ fm_worker_capacity_active() {  # <state-dir>
       alive|ambiguous|unreadable|unverified) count=$((count + 1)) ;;
       *) return 1 ;;
     esac
+  done
+  shopt -u nullglob
+  printf '%s' "$count"
+}
+
+fm_worker_capacity_active_host() {  # <primary-state-dir>
+  local state=$1 meta kind home remote_host active count=0
+  [ -d "$state" ] || { printf '0'; return 0; }
+  active=$(fm_worker_capacity_active_in_state "$state" 1) || return 1
+  count=$active
+  shopt -s nullglob
+  for meta in "$state"/*.meta; do
+    [ -f "$meta" ] && [ ! -L "$meta" ] || { shopt -u nullglob; return 1; }
+    kind=$(fm_meta_get "$meta" kind)
+    remote_host=$(fm_meta_get "$meta" remote_host)
+    [ "$kind" = secondmate ] && [ -z "$remote_host" ] || continue
+    home=$(fm_meta_get "$meta" home)
+    case "$home" in /*) ;; *) shopt -u nullglob; return 1 ;; esac
+    [ -d "$home" ] && [ ! -L "$home" ] \
+      && [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] \
+      && [ -d "$home/state" ] || { shopt -u nullglob; return 1; }
+    active=$(fm_worker_capacity_active_in_state "$home/state" 1) || { shopt -u nullglob; return 1; }
+    count=$((count + active))
   done
   shopt -u nullglob
   printf '%s' "$count"

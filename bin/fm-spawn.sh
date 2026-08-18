@@ -660,6 +660,8 @@ SPAWN_META_LOCK_HELD=0
 SPAWN_META_PUBLISH_STARTED=0
 SPAWN_TASK_SET_LOCK=
 SPAWN_TASK_SET_LOCK_HELD=0
+SPAWN_WORKER_CAPACITY_LOCK=
+SPAWN_WORKER_CAPACITY_LOCK_HELD=0
 SPAWN_CAPACITY_RESERVATION=
 SPAWN_CAPACITY_LAUNCH_SUBMITTED=0
 RELAUNCH_REPLACEMENT_PENDING=0
@@ -770,6 +772,10 @@ spawn_abort_cleanup() {
   if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
     SPAWN_TASK_SET_LOCK_HELD=0
     fm_lock_release "$SPAWN_TASK_SET_LOCK" || true
+  fi
+  if [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+    SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+    fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK" || true
   fi
   if [ -n "$SPAWN_CAPACITY_RESERVATION" ] \
      && [ "$SPAWN_CAPACITY_LAUNCH_SUBMITTED" != 1 ]; then
@@ -905,6 +911,12 @@ mkdir -p "$STATE" || {
   echo "error: could not create parent state directory" >&2
   exit 1
 }
+WORKER_CAPACITY_STATE=${FM_WORKER_CAPACITY_HOST_STATE:-$STATE}
+WORKER_CAPACITY_STATE=$(resolve_directory_input FM_WORKER_CAPACITY_HOST_STATE "$WORKER_CAPACITY_STATE") || exit 1
+[ -d "$WORKER_CAPACITY_STATE" ] && [ ! -L "$WORKER_CAPACITY_STATE" ] || {
+  echo "error: worker capacity host state directory is unsafe or unavailable" >&2
+  exit 1
+}
 # A spawn that publishes task metadata must not interleave
 # with a forced teardown that has already enumerated that set: a record
 # published inside the enumerate-then-remove window is invisible to the
@@ -931,8 +943,16 @@ WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
   echo "error: unsafe config/max-active-workers; use one positive base-10 integer in a regular single-linked file" >&2
   exit 1
 }
+if [ "$WORKER_CAPACITY" -gt 0 ]; then
+  SPAWN_WORKER_CAPACITY_LOCK="$WORKER_CAPACITY_STATE/.worker-capacity.lock"
+  if ! fm_lock_try_acquire "$SPAWN_WORKER_CAPACITY_LOCK"; then
+    echo "error: worker capacity admission is in progress; retry this spawn" >&2
+    exit 1
+  fi
+  SPAWN_WORKER_CAPACITY_LOCK_HELD=1
+fi
 if [ "$RELAUNCH" -eq 0 ] && [ "$WORKER_CAPACITY" -gt 0 ]; then
-  WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
+  WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
     echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
     exit 1
   }
@@ -1031,7 +1051,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   if [ "$WORKER_CAPACITY" -gt 0 ]; then
-    WORKER_ACTIVE=$(fm_worker_capacity_active "$STATE") || {
+    WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
       echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
       exit 1
     }
@@ -2741,6 +2761,10 @@ if [ -z "$SPAWN_CAPACITY_RESERVATION" ] && [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; 
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
 fi
+if [ -z "$SPAWN_CAPACITY_RESERVATION" ] && [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+  SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+  fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK"
+fi
 [ "$BACKEND" = orca ] && ORCA_ABORT_CLEANUP=0
 
 sq_brief=$(shell_quote "$BRIEF")
@@ -2775,6 +2799,7 @@ fi
 if [ "$KIND" = secondmate ]; then
   sq_home=$(shell_quote "$PROJ_ABS")
   sq_primary_home=$(shell_quote "$FM_HOME")
+  sq_capacity_state=$(shell_quote "$WORKER_CAPACITY_STATE")
   case "$HARNESS" in
     claude) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
@@ -2786,7 +2811,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_WORKER_CAPACITY_HOST_STATE=$sq_capacity_state FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"
@@ -2850,6 +2875,10 @@ fi
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
+fi
+if [ "$SPAWN_WORKER_CAPACITY_LOCK_HELD" = 1 ]; then
+  SPAWN_WORKER_CAPACITY_LOCK_HELD=0
+  fm_lock_release "$SPAWN_WORKER_CAPACITY_LOCK"
 fi
 if [ -n "$SPAWN_CAPACITY_RESERVATION" ]; then
   if ! fm_worker_capacity_pending_until_started "$STATE" "$SPAWN_CAPACITY_RESERVATION"; then
