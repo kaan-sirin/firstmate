@@ -31,11 +31,11 @@ make_meta() {
   printf 'window=%s\n' "$verdict" > "$state/$id.meta"
 }
 
-test_absent_limit_is_unlimited() {
+test_absent_limit_defaults_to_one() {
   local dir="$TMP_ROOT/absent"
   mkdir -p "$dir/config"
-  [ "$(fm_worker_capacity_limit "$dir/config")" = 0 ] || fail "absent limit was not unlimited"
-  pass "absent worker limit preserves compatibility"
+  [ "$(fm_worker_capacity_limit "$dir/config")" = 1 ] || fail "absent limit did not default to one"
+  pass "absent worker limit defaults to one"
 }
 
 test_valid_limit_and_malformed_values() {
@@ -64,8 +64,8 @@ test_unsafe_config_directory_refuses_limit_lookup() {
   printf 'not a directory\n' > "$dir/config-file"
   fm_worker_capacity_limit "$dir/config-file" >/dev/null \
     && fail "non-directory config path was accepted"
-  [ "$(fm_worker_capacity_limit "$dir/absent-config")" = 0 ] \
-    || fail "absent config directory did not preserve unlimited behavior"
+  [ "$(fm_worker_capacity_limit "$dir/absent-config")" = 1 ] \
+    || fail "absent config directory did not use the default limit"
   pass "worker limit refuses unsafe config directories"
 }
 
@@ -173,13 +173,12 @@ EOF
   pass "remote routes share one host capacity index"
 }
 
-test_spawn_refuses_when_capacity_is_full() {
+test_default_limit_refuses_when_capacity_is_full() {
   local dir="$TMP_ROOT/spawn" home fakebin out status
   dir="$TMP_ROOT/spawn"
   home="$dir/home"
   fakebin="$dir/fakebin"
-  mkdir -p "$home/state" "$home/config" "$fakebin"
-  printf '1\n' > "$home/config/max-active-workers"
+  mkdir -p "$home/state" "$fakebin"
   cat > "$home/state/worker.meta" <<'EOF'
 window=firstmate:worker
 endpoint_task_id=worker
@@ -200,7 +199,7 @@ EOF
   status=$?
   [ "$status" -ne 0 ] || fail "spawn started despite a full worker limit"
   assert_contains "$out" "worker capacity reached (1/1 active)" "spawn refusal did not report the capacity state"
-  pass "fm-spawn refuses a new worker when the configured limit is full"
+  pass "fm-spawn refuses a new worker when the default limit is full"
 }
 
 test_local_secondmate_uses_primary_host_capacity() {
@@ -529,7 +528,7 @@ test_interrupted_submit_keeps_capacity_reserved() {
   pass "interrupted submit keeps its worker capacity reservation"
 }
 
-test_absent_limit_is_unlimited
+test_absent_limit_defaults_to_one
 test_valid_limit_and_malformed_values
 test_unsafe_config_directory_refuses_limit_lookup
 test_inherited_limit_rejects_unsafe_endpoints
@@ -537,7 +536,7 @@ test_only_proven_dead_workers_free_slots
 test_started_launch_reconciles_capacity_reservation
 test_expired_dead_launch_releases_capacity_reservation
 test_remote_routes_share_host_capacity_index
-test_spawn_refuses_when_capacity_is_full
+test_default_limit_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
 test_remote_secondmate_uses_parent_route_capacity
 test_nested_secondmate_uses_root_host_capacity
