@@ -1,0 +1,10 @@
+{
+  "recommendation": "Build it",
+  "outcome": "A tested PR",
+  "scope": "One change",
+  "non_goals": "No deploy",
+  "delivery_boundary": "merge+deploy",
+  "external_boundaries": "No production write",
+  "questions": [],
+  "complete_plan_approved": false
+}

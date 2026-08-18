@@ -1,0 +1,19 @@
+$ fm-ship-end-to-end.sh publish-direct demo --contract-file valid-contract.json
+fingerprint=8180de955c8bb2706fdcfeedca51468fbcdb73347c10d9a4b8ae8396d3121b09
+$ jq .contract.delivery_boundary home/data/demo/ship-preflight.json
+pr-only
+$ fm-ship-end-to-end.sh publish-direct reject-1 --contract-file boundary-1.json
+boundary=merge exit=1 output=fm-ship-end-to-end: delivery boundary must be pr-only
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-2 --contract-file boundary-2.json
+boundary=deploy exit=1 output=fm-ship-end-to-end: delivery boundary must be pr-only
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-3 --contract-file boundary-3.json
+boundary=merge+deploy exit=1 output=fm-ship-end-to-end: delivery boundary must be pr-only
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-4 --contract-file boundary-4.json
+boundary=pr-only+merge exit=1 output=fm-ship-end-to-end: delivery boundary must be pr-only
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-5 --contract-file boundary-5.json
+boundary=arbitrary-boundary exit=1 output=fm-ship-end-to-end: delivery boundary must be pr-only
+record=not-written

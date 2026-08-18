@@ -1,0 +1,17 @@
+$ fm-ship-end-to-end.sh publish-direct demo --contract-file valid-contract.json
+$ jq .contract.delivery_boundary home/data/demo/ship-preflight.json
+$ fm-ship-end-to-end.sh publish-direct reject-merge --contract-file merge.json
+exit=1 output=fm-ship-end-to-end: unsafe task record directory
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-deploy --contract-file deploy.json
+exit=1 output=fm-ship-end-to-end: unsafe task record directory
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-merge+deploy --contract-file merge+deploy.json
+exit=1 output=fm-ship-end-to-end: unsafe task id
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-pr-only+merge --contract-file pr-only+merge.json
+exit=1 output=fm-ship-end-to-end: unsafe task id
+record=not-written
+$ fm-ship-end-to-end.sh publish-direct reject-arbitrary-boundary --contract-file arbitrary-boundary.json
+exit=1 output=fm-ship-end-to-end: unsafe task record directory
+record=not-written
