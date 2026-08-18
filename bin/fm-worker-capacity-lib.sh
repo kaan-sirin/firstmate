@@ -127,7 +127,11 @@ fm_worker_capacity_active_in_state() {  # <state-dir> <skip-remote-secondmates>
 }
 
 fm_worker_capacity_active_host() {  # <primary-state-dir>
-  local state=$1 meta kind home remote_host active count=0
+  fm_worker_capacity_active_host_state "$1" $'\n'
+}
+
+fm_worker_capacity_active_host_state() {  # <state-dir> <visited-homes>
+  local state=$1 visited=$2 meta id kind home remote_host active count=0
   [ -d "$state" ] || { printf '0'; return 0; }
   active=$(fm_worker_capacity_active_in_state "$state" 1) || return 1
   count=$active
@@ -137,12 +141,19 @@ fm_worker_capacity_active_host() {  # <primary-state-dir>
     kind=$(fm_meta_get "$meta" kind)
     remote_host=$(fm_meta_get "$meta" remote_host)
     [ "$kind" = secondmate ] && [ -z "$remote_host" ] || continue
+    id=${meta##*/}
+    id=${id%.meta}
+    case "$id" in ''|*[!A-Za-z0-9._-]*) shopt -u nullglob; return 1 ;; esac
     home=$(fm_meta_get "$meta" home)
     case "$home" in /*) ;; *) shopt -u nullglob; return 1 ;; esac
+    case "$home" in *$'\n'*|*$'\r'*) shopt -u nullglob; return 1 ;; esac
+    home=$(CDPATH='' cd -- "$home" 2>/dev/null && pwd -P) || { shopt -u nullglob; return 1; }
     [ -d "$home" ] && [ ! -L "$home" ] \
       && [ -f "$home/.fm-secondmate-home" ] && [ ! -L "$home/.fm-secondmate-home" ] \
+      && [ "$(<"$home/.fm-secondmate-home")" = "$id" ] \
       && [ -d "$home/state" ] || { shopt -u nullglob; return 1; }
-    active=$(fm_worker_capacity_active_in_state "$home/state" 1) || { shopt -u nullglob; return 1; }
+    case "$visited" in *$'\n'"$home"$'\n'*) shopt -u nullglob; return 1 ;; esac
+    active=$(fm_worker_capacity_active_host_state "$home/state" "$visited$home"$'\n') || { shopt -u nullglob; return 1; }
     count=$((count + active))
   done
   shopt -u nullglob
