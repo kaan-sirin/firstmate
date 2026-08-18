@@ -40,10 +40,13 @@ FM_ROOT="${FM_ROOT_OVERRIDE:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 TARGET_HOME=${FM_HOME:?FM_HOME is required}
 CONTROL_STATE="$TARGET_HOME/state/parent-route"
 CONTROL_DATA="$TARGET_HOME/data/.parent-route"
+CAPACITY_STATE="$FM_ROOT/.firstmate-worker-capacity"
 REMOTE_HERDR_SESSION=fm-remote
 
 # shellcheck source=bin/fm-backend.sh
 . "$SCRIPT_DIR/fm-backend.sh"
+# shellcheck source=bin/fm-worker-capacity-lib.sh
+. "$SCRIPT_DIR/fm-worker-capacity-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
@@ -63,6 +66,23 @@ validate_home() { # <id> [allow-absent]
 }
 
 meta_path() { printf '%s/%s.meta\n' "$CONTROL_STATE" "$1"; }
+
+ensure_capacity_state() {
+  if [ -e "$CAPACITY_STATE" ] || [ -L "$CAPACITY_STATE" ]; then
+    [ -d "$CAPACITY_STATE" ] && [ ! -L "$CAPACITY_STATE" ] \
+      || die "remote worker capacity state is unsafe"
+  else
+    mkdir "$CAPACITY_STATE" 2>/dev/null || true
+    [ -d "$CAPACITY_STATE" ] && [ ! -L "$CAPACITY_STATE" ] \
+      || die "cannot create remote worker capacity state"
+  fi
+}
+
+register_capacity_route() {
+  local id=$1
+  fm_worker_capacity_remote_route_register "$CAPACITY_STATE" "$CONTROL_STATE" "$id" "$TARGET_HOME" \
+    || die "remote secondmate capacity route is invalid"
+}
 
 remote_endpoint_load() {
   local id=$1 herdr_session
@@ -148,6 +168,8 @@ cmd_launch() {
   # a remote route depends on. bin/fm-remote-doctor.sh is the readiness owner.
   case "$selected_backend" in herdr) ;; *) die "a remote secondmate runs only on the herdr backend, not '$selected_backend'" ;; esac
   mkdir -p "$CONTROL_STATE" "$CONTROL_DATA"
+  ensure_capacity_state
+  register_capacity_route "$id"
   meta=$(meta_path "$id")
   if [ -f "$meta" ]; then
     remote_endpoint_require "$id"
@@ -171,6 +193,7 @@ cmd_launch() {
   [ -z "$traceparent" ] || ARGS+=(--traceparent "$traceparent")
   if ! out=$(HERDR_SESSION="$REMOTE_HERDR_SESSION" FM_HOME="$FM_ROOT" FM_ROOT_OVERRIDE="$FM_ROOT" \
     FM_STATE_OVERRIDE="$CONTROL_STATE" FM_DATA_OVERRIDE="$CONTROL_DATA" \
+    FM_WORKER_CAPACITY_HOST_STATE="$CAPACITY_STATE" \
     FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_SKIP_SECONDMATE_INHERIT=1 \
     "$SCRIPT_DIR/fm-spawn.sh" "${ARGS[@]}" 2>&1); then
     [ -z "$out" ] || printf '%s\n' "$out" >&2
@@ -180,6 +203,7 @@ cmd_launch() {
   herdr_session=$(fm_meta_get "$meta" herdr_session)
   [ "$herdr_session" = "$REMOTE_HERDR_SESSION" ] \
     || die "remote launch recorded Herdr session '${herdr_session:-missing}', expected '$REMOTE_HERDR_SESSION'"
+  register_capacity_route "$id"
   print_route "$id"
 }
 

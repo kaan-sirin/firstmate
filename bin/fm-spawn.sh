@@ -692,7 +692,7 @@ worker_capacity_parent_meta_matches_home() {
 }
 
 worker_capacity_host_state() {
-  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state route_state id
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker home parent_home parent_state route_state remote_capacity_state id
   local climbed=0 visited=$'\n'
   if [ -z "$host_state" ]; then
     home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
@@ -733,7 +733,12 @@ worker_capacity_host_state() {
               echo "error: remote secondmate parent route is invalid; cannot resolve host worker capacity" >&2
               return 1
             }
-          host_state=$route_state
+          remote_capacity_state="$FM_ROOT/.firstmate-worker-capacity"
+          fm_worker_capacity_remote_route_register "$remote_capacity_state" "$route_state" "$id" "$home" || {
+            echo "error: remote secondmate capacity route is invalid; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          host_state=$remote_capacity_state
           break
           ;;
         local)
@@ -1043,7 +1048,7 @@ if [ "$WORKER_CAPACITY" -gt 0 ]; then
     fi
     SPAWN_WORKER_CAPACITY_LOCK_HELD=1
     if [ "$RELAUNCH" -eq 0 ]; then
-      WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
+      WORKER_ACTIVE=$(FM_WORKER_CAPACITY_RECONCILE=1 fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
         echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
         exit 1
       }
@@ -1144,7 +1149,7 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   }
   if [ "$WORKER_CAPACITY" -gt 0 ]; then
-    WORKER_ACTIVE=$(fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
+    WORKER_ACTIVE=$(FM_WORKER_CAPACITY_RECONCILE=1 fm_worker_capacity_active_host "$WORKER_CAPACITY_STATE") || {
       echo "error: could not prove the current active-worker count; refusing a new worker rather than risking host memory exhaustion" >&2
       exit 1
     }
