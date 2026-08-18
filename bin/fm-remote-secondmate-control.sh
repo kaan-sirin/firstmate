@@ -48,6 +48,8 @@ REMOTE_HERDR_SESSION=fm-remote
 . "$SCRIPT_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-worker-capacity-lib.sh
 . "$SCRIPT_DIR/fm-worker-capacity-lib.sh"
+# shellcheck source=bin/fm-wake-lib.sh
+. "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
 
@@ -298,7 +300,7 @@ cmd_update() {
 }
 
 cmd_retire() {
-  local id=$1 force=${2:-} rc
+  local id=$1 force=${2:-} rc capacity_lock
   validate_id "$id"
   validate_home "$id" yes || rc=$?
   if [ "${rc:-0}" -eq 2 ]; then
@@ -320,6 +322,14 @@ cmd_retire() {
       FM_CONFIG_OVERRIDE="$TARGET_HOME/config" FM_TEARDOWN_GUARD_DONE=1 \
       "$SCRIPT_DIR/fm-teardown.sh" "$id"
   fi
+  ensure_capacity_state
+  capacity_lock="$CAPACITY_STATE/.worker-capacity.lock"
+  fm_lock_acquire_wait "$capacity_lock" || die "cannot lock remote worker capacity state"
+  if ! fm_worker_capacity_remote_route_release "$CAPACITY_STATE" "$id"; then
+    fm_lock_release "$capacity_lock"
+    die "cannot release remote worker capacity route"
+  fi
+  fm_lock_release "$capacity_lock" || die "cannot unlock remote worker capacity state"
 }
 
 case "${1:-}" in
