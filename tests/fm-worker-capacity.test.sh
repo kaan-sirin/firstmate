@@ -42,9 +42,28 @@ test_valid_limit_and_malformed_values() {
   [ "$(fm_worker_capacity_limit "$dir/config")" = 2 ] || fail "valid worker limit was not read"
   printf '0\n' > "$dir/config/max-active-workers"
   fm_worker_capacity_limit "$dir/config" >/dev/null && fail "zero worker limit was accepted"
+  printf '2' > "$dir/config/max-active-workers"
+  fm_worker_capacity_limit "$dir/config" >/dev/null && fail "unterminated worker limit was accepted"
+  printf '2\n\n' > "$dir/config/max-active-workers"
+  fm_worker_capacity_limit "$dir/config" >/dev/null && fail "blank extra line in worker limit was accepted"
   printf '2\n3\n' > "$dir/config/max-active-workers"
   fm_worker_capacity_limit "$dir/config" >/dev/null && fail "multi-line worker limit was accepted"
-  pass "worker limit accepts one bounded positive integer only"
+  pass "worker limit accepts one newline-terminated positive integer only"
+}
+
+test_unsafe_config_directory_refuses_limit_lookup() {
+  local dir="$TMP_ROOT/config-directory"
+  mkdir -p "$dir/real-config"
+  printf '1\n' > "$dir/real-config/max-active-workers"
+  ln -s "$dir/real-config" "$dir/linked-config"
+  fm_worker_capacity_limit "$dir/linked-config" >/dev/null \
+    && fail "symlinked config directory was accepted"
+  printf 'not a directory\n' > "$dir/config-file"
+  fm_worker_capacity_limit "$dir/config-file" >/dev/null \
+    && fail "non-directory config path was accepted"
+  [ "$(fm_worker_capacity_limit "$dir/absent-config")" = 0 ] \
+    || fail "absent config directory did not preserve unlimited behavior"
+  pass "worker limit refuses unsafe config directories"
 }
 
 test_only_proven_dead_workers_free_slots() {
@@ -90,7 +109,99 @@ EOF
   pass "fm-spawn refuses a new worker when the configured limit is full"
 }
 
+make_pending_launch_fakebin() {
+  local dir=$1 fakebin
+  fakebin="$dir/fakebin"
+  mkdir -p "$fakebin"
+  cat > "$fakebin/tmux" <<'EOF'
+#!/usr/bin/env bash
+set -u
+case "$*" in
+  *'#{pane_current_path}'*) printf '%s\n' "$FM_FAKE_PANE_PATH"; exit 0 ;;
+  *'#{pane_current_command}'*) printf 'bash\n'; exit 0 ;;
+  *'#{pane_id}'*) printf '@fake\n'; exit 0 ;;
+  *'#S'*) printf 'firstmate\n'; exit 0 ;;
+esac
+case "${1:-}" in
+  list-windows)
+    for meta in "$FM_FAKE_STATE"/*.meta; do
+      [ -f "$meta" ] || continue
+      printf 'fm-%s\n' "$(basename "$meta" .meta)"
+    done
+    ;;
+  new-window) printf '@fake\n' ;;
+  send-keys)
+    case "$*" in
+      *'fm-first'*)
+        case "$*" in
+          *' -l '*)
+            : > "$FM_LAUNCH_TYPED"
+            while [ ! -e "$FM_ALLOW_LAUNCH" ]; do sleep 0.05; done
+            ;;
+        esac
+        ;;
+    esac
+    ;;
+esac
+EOF
+  chmod +x "$fakebin/tmux"
+  printf '%s\n' '#!/usr/bin/env bash' 'exit 0' > "$fakebin/treehouse"
+  chmod +x "$fakebin/treehouse"
+  printf '%s\n' "$fakebin"
+}
+
+run_pending_launch_spawn() {
+  local home=$1 project=$2 worktree=$3 fakebin=$4 id=$5
+  FM_ROOT_OVERRIDE='' FM_HOME="$home" \
+    FM_STATE_OVERRIDE="$home/state" FM_DATA_OVERRIDE="$home/data" \
+    FM_PROJECTS_OVERRIDE="$home/projects" FM_CONFIG_OVERRIDE="$home/config" \
+    FM_SPAWN_NO_GUARD=1 FM_FAKE_STATE="$home/state" \
+    FM_FAKE_PANE_PATH="$worktree" TMUX='fake,1,0' PATH="$fakebin:$PATH" \
+    "$ROOT/bin/fm-spawn.sh" "$id" "$project" codex --mode no-mistakes --yolo off
+}
+
+test_pending_launch_keeps_capacity_reserved() {
+  local dir="$TMP_ROOT/pending" home project worktree fakebin first_pid out status i
+  dir="$TMP_ROOT/pending"
+  home="$dir/home"
+  project="$dir/project"
+  worktree="$dir/worktree"
+  mkdir -p "$home/state" "$home/config" "$home/data/first" "$home/data/second" "$home/projects"
+  printf '1\n' > "$home/config/max-active-workers"
+  printf 'first brief\n' > "$home/data/first/brief.md"
+  printf 'second brief\n' > "$home/data/second/brief.md"
+  git init -q -b main "$project"
+  git -C "$project" -c user.name=tests -c user.email=tests@example.invalid commit -q --allow-empty -m init
+  git clone -q --bare "$project" "$dir/origin.git"
+  git -C "$project" remote add origin "file://$dir/origin.git"
+  git -C "$project" worktree add -q --detach "$worktree"
+  fakebin=$(make_pending_launch_fakebin "$dir")
+
+  FM_LAUNCH_TYPED="$dir/launch-typed" FM_ALLOW_LAUNCH="$dir/allow-launch" \
+    run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" first > "$dir/first.out" 2>&1 &
+  first_pid=$!
+  for i in $(seq 1 100); do
+    [ -e "$dir/launch-typed" ] && break
+    sleep 0.05
+  done
+  [ -e "$dir/launch-typed" ] || fail "first spawn did not reach launch submission"
+
+  out=$(FM_LAUNCH_TYPED="$dir/launch-typed" FM_ALLOW_LAUNCH="$dir/allow-launch" \
+    run_pending_launch_spawn "$home" "$project" "$worktree" "$fakebin" second 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "second spawn started while first launch was pending"
+  assert_absent "$home/state/second.meta" "pending launch admitted a second worker"
+
+  : > "$dir/allow-launch"
+  wait "$first_pid"
+  status=$?
+  [ "$status" -eq 0 ] || fail "first spawn did not finish after launch was allowed"
+  pass "pending launch keeps its worker capacity reservation"
+}
+
 test_absent_limit_is_unlimited
 test_valid_limit_and_malformed_values
+test_unsafe_config_directory_refuses_limit_lookup
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
+test_pending_launch_keeps_capacity_reserved
