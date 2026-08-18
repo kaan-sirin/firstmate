@@ -120,7 +120,14 @@ fm_worker_capacity_pending_counts() {  # <state-dir> <pending-path>
   case "$id" in ''|*[!A-Za-z0-9._-]*) return 2 ;; esac
   [ "$(<"$pending")" = "$id" ] || return 2
   meta="$state/$id.meta"
-  [ ! -e "$meta" ] && [ ! -L "$meta" ] && return 0
+  if [ ! -e "$meta" ] && [ ! -L "$meta" ]; then
+    if [ "${FM_WORKER_CAPACITY_RECONCILE:-0}" = 1 ] \
+      && fm_worker_capacity_pending_expired "$pending"; then
+      fm_worker_capacity_pending_release "$state" "$id" || return 2
+      return 1
+    fi
+    return 0
+  fi
   [ -f "$meta" ] && [ ! -L "$meta" ] || return 2
   backend=$(fm_backend_of_meta "$meta") || return 2
   target=$(fm_backend_target_of_meta "$meta") || return 2

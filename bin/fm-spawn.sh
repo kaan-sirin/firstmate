@@ -1835,6 +1835,14 @@ if [ "$KIND" = secondmate ]; then
       echo "error: secondmate $ID inherited an unsafe worker capacity setting" >&2
       exit 1
     }
+    if [ -e "$CONFIG/max-active-workers" ] || [ -L "$CONFIG/max-active-workers" ]; then
+      [ -f "$PROJ_ABS/config/max-active-workers" ] \
+        && [ ! -L "$PROJ_ABS/config/max-active-workers" ] \
+        && fm_worker_capacity_file_valid "$PROJ_ABS/config/max-active-workers" || {
+          echo "error: secondmate $ID did not inherit an explicit max-active-workers setting; refusing launch" >&2
+          exit 1
+        }
+    fi
     if [ "$SECONDMATE_WORKER_CAPACITY" != "$WORKER_CAPACITY" ]; then
       echo "error: secondmate $ID did not inherit max-active-workers=$WORKER_CAPACITY; refusing launch" >&2
       exit 1

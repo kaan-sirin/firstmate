@@ -143,6 +143,18 @@ test_expired_dead_launch_releases_capacity_reservation() {
   pass "expired dead launches release capacity reservations"
 }
 
+test_expired_unpublished_launch_releases_capacity_reservation() {
+  local state="$TMP_ROOT/reconcile-unpublished/state" pending
+  mkdir -p "$state"
+  fm_worker_capacity_pending_reserve "$state" launch || fail "could not create an unpublished launch reservation"
+  pending=$(fm_worker_capacity_pending_path "$state" launch)
+  [ "$(FM_WORKER_CAPACITY_RECONCILE=1 FM_WORKER_CAPACITY_PENDING_GRACE_SECONDS=0 fm_worker_capacity_active "$state")" = 0 ] \
+    || fail "expired unpublished launch retained worker capacity"
+  [ ! -e "$pending" ] && [ ! -L "$pending" ] \
+    || fail "expired unpublished launch left a capacity reservation"
+  pass "expired unpublished launches release capacity reservations"
+}
+
 test_remote_routes_share_host_capacity_index() {
   local dir="$TMP_ROOT/remote-host-index" host_state first second first_route second_route
   dir="$TMP_ROOT/remote-host-index"
@@ -535,6 +547,7 @@ test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_started_launch_reconciles_capacity_reservation
 test_expired_dead_launch_releases_capacity_reservation
+test_expired_unpublished_launch_releases_capacity_reservation
 test_remote_routes_share_host_capacity_index
 test_default_limit_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
