@@ -1,0 +1,20 @@
+ok - absent worker limit defaults to one
+ok - worker limit accepts one newline-terminated positive integer only
+ok - worker limit refuses unsafe config directories
+fm-config-inherit: error: unsafe or invalid primary source max-active-workers at /tmp/fm-worker-capacity.IOcjbL/inherit/source/max-active-workers
+fm-config-inherit: error: unsafe or invalid destination max-active-workers at /tmp/fm-worker-capacity.IOcjbL/inherit/destination/max-active-workers
+ok - worker limit inheritance rejects unsafe source and destination
+ok - only proven dead or missing workers free capacity
+ok - started launches reconcile their capacity reservations
+ok - expired dead launches release capacity reservations
+ok - expired unpublished launches release capacity reservations
+ok - remote routes share one host capacity index
+ok - remote job registry includes routes outside one parent
+ok - retired remote routes release host capacity
+ok - fm-spawn refuses a new worker when the default limit is full
+ok - local secondmates share the primary host worker capacity
+ok - remote secondmates share their parent-route worker capacity
+ok - nested secondmates share root host worker capacity
+ok - fm-spawn applies worker capacity to relaunches
+ok - post-Enter launch keeps its worker capacity reservation
+ok - interrupted submit keeps its worker capacity reservation

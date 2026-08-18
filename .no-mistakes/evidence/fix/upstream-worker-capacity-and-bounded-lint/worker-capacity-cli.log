@@ -1,0 +1,4 @@
+Scenario: a host already has one active worker and uses the default capacity limit.
+Command exit status: 1
+CLI output:
+error: worker capacity reached (1/1 active); queue this task or wait for a worker to finish

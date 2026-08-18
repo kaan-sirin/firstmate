@@ -1,0 +1,9 @@
+Scenario: three failing lint roots are replayed through the public fm-lint.sh CLI.
+jobs=1 exit status: 1
+jobs=2 exit status: 1
+Byte comparison: identical to each other and to the fixed expected replay.
+Exact replayed CLI output:
+fm-lint.sh: ShellCheck 0.11.0 (pinned 0.11.0)
+alpha.sh:1:1: warning: fixture diagnostic [SC9008]
+gamma.sh:1:1: warning: fixture diagnostic [SC9008]
+beta.sh:1:1: warning: fixture diagnostic [SC9008]
