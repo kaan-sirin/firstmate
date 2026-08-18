@@ -217,6 +217,48 @@ EOF
   pass "remote secondmates share their parent-route worker capacity"
 }
 
+test_nested_secondmate_uses_root_host_capacity() {
+  local dir="$TMP_ROOT/nested-host-capacity" primary first nested fakebin out status
+  dir="$TMP_ROOT/nested-host-capacity"
+  primary="$dir/primary"
+  first="$dir/first"
+  nested="$dir/nested"
+  fakebin="$dir/fakebin"
+  mkdir -p "$primary/state" "$first/state" "$nested/state" "$nested/config" "$fakebin"
+  printf 'first\n' > "$first/.fm-secondmate-home"
+  printf 'nested\n' > "$nested/.fm-secondmate-home"
+  printf '3\n' > "$nested/config/max-active-workers"
+  cat > "$primary/state/first.meta" <<EOF
+window=firstmate:first
+home=$first
+kind=secondmate
+EOF
+  cat > "$first/state/nested.meta" <<EOF
+window=firstmate:nested
+home=$nested
+kind=secondmate
+EOF
+  cat > "$nested/state/worker.meta" <<'EOF'
+window=firstmate:worker
+kind=ship
+EOF
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  *list-windows*) printf "%s\\n" first nested worker ;;' \
+    '  *pane_current_command*) printf "%s\\n" codex ;;' \
+    '  *) : ;;' \
+    'esac' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$nested" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_WORKER_CAPACITY_HOST_STATE="$primary/state" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "nested secondmate started despite a full root host limit"
+  assert_contains "$out" "worker capacity reached (3/3 active)" "nested secondmate did not use root host capacity"
+  pass "nested secondmates share root host worker capacity"
+}
+
 make_pending_launch_fakebin() {
   local dir=$1 fakebin
   fakebin="$dir/fakebin"
@@ -430,6 +472,7 @@ test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
 test_local_secondmate_uses_primary_host_capacity
 test_remote_secondmate_uses_parent_route_capacity
+test_nested_secondmate_uses_root_host_capacity
 test_relaunch_respects_worker_capacity
 test_post_enter_launch_keeps_capacity_reserved
 test_interrupted_submit_keeps_capacity_reserved
