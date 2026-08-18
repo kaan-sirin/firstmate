@@ -1540,6 +1540,7 @@ test_dashboard_recovery_parent_cancellation_blocks_unregistered_handoff() {
     wait "$recovery_pid" || true
     fail "dashboard recovery did not reach child registration"
   fi
+  : > "$pid_continue"
   attempts=0
   while [ ! -e "$handoff_ready" ] && [ "$attempts" -lt 100 ]; do
     sleep 0.01
