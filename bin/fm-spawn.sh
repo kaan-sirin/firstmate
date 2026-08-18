@@ -1668,6 +1668,20 @@ if [ "$KIND" = secondmate ]; then
       propagate_secondmate_inheritance "$FM_HOME" "$PROJ_ABS" "$CONFIG" "$DATA" \
       || echo "warning: secondmate $ID inheritance failed for $PROJ_ABS" >&2
   fi
+  if [ "${WORKER_CAPACITY:-0}" -gt 0 ]; then
+    if [ "${FM_SKIP_SECONDMATE_INHERIT:-0}" = 1 ]; then
+      echo "error: secondmate $ID cannot skip capacity inheritance while max-active-workers is configured" >&2
+      exit 1
+    fi
+    SECONDMATE_WORKER_CAPACITY=$(fm_worker_capacity_limit "$PROJ_ABS/config") || {
+      echo "error: secondmate $ID inherited an unsafe worker capacity setting" >&2
+      exit 1
+    }
+    if [ "$SECONDMATE_WORKER_CAPACITY" != "$WORKER_CAPACITY" ]; then
+      echo "error: secondmate $ID did not inherit max-active-workers=$WORKER_CAPACITY; refusing launch" >&2
+      exit 1
+    fi
+  fi
   if [ -f "$PROJ_ABS/data/charter.md" ]; then
     BRIEF="$PROJ_ABS/data/charter.md"
   else
@@ -2849,11 +2863,11 @@ if [ "${HERDR_PROJECTED:-0}" -eq 1 ]; then
   HERDR_PROJECTION_ABORT_CLEANUP=0
   spawn_herdr_presentation_order_lock_release
 fi
+SPAWN_CAPACITY_LAUNCH_SUBMITTED=1
 if ! spawn_send_key "$T" Enter; then
-  echo "error: could not submit the launch command to $W" >&2
+  echo "error: could not confirm launch command submission to $W; its capacity reservation is retained" >&2
   exit 1
 fi
-SPAWN_CAPACITY_LAUNCH_SUBMITTED=1
 if [ "$SPAWN_TASK_SET_LOCK_HELD" = 1 ]; then
   SPAWN_TASK_SET_LOCK_HELD=0
   fm_lock_release "$SPAWN_TASK_SET_LOCK"
