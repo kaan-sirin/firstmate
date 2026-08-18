@@ -1464,6 +1464,47 @@ test_dashboard_recovery_cancellation_blocks_enter_after_literal() {
   pass "fm-spawn dashboard recovery cancellation blocks Enter after literal"
 }
 
+test_dashboard_recovery_parent_cancellation_blocks_enter_after_final_check() {
+  local dir id state_bin agent_bin ready continue recovery_pid status attempts
+  id=rl45
+  dir=$(new_case dashboard-parent-cancel "$id")
+  add_ship_task "$dir" "$id" claude
+  printf 'zsh' > "$dir/fake/command"
+  printf 'dashboard_incarnation=i-dashboard-parent-cancel\n' >> "$dir/home/state/$id.meta"
+  state_bin="$dir/recovery-state"
+  agent_bin="$dir/recovery-agent"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+  printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+  chmod +x "$state_bin" "$agent_bin"
+  ready="$dir/final-ready"
+  continue="$dir/final-continue"
+  FM_DASHBOARD_RECOVERY_TESTING=1 FM_SPAWN_TESTING=1 \
+    FM_SPAWN_TEST_RECOVERY_FINAL_READY="$ready" FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE="$continue" \
+    PATH="$dir/fakebin:$PATH" FM_HOME="$dir/home" FM_FAKE_DIR="$dir/fake" FM_SPAWN_NO_GUARD=1 GROK_HOME="$dir/grokhome" \
+    FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" \
+    python3 -c 'import os, signal, sys; signal.signal(signal.SIGTERM, signal.SIG_DFL); os.execvpe(sys.argv[1], sys.argv[1:], os.environ)' \
+    "$ROOT/bin/fm-dashboard-recovery.sh" observe "$id" > "$dir/recovery.out" 2>&1 &
+  recovery_pid=$!
+  attempts=0
+  while [ ! -e "$ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$ready" ]; then
+    : > "$continue"
+    wait "$recovery_pid" || true
+    fail "dashboard recovery did not reach its final submission check"
+  fi
+  kill -TERM "$recovery_pid" || fail "could not cancel recovery after its final submission check"
+  if wait "$recovery_pid"; then status=0; else status=$?; fi
+  [ "$status" -eq 143 ] || fail "final-check cancellation did not stop recovery ($status): $(cat "$dir/recovery.out")"
+  grep -Fq 'encode launch-brief' "$dir/fake/literal" \
+    || fail "final-check fixture did not receive the unsubmitted launch"
+  ! grep -qx Enter "$dir/fake/keys" \
+    || fail "final-check cancellation submitted the replacement command"
+  pass "dashboard recovery parent cancellation blocks Enter after final check"
+}
+
 test_dashboard_recovery_removes_unsubmitted_missing_endpoint() {
   local dir id claim out rc
   id=rl42
@@ -1613,6 +1654,7 @@ test_direct_spawn_relaunch_participates_in_the_lifecycle_lock
 test_dashboard_recovery_marks_launch_before_submit
 test_dashboard_recovery_cancellation_wins_before_submit
 test_dashboard_recovery_cancellation_blocks_enter_after_literal
+test_dashboard_recovery_parent_cancellation_blocks_enter_after_final_check
 test_dashboard_recovery_removes_unsubmitted_missing_endpoint
 test_promotion_participates_in_the_lifecycle_lock_before_metadata_resolution
 test_spawn_relaunch_refuses_a_live_agent

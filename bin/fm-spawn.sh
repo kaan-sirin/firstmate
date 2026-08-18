@@ -3174,6 +3174,10 @@ if spawn_recovery_handoff_cancelled; then
   echo "error: dashboard recovery was cancelled for $ID" >&2
   exit 4
 fi
+if [ "${FM_SPAWN_TESTING:-0}" = 1 ] && [ -n "${FM_SPAWN_TEST_RECOVERY_FINAL_READY:-}" ] && [ -n "${FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE:-}" ]; then
+  : > "$FM_SPAWN_TEST_RECOVERY_FINAL_READY" || exit 1
+  while [ ! -e "$FM_SPAWN_TEST_RECOVERY_FINAL_CONTINUE" ]; do sleep 0.01; done
+fi
 spawn_send_key "$T" Enter
 if [ "$SPAWN_RECOVERY_HANDOFF_LOCK_HELD" = 1 ]; then
   SPAWN_RECOVERY_HANDOFF_LOCK_HELD=0
