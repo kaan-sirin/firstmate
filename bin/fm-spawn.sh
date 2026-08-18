@@ -235,12 +235,15 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 PROJECTS="${FM_PROJECTS_OVERRIDE:-$FM_HOME/projects}"
 CONFIG="${FM_CONFIG_OVERRIDE:-$FM_HOME/config}"
 SUB_HOME_MARKER=".fm-secondmate-home"
+SUB_HOME_PARENT_MARKER=".fm-secondmate-parent"
 # shellcheck source=bin/fm-ff-lib.sh
 . "$SCRIPT_DIR/fm-ff-lib.sh"
 # shellcheck source=bin/fm-wake-lib.sh
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-secondmate-nudge-lib.sh
 . "$SCRIPT_DIR/fm-secondmate-nudge-lib.sh"
+# shellcheck source=bin/fm-secondmate-parent-lib.sh
+. "$SCRIPT_DIR/fm-secondmate-parent-lib.sh"
 # shellcheck source=bin/fm-config-inherit-lib.sh
 . "$SCRIPT_DIR/fm-config-inherit-lib.sh"
 # shellcheck source=bin/fm-backend.sh
@@ -678,6 +681,69 @@ RELAUNCH_REPLACEMENT_WT=
 CONFIG_INHERIT_LOCK=
 CONFIG_INHERIT_LOCK_HELD=0
 
+worker_capacity_host_state() {
+  local host_state=${FM_WORKER_CAPACITY_HOST_STATE:-} marker parent_home parent_state
+  local id meta meta_home child_home
+  if [ -z "$host_state" ]; then
+    marker="$FM_HOME/$SUB_HOME_MARKER"
+    if [ -e "$marker" ] || [ -L "$marker" ]; then
+      [ -f "$marker" ] && [ ! -L "$marker" ] || {
+        echo "error: secondmate identity marker is unsafe; cannot resolve host worker capacity" >&2
+        return 1
+      }
+      fm_secondmate_parent_record_parse "$FM_HOME/$SUB_HOME_PARENT_MARKER" || {
+        echo "error: local secondmate has no valid parent binding; cannot resolve host worker capacity" >&2
+        return 1
+      }
+      case "$FM_SECONDMATE_PARENT_ROUTE" in
+        remote) host_state=$STATE ;;
+        local)
+          parent_home=$(CDPATH='' cd -- "$FM_SECONDMATE_PARENT_HOME" 2>/dev/null && pwd -P) || {
+            echo "error: local secondmate parent home is unavailable; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          parent_state="$parent_home/state"
+          [ -d "$parent_state" ] && [ ! -L "$parent_state" ] || {
+            echo "error: local secondmate parent state is unsafe or unavailable; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          id=$(<"$marker")
+          fm_task_id_creation_valid "$id" || {
+            echo "error: local secondmate identity is invalid; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          meta="$parent_state/$id.meta"
+          [ -f "$meta" ] && [ ! -L "$meta" ] \
+            && [ "$(fm_meta_get "$meta" kind)" = secondmate ] || {
+              echo "error: local secondmate parent record is unavailable; cannot resolve host worker capacity" >&2
+              return 1
+            }
+          meta_home=$(fm_meta_get "$meta" home)
+          child_home=$(CDPATH='' cd -- "$FM_HOME" 2>/dev/null && pwd -P) || return 1
+          meta_home=$(CDPATH='' cd -- "$meta_home" 2>/dev/null && pwd -P) || {
+            echo "error: local secondmate parent home binding is invalid; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          [ "$meta_home" = "$child_home" ] || {
+            echo "error: local secondmate parent home binding does not match this home; cannot resolve host worker capacity" >&2
+            return 1
+          }
+          host_state=$parent_state
+          ;;
+        *) return 1 ;;
+      esac
+    else
+      host_state=$STATE
+    fi
+  fi
+  host_state=$(resolve_directory_input FM_WORKER_CAPACITY_HOST_STATE "$host_state") || return 1
+  [ -d "$host_state" ] && [ ! -L "$host_state" ] || {
+    echo "error: worker capacity host state directory is unsafe or unavailable" >&2
+    return 1
+  }
+  printf '%s\n' "$host_state"
+}
+
 parse_orca_worktree_result() {
   local raw=$1 rest
   ORCA_WORKTREE_ID=${raw%%$'\t'*}
@@ -917,12 +983,7 @@ mkdir -p "$STATE" || {
   echo "error: could not create parent state directory" >&2
   exit 1
 }
-WORKER_CAPACITY_STATE=${FM_WORKER_CAPACITY_HOST_STATE:-$STATE}
-WORKER_CAPACITY_STATE=$(resolve_directory_input FM_WORKER_CAPACITY_HOST_STATE "$WORKER_CAPACITY_STATE") || exit 1
-[ -d "$WORKER_CAPACITY_STATE" ] && [ ! -L "$WORKER_CAPACITY_STATE" ] || {
-  echo "error: worker capacity host state directory is unsafe or unavailable" >&2
-  exit 1
-}
+WORKER_CAPACITY_STATE=$STATE
 # A spawn that publishes task metadata must not interleave
 # with a forced teardown that has already enumerated that set: a record
 # published inside the enumerate-then-remove window is invisible to the
@@ -950,6 +1011,7 @@ WORKER_CAPACITY=$(fm_worker_capacity_limit "$CONFIG") || {
   exit 1
 }
 if [ "$WORKER_CAPACITY" -gt 0 ]; then
+  WORKER_CAPACITY_STATE=$(worker_capacity_host_state) || exit 1
   SPAWN_WORKER_CAPACITY_LOCK="$WORKER_CAPACITY_STATE/.worker-capacity.lock"
   if ! fm_lock_try_acquire "$SPAWN_WORKER_CAPACITY_LOCK"; then
     echo "error: worker capacity admission is in progress; retry this spawn" >&2
@@ -2828,7 +2890,11 @@ if [ "$KIND" = secondmate ]; then
   # Keep this in step with fm_supervision_model (bin/fm-wake-lib.sh): Claude's
   # Stop auto-arm and Cursor's stop-hook park both run the watcher only BETWEEN
   # turns, so a fresh beacon with no live watcher is their healthy mid-turn state.
-  sq_capacity_state=$(shell_quote "$WORKER_CAPACITY_STATE")
+  capacity_state_env=
+  if [ "$WORKER_CAPACITY" -gt 0 ]; then
+    sq_capacity_state=$(shell_quote "$WORKER_CAPACITY_STATE")
+    capacity_state_env="FM_WORKER_CAPACITY_HOST_STATE=$sq_capacity_state"
+  fi
   case "$HARNESS" in
     claude|cursor) supervision_model=autoarm ;;
     *) supervision_model=persistent ;;
@@ -2840,7 +2906,7 @@ if [ "$KIND" = secondmate ]; then
   # not enable them across the launch boundary (bin/fm-trace-context-lib.sh header).
   # Reuse the single frozen decision from the carrier resolution above so the
   # injected carrier and this on/off snapshot are guaranteed to agree.
-  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home FM_WORKER_CAPACITY_HOST_STATE=$sq_capacity_state FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
+  LAUNCH="FM_ROOT_OVERRIDE= FM_STATE_OVERRIDE= FM_DATA_OVERRIDE= FM_PROJECTS_OVERRIDE= FM_CONFIG_OVERRIDE= FM_PUBLIC_FOLLOWUP_PRIMARY_HOME=$sq_primary_home $capacity_state_env FM_HOME=$sq_home FM_TRACE_CONTEXT=$SPAWN_TRACE_EFFECTIVE FM_SUPERVISION_MODEL=$supervision_model $LAUNCH"
 fi
 if [ -z "$SPAWN_TRACEPARENT" ] && [ "$RELAUNCH" -eq 1 ]; then
   LAUNCH="unset TRACEPARENT; $LAUNCH"

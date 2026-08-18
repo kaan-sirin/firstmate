@@ -154,7 +154,11 @@ test_local_secondmate_uses_primary_host_capacity() {
   child="$dir/child"
   fakebin="$dir/fakebin"
   mkdir -p "$primary/state" "$primary/config" "$child/state" "$child/config" "$fakebin"
-  : > "$child/.fm-secondmate-home"
+  printf 'secondmate\n' > "$child/.fm-secondmate-home"
+  printf '%s\n' \
+    'schema=fm-secondmate-parent.v1' \
+    'route=local' \
+    "parent_home=$primary" > "$child/.fm-secondmate-parent"
   printf '1\n' > "$primary/config/max-active-workers"
   printf '1\n' > "$child/config/max-active-workers"
   cat > "$primary/state/secondmate.meta" <<EOF
@@ -171,8 +175,7 @@ EOF
     '  *) : ;;' \
     'esac' > "$fakebin/tmux"
   chmod +x "$fakebin/tmux"
-  out=$(PATH="$fakebin:$PATH" FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" \
-    FM_WORKER_CAPACITY_HOST_STATE="$primary/state" FM_SPAWN_NO_GUARD=1 \
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" FM_SPAWN_NO_GUARD=1 \
     "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
   status=$?
   [ "$status" -ne 0 ] || fail "secondmate started despite a full primary host limit"
