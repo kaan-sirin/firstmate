@@ -118,10 +118,14 @@ fi
 case "$agent_state" in dead|missing) ;; *) exit 0 ;; esac
 PREFLIGHT_FINGERPRINT=$(fm_meta_get "$META" preflight_fingerprint)
 if [ -n "$PREFLIGHT_FINGERPRINT" ]; then
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" validate "$ID" >/dev/null || exit 1
   PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
   fm_lock_acquire_wait "$PREFLIGHT_LOCK" || exit 1
   PREFLIGHT_LOCK_HELD=1
   PREFLIGHT_LOCK_OWNER=${BASHPID:-$$}
+  FM_HOME="$FM_HOME" FM_DATA_OVERRIDE="$DATA" FM_STATE_OVERRIDE="$STATE" \
+    "$SCRIPT_DIR/fm-ship-end-to-end.sh" validate "$ID" >/dev/null || exit 1
 fi
 preflight_awaiting_approval() {
   local rc=0

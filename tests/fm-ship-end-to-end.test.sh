@@ -799,7 +799,7 @@ SH
 }
 
 test_recovery_submission_serializes_preflight_corrections() {
-  local home="$TMP_ROOT/recovery-serialization" project="$TMP_ROOT/recovery-serialization-project" worktree="$TMP_ROOT/recovery-serialization-worktree" remote="$TMP_ROOT/recovery-serialization-remote.git" contract="$TMP_ROOT/recovery-serialization-contract.json" corrected="$TMP_ROOT/recovery-serialization-corrected.json" fakebin="$TMP_ROOT/recovery-serialization-bin" id=recovery-serialization-a1 fp status attempts submitted_line published_line spawn_pid publisher_pid real_mktemp
+  local home="$TMP_ROOT/recovery-serialization" project="$TMP_ROOT/recovery-serialization-project" worktree="$TMP_ROOT/recovery-serialization-worktree" remote="$TMP_ROOT/recovery-serialization-remote.git" contract="$TMP_ROOT/recovery-serialization-contract.json" corrected="$TMP_ROOT/recovery-serialization-corrected.json" fakebin="$TMP_ROOT/recovery-serialization-bin" id=recovery-serialization-a1 fp status attempts submitted_line published_line spawn_pid publisher_pid real_mktemp holder_pid holder_owner tmp
   mkdir -p "$home/data" "$home/state" "$home/config" "$project" "$fakebin"
   real_mktemp=$(command -v mktemp) || fail "could not find mktemp"
   make_contract "$contract"
@@ -928,6 +928,64 @@ SH
     || fail "recovery correction published before replacement command submission"
   jq -e '.state == "awaiting_approval" and .contract.outcome == "Corrected tested PR"' "$home/data/$id/ship-preflight.json" >/dev/null \
     || fail "recovery correction did not replace the consumed approval after submission"
+  fp=$(publish_preflight_record "$home" "$id" "$contract" direct approved 102 3) || fail "could not restore recovery preflight"
+  tmp=$(mktemp "$home/state/.${id}.meta.XXXXXX") || fail "could not prepare restored recovery metadata"
+  if ! awk -F= -v fp="$fp" '$1 != "preflight_fingerprint" { print } END { print "preflight_fingerprint=" fp }' "$home/state/$id.meta" > "$tmp" \
+    || ! mv -f -- "$tmp" "$home/state/$id.meta"; then
+    rm -f -- "$tmp"
+    fail "could not restore recovery preflight metadata"
+  fi
+  rm -f -- "$home/launch-literal" "$home/release-literal"
+  (
+    STATE="$home/data/$id"
+    FM_STATE_OVERRIDE="$STATE" . "$ROOT/bin/fm-wake-lib.sh"
+    fm_lock_acquire_wait "$home/data/$id/.ship-preflight.lock"
+    : > "$home/holder-ready"
+    while [ ! -e "$home/holder-release" ]; do sleep 0.01; done
+    fm_lock_release "$home/data/$id/.ship-preflight.lock"
+  ) &
+  holder_pid=$!
+  attempts=0
+  while [ ! -e "$home/holder-ready" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/holder-ready" ]; then
+    : > "$home/holder-release"
+    wait "$holder_pid" || true
+    fail "independent preflight lock holder did not start"
+  fi
+  holder_owner=$(cat "$home/data/$id/.ship-preflight.lock/pid")
+  PATH="$fakebin:$PATH" FM_RACE_REAL_MKTEMP="$real_mktemp" FM_RACE_ID="$id" FM_RACE_WORKTREE="$worktree" FM_RACE_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_RACE_LAUNCH_LITERAL="$home/launch-literal" FM_RACE_RELEASE_LITERAL="$home/release-literal" FM_RACE_EVENTS="$home/events" FM_HOME="$home" FM_DATA_OVERRIDE="$home/data" FM_STATE_OVERRIDE="$home/state" FM_CONFIG_OVERRIDE="$home/config" FM_SPAWN_NO_GUARD=1 FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK="$home/data/$id/.ship-preflight.lock" FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER="$holder_owner" "$ROOT/bin/fm-spawn.sh" "$id" --relaunch --dashboard-recovery > "$home/spoof-spawn.out" 2>&1 &
+  spawn_pid=$!
+  attempts=0
+  while kill -0 "$spawn_pid" 2>/dev/null && [ "$attempts" -lt 30 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ -e "$home/launch-literal" ] || ! kill -0 "$spawn_pid" 2>/dev/null; then
+    : > "$home/holder-release"
+    wait "$holder_pid" || true
+    : > "$home/release-literal"
+    wait "$spawn_pid" || true
+    fail "an unrelated preflight lock holder bypassed recovery serialization"
+  fi
+  : > "$home/holder-release"
+  wait "$holder_pid" || fail "could not release independent preflight lock"
+  attempts=0
+  while [ ! -e "$home/launch-literal" ] && [ "$attempts" -lt 100 ]; do
+    sleep 0.01
+    attempts=$((attempts + 1))
+  done
+  if [ ! -e "$home/launch-literal" ]; then
+    : > "$home/release-literal"
+    wait "$spawn_pid" || true
+    fail "recovery did not continue after the independent lock released"
+  fi
+  : > "$home/release-literal"
+  wait "$spawn_pid"
+  status=$?
+  [ "$status" -eq 0 ] || fail "serialized recovery did not complete: $(cat "$home/spoof-spawn.out")"
   pass "recovery holds preflight approval through replacement command submission"
 }
 
@@ -1194,6 +1252,47 @@ test_dashboard_recovery_defers_preflight_approval() {
   [ "$(cat "$spawn_log")" = invoked ] || fail "approved preflight did not launch recovery"
   [ ! -e "$record" ] || fail "successful recovery left a failure record"
   pass "dashboard defers awaiting preflight recovery without consuming attempts"
+}
+
+test_dashboard_recovery_refuses_missing_preflight() {
+  local home state_bin agent_bin spawn_bin case_name recovery_pid attempts status out
+  for case_name in missing-directory missing-record; do
+    home="$TMP_ROOT/dashboard-recovery-$case_name"
+    state_bin="$TMP_ROOT/dashboard-recovery-$case_name-state"
+    agent_bin="$TMP_ROOT/dashboard-recovery-$case_name-agent"
+    spawn_bin="$TMP_ROOT/dashboard-recovery-$case_name-spawn"
+    mkdir -p "$home/data" "$home/state"
+    chmod 700 "$home/data"
+    if [ "$case_name" = missing-record ]; then
+      mkdir "$home/data/dash-missing"
+      chmod 700 "$home/data/dash-missing"
+    fi
+    printf '%s\n' 'kind=ship' 'backend=tmux' 'window=main:worker' 'preflight_fingerprint=0000000000000000000000000000000000000000000000000000000000000000' > "$home/state/dash-missing.meta"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf "state: unknown · source: endpoint · confirmed endpoint loss\\n"' > "$state_bin"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf dead' > "$agent_bin"
+    printf '%s\n' '#!/usr/bin/env bash' 'printf invoked >> "$FM_RECOVERY_SPAWN_LOG"' 'exit 0' > "$spawn_bin"
+    chmod +x "$state_bin" "$agent_bin" "$spawn_bin"
+    FM_RECOVERY_SPAWN_LOG="$home/spawn.log" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" FM_DASHBOARD_RECOVERY_STATE_BIN="$state_bin" FM_DASHBOARD_RECOVERY_AGENT_STATE_BIN="$agent_bin" FM_DASHBOARD_RECOVERY_SPAWN_BIN="$spawn_bin" "$ROOT/bin/fm-dashboard-recovery.sh" observe dash-missing > "$home/recovery.out" 2>&1 &
+    recovery_pid=$!
+    attempts=0
+    while kill -0 "$recovery_pid" 2>/dev/null && [ "$attempts" -lt 100 ]; do
+      sleep 0.01
+      attempts=$((attempts + 1))
+    done
+    if kill -0 "$recovery_pid" 2>/dev/null; then
+      kill -TERM "$recovery_pid" 2>/dev/null || true
+      wait "$recovery_pid" || true
+      fail "$case_name recovery waited for a preflight lock that cannot exist"
+    fi
+    if wait "$recovery_pid"; then status=0; else status=$?; fi
+    out=$(< "$home/recovery.out")
+    [ "$status" -ne 0 ] || fail "$case_name recovery accepted a missing preflight"
+    assert_contains "$out" "no valid private preflight record" "$case_name recovery did not identify the missing preflight"
+    [ ! -e "$home/spawn.log" ] || fail "$case_name recovery launched a replacement"
+    [ ! -e "$home/data/dash-missing/.ship-preflight.lock" ] && [ ! -L "$home/data/dash-missing/.ship-preflight.lock" ] \
+      || fail "$case_name recovery created a preflight lock"
+  done
+  pass "dashboard recovery fails closed for missing preflights"
 }
 
 test_dashboard_recovery_serializes_preflight_publication() {
@@ -1677,6 +1776,7 @@ test_dashboard_busy_events_replay_interrupted_transitions
 test_dashboard_replays_spawn_busy_event_across_metadata_updates
 test_dashboard_recovery_surfaces_only_exhausted_loss
 test_dashboard_recovery_defers_preflight_approval
+test_dashboard_recovery_refuses_missing_preflight
 test_dashboard_recovery_serializes_preflight_publication
 test_dashboard_recovery_signal_exits_without_recording_attempts
 test_dashboard_recovery_cancels_unregistered_spawn

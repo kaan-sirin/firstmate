@@ -2045,6 +2045,7 @@ if [ "$KIND" = ship ] && [ -n "${PREFLIGHT_FINGERPRINT:-}" ]; then
   SPAWN_PREFLIGHT_LOCK="$DATA/$ID/.ship-preflight.lock"
   if [ "$DASHBOARD_RECOVERY" = 1 ] \
      && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK:-}" = "$SPAWN_PREFLIGHT_LOCK" ] \
+     && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER:-}" = "${PPID:-}" ] \
      && [ "${FM_DASHBOARD_RECOVERY_PREFLIGHT_LOCK_OWNER:-}" = "$(cat "$SPAWN_PREFLIGHT_LOCK/pid" 2>/dev/null || true)" ]; then
     SPAWN_PREFLIGHT_LOCK_EXTERNAL=1
   else
