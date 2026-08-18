@@ -23,7 +23,7 @@ MAX_AGE=${FM_SHIP_PREFLIGHT_MAX_AGE:-86400}
 # shellcheck source=bin/fm-ship-preflight-lib.sh
 . "$SCRIPT_DIR/fm-ship-preflight-lib.sh"
 
-usage() { sed -n '2,8p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
+usage() { sed -n '2,10p' "$0" | sed -e 's/^#$//' -e 's/^# //'; }
 die() { echo "fm-ship-end-to-end: $*" >&2; exit 1; }
 sha256_text() { if command -v sha256sum >/dev/null 2>&1; then printf '%s' "$1" | sha256sum | awk '{print $1}'; else printf '%s' "$1" | shasum -a 256 | awk '{print $1}'; fi; }
 mode_of() { if [ "$(uname -s)" = Darwin ]; then stat -f %Lp "$1"; else stat -c %a "$1"; fi; }

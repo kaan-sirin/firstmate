@@ -1,7 +1,8 @@
 ---
 name: ship-end-to-end
 description: >-
-  Run FirstMate's approved two-phase end-to-end software shipping workflow. Use before dispatching a direct or Relay-originated software ship task: one read-only preflight, one explicit approval, then autonomous execution through the selected delivery path.
+  Run FirstMate's approved two-phase end-to-end software shipping workflow.
+  Use before dispatching a direct or Relay-originated software ship task: one read-only preflight, one explicit approval, then autonomous execution through the selected delivery path.
 metadata:
   internal: true
 ---
@@ -24,7 +25,7 @@ Do not ask obvious questions.
 
 Create a JSON contract with these fields: `recommendation`, `outcome`, `scope`, `non_goals`, `delivery_boundary`, `external_boundaries`, and `questions`.
 For a complete plan that the captain explicitly approved, set `complete_plan_approved` to `true`.
-Send the complete typed record through the Agent bridge's private submission path.
+For Agent bridge work, send the complete typed record through the bridge's private submission path.
 For direct work, publish an awaiting-approval record.
 After one explicit approval, replace it with an approved record with the same fingerprint.
 If the captain corrects the contract, publish a new awaiting-approval record with its new fingerprint and wait for an explicit approval of that record.
@@ -34,7 +35,9 @@ Do not provide Slack origin, contract, authority, evidence, identity, or approva
 
 ## Phase 2 - approved execution
 
-The durable preflight record declares this workflow. Before initial dispatch or recovery, `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint. A missing approval record or fingerprint, corrected record, stale approval, or fingerprint mismatch fails closed.
+The durable preflight record declares this workflow.
+Before initial dispatch or recovery, `fm-spawn.sh` verifies its current approved fingerprint before it creates an endpoint.
+A missing approval record or fingerprint, corrected record, stale approval, or fingerprint mismatch fails closed.
 
 Then execute autonomously in an isolated worktree.
 Keep normal engineering choices inside the approved contract.
@@ -43,4 +46,6 @@ Do not merge.
 
 Ask again only for a new authority requirement, serious irreversible risk, agreed-outcome change, or a security, privacy, legal, or data-loss decision.
 Production writes, deployments, external communication, destructive work, and data changes keep their own authority gates.
-A captain status or progress question is informational, not a stop instruction. Answer it, then continue the approved run through its current completion gate. Stop only for an explicit pause or cancel, a changed finish line, a required authority decision, or a genuine external blocker.
+A captain status or progress question is informational, not a stop instruction.
+Answer it, then continue the approved run through its current completion gate.
+Stop only for an explicit pause or cancel, a changed finish line, a required authority decision, or a genuine external blocker.
