@@ -165,9 +165,9 @@ The helper's header owns exact parsing, publication, and report output mechanics
 
 ## Worker capacity (config/max-active-workers)
 
-`config/max-active-workers` is an optional primary-authoritative admission limit for concurrently live direct-report endpoints in one FirstMate home. It prevents a burst of otherwise independent agent work from exhausting a small host's memory.
+`config/max-active-workers` is an optional primary-authoritative admission limit for concurrently live direct-report endpoints on one local FirstMate host. It prevents a burst of otherwise independent agent work from exhausting a small host's memory.
 When absent, the historical unlimited behavior remains. To enable the guard, write one positive base-10 integer from `1` through `999`, followed by one newline, in a regular single-linked file beneath a non-symlinked `config/` directory.
-`fm-spawn.sh` reads the value while it holds the task-set lock, before it creates a new endpoint. It keeps a pending reservation after it submits a launch command, until the endpoint is not proven `dead` or `missing`. It counts all recorded endpoints except those proven `dead` or `missing`; an `alive`, `ambiguous`, `unreadable`, or unverified endpoint consumes a slot. A malformed file or an unprovable count refuses the new spawn rather than treating the host as unlimited.
+`fm-spawn.sh` reads the value while it holds the host admission lock, before it creates a new endpoint. It keeps a pending reservation after it submits a launch command, until the endpoint is not proven `dead` or `missing`. It counts all recorded endpoints in the primary home and its local secondmate homes except those proven `dead` or `missing`; an `alive`, `ambiguous`, `unreadable`, or unverified endpoint consumes a slot. A malformed file or an unprovable count refuses the new spawn rather than treating the host as unlimited.
 The setting is inherited into secondmate homes under the primary-authoritative contract owned by [`secondmate-provisioning`](../.agents/skills/secondmate-provisioning/SKILL.md). A full limit makes the spawn return an actionable queue-or-wait error; it does not terminate work already running.
 
 ## Secondmate routes (data/secondmates.md)

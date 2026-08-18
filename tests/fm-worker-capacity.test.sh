@@ -11,6 +11,7 @@ TMP_ROOT=$(fm_test_tmproot fm-worker-capacity)
 # interface consumes these same two backend functions from fm-backend.sh.
 fm_backend_of_meta() { printf 'tmux'; }
 fm_backend_target_of_meta() { sed -n 's/^window=//p' "$1" | tail -1; }
+fm_meta_get() { sed -n "s/^$2=//p" "$1" | tail -1; }
 fm_backend_agent_state() {
   case "$2" in
     alive) printf alive ;;
@@ -144,6 +145,39 @@ EOF
   [ "$status" -ne 0 ] || fail "spawn started despite a full worker limit"
   assert_contains "$out" "worker capacity reached (1/1 active)" "spawn refusal did not report the capacity state"
   pass "fm-spawn refuses a new worker when the configured limit is full"
+}
+
+test_local_secondmate_uses_primary_host_capacity() {
+  local dir="$TMP_ROOT/host-capacity" primary child fakebin out status
+  dir="$TMP_ROOT/host-capacity"
+  primary="$dir/primary"
+  child="$dir/child"
+  fakebin="$dir/fakebin"
+  mkdir -p "$primary/state" "$primary/config" "$child/state" "$child/config" "$fakebin"
+  : > "$child/.fm-secondmate-home"
+  printf '1\n' > "$primary/config/max-active-workers"
+  printf '1\n' > "$child/config/max-active-workers"
+  cat > "$primary/state/secondmate.meta" <<EOF
+window=firstmate:secondmate
+endpoint_task_id=secondmate
+home=$child
+kind=secondmate
+EOF
+  printf '%s\n' \
+    '#!/usr/bin/env bash' \
+    'case "$*" in' \
+    '  *list-windows*) printf "%s\\n" secondmate ;;' \
+    '  *pane_current_command*) printf "%s\\n" codex ;;' \
+    '  *) : ;;' \
+    'esac' > "$fakebin/tmux"
+  chmod +x "$fakebin/tmux"
+  out=$(PATH="$fakebin:$PATH" FM_HOME="$child" FM_ROOT_OVERRIDE="$ROOT" \
+    FM_WORKER_CAPACITY_HOST_STATE="$primary/state" FM_SPAWN_NO_GUARD=1 \
+    "$ROOT/bin/fm-spawn.sh" candidate /unused codex --mode no-mistakes --yolo off 2>&1)
+  status=$?
+  [ "$status" -ne 0 ] || fail "secondmate started despite a full primary host limit"
+  assert_contains "$out" "worker capacity reached (1/1 active)" "secondmate did not use the primary host capacity"
+  pass "local secondmates share the primary host worker capacity"
 }
 
 make_pending_launch_fakebin() {
@@ -357,6 +391,7 @@ test_unsafe_config_directory_refuses_limit_lookup
 test_inherited_limit_rejects_unsafe_endpoints
 test_only_proven_dead_workers_free_slots
 test_spawn_refuses_when_capacity_is_full
+test_local_secondmate_uses_primary_host_capacity
 test_relaunch_respects_worker_capacity
 test_post_enter_launch_keeps_capacity_reserved
 test_interrupted_submit_keeps_capacity_reserved
