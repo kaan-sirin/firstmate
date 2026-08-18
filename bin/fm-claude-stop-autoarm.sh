@@ -78,10 +78,13 @@ esac
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-session-lock-lib.sh
 . "$SCRIPT_DIR/fm-session-lock-lib.sh"
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 # Consume the Stop payload once. The decisions below are state-based; the
 # payload is read so a slow writer can never wedge on a full pipe.
-cat >/dev/null 2>&1 || true
+PAYLOAD=$(cat 2>/dev/null || true)
+fm_hook_payload_is_cursor "$PAYLOAD" && exit 0
 
 # --- scope: genuine primary checkout only -----------------------------------
 fm_primary_scope_matches "$FM_ROOT" "$STATE" || exit 0

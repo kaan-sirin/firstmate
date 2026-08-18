@@ -111,7 +111,7 @@ daemon_lock_held_by_live_daemon() {
 }
 
 fm_afk_flag_write() {  # <state-dir>
-  local state=$1 lock="$1/.cursor-park-owner.lock" pending attempt=0 status=1
+  local state=$1 lock="$1/.afk.lock" pending attempt=0 status=1
   mkdir -p "$state" || return 1
   [ ! -d "$state/.afk" ] || return 1
   pending=$(mktemp "$state/.afk.pending.XXXXXX") || return 1

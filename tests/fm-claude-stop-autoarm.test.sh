@@ -31,6 +31,7 @@ install_autoarm_scripts() {
   cp "$ROOT/bin/fm-supervision-lib.sh" "$dir/bin/fm-supervision-lib.sh"
   cp "$ROOT/bin/fm-wake-lib.sh" "$dir/bin/fm-wake-lib.sh"
   cp "$ROOT/bin/fm-session-lock-lib.sh" "$dir/bin/fm-session-lock-lib.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-cursor-lib.sh" "$dir/bin/fm-cursor-lib.sh"
   cp "$ROOT/bin/fm-lock.sh" "$dir/bin/fm-lock.sh"
   chmod +x "$dir/bin/fm-claude-stop-autoarm.sh" "$dir/bin/fm-lock.sh"
@@ -68,8 +69,8 @@ make_crewmate_worktree_dir() {
 # session lock. $1 = fixture dir. Any extra env assignments must be exported
 # before invocation. Captures stdout+stderr; exit code on stdout of the caller.
 run_autoarm() {
-  local dir=$1 rc=0
-  printf '%s\n' '{"session_id":"sess-autoarm","stop_hook_active":false}' \
+  local dir=$1 payload=${2:-'{"session_id":"sess-autoarm","stop_hook_active":false}'} rc=0
+  printf '%s\n' "$payload" \
     | FM_HOME="$dir" "$FAKE_CLAUDE" -c '
         printf "%s\n" "$$" > "$FM_HOME/state/.lock"
         "$FM_HOME/bin/fm-claude-stop-autoarm.sh"
@@ -258,6 +259,18 @@ test_inert_when_afk() {
   assert_present "$dir/state/.claude-autoarm-failure-notified" "AFK without positive recovery reset the failure notice"
   assert_present "$dir/state/.claude-autoarm-failure-alarmed" "AFK without positive recovery reset the attended alarm"
   pass "auto-arm: inert while AFK owns supervision"
+}
+
+test_cursor_payload_is_silent() {
+  local dir out status
+  dir=$(make_primary_dir "$TMP_ROOT/cursor-payload")
+  : > "$dir/state/task.meta"
+  write_arm_fixture "$dir" actionable
+  out=$(run_autoarm "$dir" '{"cursor_version":"2026.08.11","stop_hook_active":false}' 2>/dev/null); status=$?
+  expect_code 0 "$status" "Cursor compatibility payload"
+  [ -z "$out" ] || fail "Cursor compatibility payload produced output: $out"
+  [ ! -e "$dir/state/arm-ran" ] || fail "Cursor compatibility payload started the auto-arm"
+  pass "auto-arm: Cursor compatibility payload is silent"
 }
 
 test_stale_lock_recovery_preserves_afk_and_need_gates() {
@@ -581,6 +594,7 @@ test_inert_without_session_lock
 test_reclaims_stale_session_lock_before_arming
 test_inert_when_lock_held_by_other_harness
 test_inert_when_afk
+test_cursor_payload_is_silent
 test_stale_lock_recovery_preserves_afk_and_need_gates
 test_resolves_outermost_claude_pid_in_nested_bgspare_chain
 test_inert_when_fleet_idle

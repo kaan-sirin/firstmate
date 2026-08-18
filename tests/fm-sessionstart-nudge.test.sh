@@ -419,6 +419,7 @@ test_pi_large_sessionstart_digest_is_delivered_loudly() {
   cp "$ROOT/.pi/extensions/lib/fm-operational-input.ts" "$fixture/.pi/extensions/lib/"
   cp "$ROOT/bin/fm-sessionstart-run.sh" "$ROOT/bin/fm-sessionstart-nudge.sh" \
     "$ROOT/bin/fm-primary-scope-lib.sh" "$ROOT/bin/fm-gate-refuse-lib.sh" \
+    "$ROOT/bin/fm-hook-host-lib.sh" \
     "$ROOT/bin/fm-operational-input.sh" "$fixture/bin/"
   cat > "$fixture/bin/fm-session-start.sh" <<'SH'
 #!/usr/bin/env bash
@@ -492,6 +493,16 @@ test_run_reads_source_from_the_hook_payload() {
   pass "run wrapper: the hook payload's source field drives routing with no explicit argument"
 }
 
+test_run_cursor_payload_is_silent() {
+  local root="$TMP_ROOT/run-cursor-payload" out status=0
+  make_run_primary "$root"
+  out=$(printf '{"cursor_version":"2026.08.11","source":"startup"}' | run_hook "$root") || status=$?
+  expect_code 0 "$status" "run wrapper Cursor payload"
+  [ -z "$out" ] || fail "a Cursor compatibility payload started a session: $out"
+  assert_absent "$root/state/.lock" "a Cursor compatibility payload acquired the session lock"
+  pass "run wrapper: Cursor compatibility payload is silent"
+}
+
 test_run_unknown_source_takes_the_helm() {
   local root="$TMP_ROOT/run-unknown" out status=0
   make_run_primary "$root"
@@ -548,6 +559,7 @@ test_run_clear_without_completion_finishes_startup
 test_run_clear_rejects_previous_owner_completion
 test_run_resume_delegates_to_the_nudge
 test_run_reads_source_from_the_hook_payload
+test_run_cursor_payload_is_silent
 test_run_unknown_source_takes_the_helm
 test_run_gate_and_scope_are_silent
 test_run_reports_a_failed_session_start_as_digest_text

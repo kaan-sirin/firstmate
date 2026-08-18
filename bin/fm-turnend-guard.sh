@@ -86,6 +86,8 @@ done
 . "$SCRIPT_DIR/fm-supervision-lib.sh"
 # shellcheck source=bin/fm-primary-scope-lib.sh
 . "$SCRIPT_DIR/fm-primary-scope-lib.sh"
+# shellcheck source=bin/fm-hook-host-lib.sh
+. "$SCRIPT_DIR/fm-hook-host-lib.sh"
 
 # Read the whole turn-end hook payload once; never block on unreadable/absent
 # stdin.
@@ -96,6 +98,8 @@ PAYLOAD=$(cat 2>/dev/null || true)
 # "missing jq -> silent no-op" degrade). Without it we cannot safely read the
 # loop-guard field, so we must never block - fail open, not noisy.
 command -v jq >/dev/null 2>&1 || exit 0
+
+fm_hook_payload_is_cursor "$PAYLOAD" && exit 0
 
 STOP_HOOK_ACTIVE=$(printf '%s' "$PAYLOAD" | jq -r '
   if type != "object" then error("payload")

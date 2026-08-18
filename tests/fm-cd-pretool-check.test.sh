@@ -27,6 +27,7 @@ install_cd_scripts() {
   local dir=$1
   mkdir -p "$dir/bin"
   cp "$ROOT/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-pretool-check.sh"
+  cp "$ROOT/bin/fm-hook-host-lib.sh" "$dir/bin/fm-hook-host-lib.sh"
   cp "$ROOT/bin/fm-cd-command-policy.mjs" "$dir/bin/fm-cd-command-policy.mjs"
   cp "$ROOT/bin/fm-arm-command-policy.mjs" "$dir/bin/fm-arm-command-policy.mjs"
   chmod +x "$dir/bin/fm-cd-pretool-check.sh" "$dir/bin/fm-cd-command-policy.mjs"
@@ -299,6 +300,15 @@ test_fail_open_unparseable_json() {
   pass "cd-guard: fails open on unparseable stdin JSON"
 }
 
+test_cursor_payload_is_silent() {
+  local out rc
+  out=$(printf '%s' '{"cursor_version":"2026.08.11","tool_input":{"command":"cd projects/foo"}}' | "$CHECK" 2>&1)
+  rc=$?
+  expect_code 0 "$rc" "Cursor compatibility payload must be silent"
+  [ -z "$out" ] || fail "Cursor compatibility payload produced output: $out"
+  pass "cd-guard: Cursor compatibility payload is silent"
+}
+
 test_fail_open_missing_node() {
   local fakebin tool tool_path out rc
   fakebin=$(fm_fakebin "$TMP_ROOT/nonode")
@@ -392,6 +402,7 @@ test_inert_when_not_a_git_repo
 test_e2e_cwd_leak_regression
 test_fail_open_empty_stdin
 test_fail_open_unparseable_json
+test_cursor_payload_is_silent
 test_fail_open_missing_node
 test_fail_open_missing_jq_on_stdin
 test_prefilter_skips_node_without_cd_substring
